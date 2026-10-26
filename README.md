@@ -1,6 +1,12 @@
+<p align="center"><img src="assets/icon.png" alt="Hivegrid logo" width="128"></p>
+
 # Hivegrid
 
 A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi) AI coding agents side by side in a pane grid, with per-agent state visible at a glance.
+
+![Hivegrid UI with sidebar and main-side layout](assets/screenshots/hivegrid-ui.png)
+
+![Nine omp sessions in a 3x3 grid](assets/screenshots/hivegrid-agents.png)
 
 ## Features
 
@@ -10,10 +16,10 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 - Resize, pane and broadcast key tables, and an equalize command that evens out all dividers.
 - Broadcast mode that types into every pane of the tab, with a visible `BROADCAST` marker.
 - System stats in the header: CPU, RAM, disk, GPU.
-- Claude Code usage (5h and 7d windows) for up to three accounts.
+- Claude Code usage (5h and 7d windows) for up to three accounts as a three-block header chip, with a selector for the details.
 - Left sidebar with a yazi file explorer or lazygit, toggled by key or by clicking its handle.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
-- Dark theme, integrated window buttons, dimmed inactive panes.
+- Dark-blue theme with raised tabs, a `HIVEGRID` header pill, wide padding, and dimmed inactive panes.
 
 ## Install
 
@@ -48,7 +54,8 @@ The installer copies `config/` to `~/.config/wezterm/`, `bin/` to `~/.local/bin/
 | Sidebar | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | | `LEADER+Tab` | hide or show, remembering the view |
 | Misc | `Ctrl+C` / `Ctrl+V` | smart copy or interrupt / paste |
-| | `Alt+s` / `Alt+q` | toggle system stats / Claude quota |
+| | `Alt+s` | toggle system stats |
+| | `Alt+q` | Claude quota selector with all accounts; `LEADER+q` hides or shows the header chip |
 | | `Ctrl+Shift+R` | reload config |
 
 ## Grid launcher
@@ -73,6 +80,7 @@ omp-grid --layout columns 4 --tab --dirs ~/a,~/b  # new tab, 4 columns, director
 - omp state detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
 - The sidebar takes the full window height only in a single-pane tab; in a grid it is docked beside the leftmost pane.
 - `Ctrl+V` paste is not fanned out in broadcast mode, because the clipboard is not readable from Lua.
+- Window opacity is 0.94; it only shows with a compositing window manager, and WezTerm 20240203 has no blur on Wayland.
 
 ## License
 
