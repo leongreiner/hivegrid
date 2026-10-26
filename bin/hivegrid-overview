@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Hivegrid overview dock: a live list of the agent panes of one tab.
+
+Runs in a narrow pane at the right edge of the tab (LEADER+o opens and closes it; see
+config/overview.lua). The WezTerm config writes the state of every grid pane to
+$XDG_RUNTIME_DIR/hivegrid-overview-$WEZTERM_PANE.json about once a second; this program only
+draws it. Per pane: number (the minimap digit), state glyph, directory, how long it has been in
+that state, and omp's session title. A click on a row, or its digit on the keyboard, jumps to
+that pane (user var hivegrid_overview_goto, handled by the config). q or Esc closes the dock.
+
+Usage: hivegrid-overview [--file PATH] [--dump COLSxROWS]
+  --file PATH        read the state from PATH instead of the pane's own file
+  --dump COLSxROWS   print the rendering as plain text and exit (no terminal needed)
+"""
+import base64
+import json
+import os
+import select
+import signal
+import sys
+import termios
+import time
+import tty
+import unicodedata
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from hivegrid_ui import BOLD, DIM, Canvas, decode  # noqa: E402
+
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+ORDER = ("ask", "bell", "finished", "waiting", "working", "exited", "idle")
+DEFAULT_PAL = {
+    "deep": "#070d19", "base": "#0b1220", "text": "#c9d6ee", "bright": "#eaf1ff", "muted": "#8a9cc2",
+    "dim": "#7487ad", "accent": "#4f9dff", "raised": "#1d3a70", "border": "#1e2a45",
+}
+
+
+def state_path():
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return f"{runtime}/hivegrid-overview-{os.environ.get('WEZTERM_PANE', '0')}.json"
+
+
+def load(path):
+    """The state document, or None while the config has not written it (or it is unreadable)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) and isinstance(doc.get("panes"), list) else None
+
+
+def clean(text):
+    """Titles carry emoji, which take two cells while the canvas counts one per character: drop
+    them (and the joiners and variation selectors that go with them) so rows keep their alignment."""
+    out = []
+    for ch in str(text):
+        if ord(ch) >= 0x1F000 or unicodedata.east_asian_width(ch) in ("W", "F"):
+            continue
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf", "Cc"):
+            continue
+        out.append(ch)
+    return " ".join("".join(out).split())
+
+
+def fit(text, n):
+    return text if len(text) <= n else text[: max(n - 1, 0)] + "…"
+
+
+def human(secs):
+    secs = int(max(secs, 0))
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h{secs % 3600 // 60:02d}m"
+    return f"{secs // 86400}d{secs % 86400 // 3600:02d}h"
+
+
+def render(doc, w, h, now, goto=None, equalize=None):
+    """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
+    equalize() by a click on the ▦ button."""
+    pal = dict(DEFAULT_PAL)
+    pal.update((doc or {}).get("pal") or {})
+    cv = Canvas(w, h, pal["text"], pal["base"])
+    cv.fill(0, 0, w, 1, bg=pal["deep"])
+    cv.put(1, 0, "⬡ Overview", pal["accent"], pal["deep"], BOLD)
+    cv.fill(0, 1, w, 1, bg=pal["base"], fg=pal["border"], ch="─")
+    if doc is None:
+        cv.put(1, 3, "waiting for Hivegrid…", pal["muted"])
+        return cv
+    panes = doc["panes"]
+
+    # Header right: the equalize button, left of it the number of panes per state in state
+    # colour.
+    x = w - 1
+    if equalize:
+        x -= 3
+        cv.put(x, 0, " ▦ ", pal["bright"], pal["raised"], BOLD)
+        cv.hit(x, 0, 3, 1, lambda button: equalize())
+        x -= 1
+    seen = {}
+    for p in panes:
+        seen.setdefault(p["kind"], [p["glyph"], p["color"], 0])[2] += 1
+    for kind in sorted(seen, key=lambda k: ORDER.index(k) if k in ORDER else len(ORDER), reverse=True):
+        glyph, color, n = seen[kind]
+        text = f"{glyph}{n}"
+        if x - len(text) - 1 < 12:
+            break
+        x -= len(text)
+        cv.put(x, 0, text, color, pal["deep"])
+        x -= 1
+
+    rows_per = 1
+    avail = h - 3  # header, rule, hint line
+    for per in (3, 2):  # two lines and a blank, or two lines
+        if len(panes) * per - (1 if per == 3 else 0) <= avail:
+            rows_per = per
+            break
+    two_lines = rows_per > 1
+    shown = max(avail // rows_per, 1) if panes else 0
+    hidden = max(len(panes) - shown, 0)
+    if hidden:  # keep the last line for the "+n more" note
+        shown = max((avail - 1) // rows_per, 1)
+        hidden = len(panes) - shown
+
+    frame = int(now * 8) % len(SPINNER)
+    y = 2
+    for p in panes[:shown]:
+        active = bool(p.get("active"))
+        bg = pal["raised"] if active else pal["base"]
+        lines = 2 if two_lines else 1
+        cv.fill(0, y, w, lines, bg=bg)
+        if active:
+            cv.fill(0, y, 1, lines, fg=pal["accent"], ch="▎")
+        glyph = SPINNER[frame] if p["kind"] == "working" else p["glyph"]
+        cv.put(2, y, glyph, p["color"], bg, BOLD)
+        cv.put(4, y, str(p["num"]), pal["accent"] if active else pal["muted"], bg, BOLD)
+        age = human(now - p["since"]) if p.get("since") else ""
+        right = f"{p['text']} {age}".strip()
+        name = clean(p.get("name") or "") or clean(p.get("proc") or "") or "?"
+        zoom = " ⤢" if p.get("zoomed") else ""
+        room = w - 7 - 1
+        if len(right) + 1 + len(name) + len(zoom) > room:
+            right = age  # the state word goes first when the dock is narrow
+        name = fit(name, max(room - len(right) - 1 - len(zoom), 3))
+        cv.put(6, y, name + zoom, pal["bright"] if active else pal["text"], bg, BOLD if active else 0)
+        cv.put(w - 1 - len(right), y, right, p["color"], bg)
+        if two_lines:
+            title = clean(p.get("title") or "")
+            proc = clean(p.get("proc") or "")
+            detail = title if title and title != name else proc
+            cv.put(6, y + 1, fit(detail, w - 7), pal["muted"], bg)
+        if goto:
+            cv.hit(0, y, w, lines, lambda button, pid=p["id"]: goto(pid))
+        y += rows_per
+    if hidden:
+        cv.put(2, h - 2, f"+{hidden} more", pal["dim"])
+    cv.put(1, h - 1, fit("1-9 jump · e equalize · q", w - 2), pal["dim"], pal["base"], DIM)
+    return cv
+
+
+def dump(cv):
+    return ["".join(c[0] for c in row).rstrip() for row in cv.cells]
+
+
+class Dock:
+    def __init__(self, path):
+        self.path = path
+        self.doc = None
+        self.mtime = None
+        self.fd = sys.stdin.fileno()
+        self.out = sys.stdout
+        self.running = True
+        self.last = None
+        self.cv = None
+        self.serial = 0
+
+    def reload(self):
+        try:
+            mtime = os.stat(self.path).st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime != self.mtime:
+            self.mtime = mtime
+            self.doc = load(self.path) if mtime is not None else None
+
+    def request(self, name, payload):
+        """Asks the config (user var) to act; the serial makes every request a change."""
+        self.serial += 1
+        value = base64.b64encode(f"{payload}:{self.serial}".encode()).decode()
+        self.out.write(f"\x1b]1337;SetUserVar={name}={value}\x07")
+        self.out.flush()
+
+    def goto(self, pane_id):
+        self.request("hivegrid_overview_goto", pane_id)
+
+    def equalize(self, *_):
+        self.request("hivegrid_overview_equalize", "")
+
+    def number(self, n):
+        for p in (self.doc or {}).get("panes", []):
+            if p.get("num") == n:
+                self.goto(p["id"])
+                return
+
+    def handle(self, ev):
+        if ev[0] == "mouse":
+            _, action, button, x, y = ev
+            if action == "press" and button == "left" and self.cv:
+                fn = self.cv.hit_at(x, y)
+                if fn:
+                    fn(button)
+            return
+        _, mods, key = ev
+        if not mods and key in ("q", "Escape"):
+            self.running = False
+        elif not mods and key == "e":
+            self.equalize()
+        elif not mods and len(key) == 1 and key in "123456789":
+            self.number(int(key))
+
+    def draw(self, size):
+        cols, rows = size
+        now = time.time()
+        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize)
+        frame = "\x1b[?25l" + self.cv.render()
+        if frame != self.last:
+            self.out.write(frame)
+            self.out.flush()
+            self.last = frame
+
+    def run(self):
+        old = termios.tcgetattr(self.fd)
+        try:
+            tty.setraw(self.fd)
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+            self.out.flush()
+            signal.signal(signal.SIGWINCH, lambda *_: None)
+            while self.running:
+                self.reload()
+                try:
+                    size = os.get_terminal_size(self.out.fileno())
+                    size = (size.columns, size.lines)
+                except OSError:
+                    size = (30, 24)
+                self.draw(size)
+                busy = any(p.get("kind") == "working" for p in (self.doc or {}).get("panes", []))
+                r, _, _ = select.select([self.fd], [], [], 0.125 if busy else 0.5)
+                if r:
+                    data = os.read(self.fd, 4096)
+                    if not data:
+                        break
+                    for ev in decode(data):
+                        self.handle(ev)
+        finally:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
+            self.out.write("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+            self.out.flush()
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    path, dump_size = None, None
+    while argv:
+        a = argv.pop(0)
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--file" and argv:
+            path = argv.pop(0)
+        elif a == "--dump" and argv:
+            try:
+                cols, rows = argv.pop(0).lower().split("x")
+                dump_size = (int(cols), int(rows))
+            except ValueError:
+                print("hivegrid-overview: --dump takes COLSxROWS", file=sys.stderr)
+                return 2
+        else:
+            print(f"hivegrid-overview: unknown argument {a!r} (see --help)", file=sys.stderr)
+            return 2
+    path = path or state_path()
+    if dump_size:
+        print("\n".join(dump(render(load(path), *dump_size, time.time(), lambda _: None, lambda: None))))
+        return 0
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("hivegrid-overview: needs a terminal (--dump prints one frame)", file=sys.stderr)
+        return 2
+    # A closed pane sends SIGHUP; leave through the normal path so the terminal is restored.
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, lambda *_: sys.exit(0))
+    Dock(path).run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

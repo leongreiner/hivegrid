@@ -20,7 +20,7 @@ copy() { # src dst
 }
 
 for f in "$cfg"/*.lua; do copy "$f" "$repo/config/$(basename "$f")"; done
-for f in omp-grid claude-quota omp-switch hivegrid-panel hivegrid-git hivegrid_repos.py hivegrid_ui.py hivegrid_panels.py hivegrid_settings_core.py; do copy "$bindir/$f" "$repo/bin/$f"; done
+for f in omp-grid claude-quota omp-switch hivegrid-panel hivegrid-git hivegrid-overview hivegrid_repos.py hivegrid_ui.py hivegrid_panels.py hivegrid_settings_core.py; do copy "$bindir/$f" "$repo/bin/$f"; done
 copy "$icon" "$repo/assets/icon.png"
 
 # Files removed from the live config must not linger in the repo.

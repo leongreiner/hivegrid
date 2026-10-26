@@ -95,6 +95,8 @@ BINDINGS = {
     "sidebar_files": ("Sidebar: files", "CTRL+f", "combo"),
     "sidebar_git": ("Sidebar: git", "CTRL+g", "combo"),
     "sidebar_toggle": ("Sidebar: toggle", "LEADER+Tab", "leader"),
+    "overview_toggle": ("Overview dock: toggle", "LEADER+o", "leader"),
+    "equalize": ("Equalize all panes", "CTRL+SHIFT+e", "combo"),
     "split_horizontal": ("Split side by side", "CTRL+SHIFT+|", "combo"),
     "split_vertical": ("Split top / bottom", "CTRL+SHIFT+_", "combo"),
     "quota_popup": ("Account launcher popup", "ALT+q", "combo"),

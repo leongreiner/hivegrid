@@ -386,17 +386,19 @@ return function(config, wezterm)
     return nil
   end
 
-  -- The pane to type into: the active one, or the last non-sidebar pane when the
-  -- sidebar has focus.
+  -- The pane to type into: the active one, or the last grid pane when the sidebar or the
+  -- overview dock has focus.
   local function target_pane(window, pane)
-    local is_sidebar = require('sidebar').is_sidebar
-    if not is_sidebar(pane:pane_id()) then return pane end
+    local is_dock = require('sidebar').is_dock
+    if not is_dock(pane:pane_id()) then return pane end
     local tab = window:active_tab()
-    local rec = (wezterm.GLOBAL.sidebar or {})[tostring(tab:tab_id())] or {}
+    local key = tostring(tab:tab_id())
+    local last = ((wezterm.GLOBAL.sidebar or {})[key] or {}).last
+      or ((wezterm.GLOBAL.overview or {})[key] or {}).last
     local first
     for _, p in ipairs(tab:panes()) do
-      if not is_sidebar(p:pane_id()) then
-        if p:pane_id() == rec.last then return p end
+      if not is_dock(p:pane_id()) then
+        if p:pane_id() == last then return p end
         first = first or p
       end
     end

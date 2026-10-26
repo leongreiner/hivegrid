@@ -1,14 +1,17 @@
 -- Left sidebar: file explorer (yazi) or git view (hivegrid-git: every repository of the
--- directory, lazygit in the one you pick) docked beside a narrow
--- handle pane. Wire: local sb = require('sidebar')(config, wezterm)
+-- directory, lazygit in the one you pick) docked beside a permanent
+-- narrow bar pane. Wire: local sb = require('sidebar')(config, wezterm)
 --   Ctrl+F explorer   Ctrl+G git view   LEADER+Tab hide/show, remembering the view
--- Layout is [handle][sidebar][leftmost pane...]: both are ordinary leaf splits of the
--- leftmost grid pane, so a killed sidebar's columns return to that pane. `--top-level`
--- is avoided: in WezTerm 20240203 it on a tab with 2+ panes leaves the pane tree
--- (cells + 1) columns wider than the window.
--- The handle script turns on mouse reporting, so WezTerm forwards clicks to it and
+-- The bar is permanent: every tab gets one (see ensure_handle), with buttons for the
+-- explorer, the git view and the settings panel.
+-- Layout is [bar][sidebar][leftmost pane...]: the view is an ordinary leaf split of the
+-- leftmost grid pane, so a killed sidebar's columns return to that pane. The view avoids
+-- `--top-level`: in WezTerm 20240203 it on a tab with 2+ panes leaves the pane tree
+-- (cells + 1) columns wider than the window. The bar uses it only on the Hivegrid build.
+-- The bar script turns on mouse reporting, so WezTerm forwards clicks to it and
 -- no mouse_bindings are needed; every default selection/link/bypass binding stays.
--- The script announces a left press as the user var `sidebar_toggle`.
+-- The script announces a left press on a button as the user var `sidebar_click`
+-- (files, git or settings, plus a salt so repeated clicks are changes).
 local M = {}
 
 local function build(config, wezterm)
@@ -24,25 +27,36 @@ local function build(config, wezterm)
   local theme = require 'theme'
   local COLORS = { accent = theme.P.accent, muted = theme.P.muted }
 
-  -- Runs inside the handle pane. State file: "<open|closed> <files|git>", written by
-  -- Lua, polled here so a resize (WINCH) or a state change redraws.
-  local HANDLE_SCRIPT = [==[
+  -- Runs inside the bar pane: three buttons (explorer, git, settings) drawn from the
+  -- state file "<open|closed> <files|git>", written by Lua and polled here so a resize
+  -- (WINCH) or a state change redraws. A left click announces the button as the user var
+  -- sidebar_click. Buttons are 3 rows tall: files rows 2-4, git 5-7, settings the 3 rows
+  -- above the last one; the open view's button is highlighted.
+  local ICONS = { FILES = utf8.char(0xf07c), GIT = utf8.char(0xe725), SETTINGS = utf8.char(0xf013) }
+  local HANDLE_SCRIPT = ([==[
 st="${XDG_RUNTIME_DIR:-/tmp}/wezterm-sidebar-$WEZTERM_PANE"
 trap 'rm -f "$st"' EXIT
 trap '' INT
 trap 'dirty=1' WINCH
 stty -echo
 printf '\e[?1049h\e[?25l\e[?7l\e[?1000h\e[?1006h'
+names=(files git settings) icons=(@FILES@ @GIT@ @SETTINGS@) E=$'\e'
 draw() {
-  local s=${1%% *} v=${1#* } r c g=▶ lab col='116;135;173' i out
+  local on= r c i y t bg fg mark out
+  [[ ${1%% *} == open ]] && on=${1#* }
   read -r r c < <(stty size </dev/tty)
-  [[ $s == open ]] && { g=◀; col='201;214;238'; }
-  [[ $v == git ]] && lab=GIT || lab=EXPLORER
-  out=$'\e[0m\e[48;2;15;26;48m\e[2J\e[2;2H\e[1;38;2;79;157;255m'$g
-  out+=$'\e[0;48;2;15;26;48;38;2;'$col'm'
-  for ((i = 0; i < ${#lab} && i + 5 < r; i++)); do out+=$'\e['$((4 + i))';2H'${lab:i:1}; done
-  out+=$'\e[0;48;2;7;13;25m'
-  for ((i = 1; i <= r; i++)); do out+=$'\e['$i';'$c'H '; done
+  out="$E[0m$E[48;2;15;26;48m$E[2J"
+  for i in 0 1 2; do
+    t=$((i == 2 ? r - 3 : 2 + 3 * i))
+    bg='15;26;48' fg='116;135;173' mark=' '
+    [[ ${names[i]} == "$on" ]] && { bg='29;58;112' fg='201;214;238'; mark=▎; }
+    for y in 0 1 2; do
+      out+="$E[$((t + y));1H$E[0;48;2;$bg;38;2;79;157;255m$mark "
+    done
+    out+="$E[$((t + 1));2H$E[0;1;48;2;$bg;38;2;${fg}m${icons[i]}"
+  done
+  out+="$E[0;48;2;7;13;25m"
+  for ((i = 1; i <= r; i++)); do out+="$E[$i;${c}H "; done
   printf %s "$out"
 }
 dirty=1 prev=
@@ -53,9 +67,16 @@ while :; do
   ((rc == 0)) || { ((rc > 128)) && continue; break; }
   [[ $k == $'\e' ]] || continue
   seq=; while IFS= read -rsn1 -t 0.05 ch; do seq+=$ch; [[ $ch == [Mm] ]] && break; done
-  [[ $seq == '[<0;'*M ]] && printf '\e]1337;SetUserVar=sidebar_toggle=%s\a' "$(printf %s "$RANDOM$SECONDS" | base64)"
+  [[ $seq == '[<0;'*M ]] || continue
+  y=${seq#*;}; y=${y#*;}; y=${y%M}
+  read -r r _ < <(stty size </dev/tty)
+  if ((y >= 2 && y <= 4)); then b=files
+  elif ((y >= 5 && y <= 7)); then b=git
+  elif ((y >= r - 3 && y <= r - 1)); then b=settings
+  else continue; fi
+  printf '\e]1337;SetUserVar=sidebar_click=%s\a' "$(printf %s "$b:$RANDOM$SECONDS" | base64)"
 done
-]==]
+]==]):gsub('@(%u+)@', ICONS)
 
   -- Pure layout logic: operates on plain rows, so it is testable with fake data. -------
   local function rows(infos)
@@ -323,6 +344,35 @@ done
   -- global ~/.config/yazi.
   local YAZI_CONFIG_HOME = wezterm.home_dir .. '/.config/hivegrid/yazi'
 
+  -- The bar is a top-level split on the Hivegrid build, so it spans the full window height
+  -- beside the whole grid; stock WezTerm 20240203 mis-sizes top-level splits of a
+  -- multi-pane tab (see the header), so there it docks beside the leftmost pane.
+  local TOP_LEVEL = theme.has_click
+  local function new_handle(cli, anchor)
+    local args = { 'split-pane', '--left', '--cells', HANDLE_COLS, '--pane-id', anchor.id }
+    if TOP_LEVEL then args[#args + 1] = '--top-level' end
+    for _, a in ipairs { '--', 'bash', '-c', HANDLE_SCRIPT } do args[#args + 1] = a end
+    local ok, out = cli(table.unpack(args))
+    return ok and tonumber(out) or nil
+  end
+
+  -- Every tab gets the bar, not only after the first Ctrl+F. A failed attempt is retried
+  -- after 10 s, not on every status tick.
+  local last_try = {}
+  local function ensure_handle(window, tab, rs, rec)
+    local id = tab:tab_id()
+    local now = os.time()
+    if last_try[id] and now - last_try[id] < 10 then return end
+    last_try[id] = now
+    local anchor = leftmost(rs, M.is_dock)
+    if not anchor then return end
+    local pane = window:active_pane()
+    local cli = make_cli(pane)
+    rec.handle = new_handle(cli, anchor)
+    -- The split focuses the new pane; the keyboard stays where it was.
+    if rec.handle then cli('activate-pane', '--pane-id', pane:pane_id()) end
+  end
+
   local function show(cli, rec, rs, src, anchor, window)
     local w = anchor and width_for(rs, anchor, not rec.handle, wezterm.GLOBAL.sidebar_width)
     if not w then
@@ -330,10 +380,8 @@ done
       return
     end
     if not rec.handle then
-      local ok, out = cli('split-pane', '--left', '--cells', HANDLE_COLS,
-        '--pane-id', anchor.id, '--', 'bash', '-c', HANDLE_SCRIPT)
-      if not ok then return end
-      rec.handle = tonumber(out)
+      rec.handle = new_handle(cli, anchor)
+      if not rec.handle then return end
     end
     local dir = dir_of(src)
     rec.dir = dir
@@ -401,6 +449,8 @@ done
   }
 
   api.is_sidebar = M.is_sidebar
+  api.is_dock = M.is_dock
+  api.make_cli = make_cli
 
   function api.toggle(window, pane, view) apply(window, pane, view) end
 
@@ -435,14 +485,18 @@ done
     return rows(tab:panes_with_info())
   end
 
-  -- Reconciles state with the live tab, so call it from update-status. Returns
-  -- wezterm.format items for a chip such as "◀ files": accent colour while open, muted when
-  -- hidden, nothing before the sidebar was ever opened in this tab.
+  -- Reconciles state with the live tab, so call it from update-status. Creates the bar
+  -- when the tab has none. Returns wezterm.format items for a chip such as "◀ files":
+  -- accent colour while open, muted when hidden.
   function api.status(window)
     local tab = window:active_tab()
     local rs = rows(tab:panes_with_info())
     local old = load(tab:tab_id())
     local rec = reconcile(old, rs)
+    if not rec.handle then
+      ensure_handle(window, tab, rs, rec)
+      if rec.handle then rs = rows(tab:panes_with_info()) end
+    end
     for _, r in ipairs(rs) do
       if r.active and r.id ~= rec.handle and r.id ~= rec.content then rec.last = r.id end
     end
@@ -494,8 +548,10 @@ done
   end
 
   wezterm.on('user-var-changed', function(window, pane, name, value)
-    if name == 'sidebar_toggle' and api.is_sidebar(pane:pane_id()) then
-      apply(window, pane, nil)
+    if name == 'sidebar_click' and api.is_sidebar(pane:pane_id()) then
+      -- A click on a button of the bar. The settings button is handled in wezterm.lua.
+      local view = tostring(value):match('^(%a+)')
+      if view == 'files' or view == 'git' then apply(window, pane, view) end
     elseif name == 'hivegrid_open_dir' then
       open_terminal(window, pane, value)
     end
@@ -509,6 +565,17 @@ end
 function M.is_sidebar(pane_id)
   for _, r in pairs(require('wezterm').GLOBAL.sidebar or {}) do
     if r.handle == pane_id or r.content == pane_id then return true end
+  end
+  return false
+end
+
+-- True for any chrome pane that is not part of the agent grid: the sidebar's handle and
+-- view, and the overview dock (overview.lua keeps its pane in wezterm.GLOBAL.overview,
+-- keyed by tab id). Skip these wherever the grid's panes are counted or addressed.
+function M.is_dock(pane_id)
+  if M.is_sidebar(pane_id) then return true end
+  for _, r in pairs(require('wezterm').GLOBAL.overview or {}) do
+    if r.pane == pane_id then return true end
   end
   return false
 end

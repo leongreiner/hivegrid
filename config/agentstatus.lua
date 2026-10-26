@@ -1,12 +1,12 @@
--- Per-pane agent state for grids of omp panes: asking, bell, working,
--- finished, waiting, exited. Summarised in the tab title and right status, as a
--- minimap of the active tab's layout, and in a pane picker (LEADER+g).
+-- Per-pane agent state for grids of omp panes: asking, bell, working, finished, waiting,
+-- exited. Shown in the overview dock (overview.lua), the pane picker (LEADER+g) and the
+-- bell toasts; the header carries no agent state.
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
--- `as` is { status, tab_parts, bell, pane_label, agent_number, minimap, picker }.
+-- `as` is { tab_parts, bell, pane_kind, pane_label, agent_number, overview, picker }.
 -- WezTerm 20240203 runs ALL update-status handlers in order, but only the FIRST
 -- format-tab-title handler executes, so the parent's own handlers must call
--- as.tab_parts(...) / as.status(...) / as.minimap(...) / as.bell(...) themselves.
+-- as.tab_parts(...) / as.bell(...) themselves.
 -- This module registers only a cache-refreshing update-status handler (no
 -- set_right_status, so it cannot clobber the parent's status).
 --
@@ -27,6 +27,8 @@
 -- after a marker was seen on a pane whose screen was changing. If the markers
 -- never match, behaviour stays the timing heuristic. A pane whose screen changes
 -- for RUN_SECS straight is working even without a marker.
+-- omp panes: the terminal title carries omp's own run state (working / your turn / waiting
+-- on you, see `omp_title`); when present it replaces the screen heuristics above.
 -- Rejected: tinting panes with pane:inject_output(OSC 11/111). The sequence is
 -- parsed by a separate parser, so it cannot split the app's own escape
 -- sequences, but it rewrites the pane's palette: omp's terminal-theme detection
@@ -56,13 +58,12 @@ local STATES = {
   exited = { color = P.grey, glyph = '○', text = 'exited', rank = 6 },
   idle = { color = P.dim, glyph = '▫', text = 'idle', rank = 7 },
 }
-local ORDER = { 'ask', 'bell', 'finished', 'waiting', 'working', 'exited' }
 
 -- Keyed by pane_id; pruned per window on every scan.
 local panes = {}
--- Keyed by window_id: { at, list, totals }.
+-- Keyed by window_id: { at, list }.
 local wins = {}
--- Keyed by tab_id: { counts = {state=n} }.
+-- Keyed by tab_id: { lead = id of the pane that names the tab }.
 local tabs = {}
 
 local function now_s()
@@ -92,6 +93,24 @@ local SPIN = {}
 for _, g in ipairs { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' } do SPIN[g] = true end
 local WORKING_TEXT = { 'Working…', 'Working...', 'to interrupt', 'to cancel)' }
 local ASK_TEXT = { 'Waiting for your answer', 'Allow once', '(y/n)', '[y/N]', '[Y/n]', 'Do you want to proceed' }
+
+-- omp writes its run state into the terminal title (setting tui.titleState, on by
+-- default): "π <sep> <session title>", <sep> being a spinner frame while the agent works,
+-- ">" when it is your turn and "!" when it waits on you. Returns that state as 'working',
+-- 'idle' or 'attention' (nil for any other separator, e.g. the "π: title" form used with
+-- the setting off) and the session title.
+local TITLE_WORKING = { [':'] = true, ['-'] = true, ['\\'] = true, ['|'] = true, ['/'] = true }
+for g in pairs(SPIN) do TITLE_WORKING[g] = true end
+for _, g in ipairs { '○', '◔', '◑', '◕', '●', '⠁', '⠂', '⠄', '⠠', '⠐', '⠈' } do TITLE_WORKING[g] = true end
+
+local function omp_title(title)
+  local sep, rest = title:match('^π (%S+)%s*(.*)$')
+  if not sep then return nil, title:match('^π:%s*(.*)$') or title end
+  if sep == '>' then return 'idle', rest end
+  if sep == '!' then return 'attention', rest end
+  if TITLE_WORKING[sep] then return 'working', rest end
+  return nil, rest
+end
 
 local function contains_any(line, needles)
   for _, n in ipairs(needles) do
@@ -123,11 +142,14 @@ end
 local function step(st, c)
   local quiet = c.now - st.changed_at >= QUIET_SECS
   local omp = c.proc == 'omp'
+  local ts = (omp or not c.proc or c.proc == '') and c.title_state or nil
   if omp and c.hit.working and not quiet then
     wezterm.GLOBAL.agentstatus_markers_seen = true
   end
   local working
-  if omp and calibrated() then
+  if ts then
+    working = ts == 'working'
+  elseif omp and calibrated() then
     working = (c.hit.working and c.now - st.changed_at < MARKER_SECS)
       or (not quiet and c.now - st.run_start >= RUN_SECS)
   else
@@ -143,7 +165,7 @@ local function step(st, c)
   end
 
   if SHELLS[c.proc] then return 'exited' end
-  if c.hit.ask then return 'ask' end
+  if (ts and ts == 'attention') or (not ts and c.hit.ask) then return 'ask' end
   if st.bell then return 'bell' end
   if working then return 'working' end
   if st.finished then return 'finished' end
@@ -153,7 +175,7 @@ local function step(st, c)
 end
 
 local function new_state(now, id)
-  return { changed_at = now, run_start = now, text = '', slow_at = now - (id * 0.7) % SLOW_SECS }
+  return { changed_at = now, run_start = now, since = now, text = '', slow_at = now - (id * 0.7) % SLOW_SECS }
 end
 
 local function refresh_slow(pane, st, now)
@@ -167,25 +189,25 @@ local function refresh_slow(pane, st, now)
 end
 
 -- Refresh state for every pane in the window; returns the ordered tab list
--- ({ tab, id, entries = {{ pane, info, st, num }} }) and the state totals.
+-- ({ tab, id, entries = {{ pane, info, st, num }} }).
 local function scan(window, force)
   local wid = window:window_id()
   local now = now_s()
   local cache = wins[wid]
-  if cache and not force and now - cache.at < DEDUPE_SECS then return cache.list, cache.totals end
+  if cache and not force and now - cache.at < DEDUPE_SECS then return cache.list end
 
   local win_focused = window:is_focused()
   local active_tab_id = window:active_tab():tab_id()
-  local seen, list, totals = {}, {}, {}
+  local seen, list = {}, {}
 
   for _, mtab in ipairs(window:mux_window():tabs()) do
     local tid = mtab:tab_id()
     local infos = {}
     for _, info in ipairs(mtab:panes_with_info()) do
-      if not require('sidebar').is_sidebar(info.pane:pane_id()) then infos[#infos + 1] = info end
+      if not require('sidebar').is_dock(info.pane:pane_id()) then infos[#infos + 1] = info end
     end
     local numbers = panemap.numbering(infos)
-    local counts, entries = {}, {}
+    local entries = {}
     for i, info in ipairs(infos) do
       local pane = info.pane
       local id = pane:pane_id()
@@ -205,6 +227,15 @@ local function scan(window, force)
       end
       refresh_slow(pane, st, now)
 
+      -- omp reports its run state in the terminal title; read it on every scan, the
+      -- spinner it shows while working moves faster than the slow lookups refresh.
+      local okt, title = pcall(pane.get_title, pane)
+      title = okt and title or ''
+      local title_state, heading
+      -- The process name is looked up only every few seconds, so a fresh pane has none yet.
+      if (st.proc or '') == 'omp' or (st.proc or '') == '' then title_state, heading = omp_title(title) end
+      st.heading = heading or title
+
       local focused = win_focused and tid == active_tab_id and info.is_active
       st.unseen = pane:has_unseen_output()
       st.kind = step(st, {
@@ -213,83 +244,32 @@ local function scan(window, force)
         proc = st.proc or '',
         hit = markers(text),
         unseen = st.unseen,
+        title_state = title_state,
       })
+      if st.kind ~= st.last_kind then st.last_kind, st.since = st.kind, now end
       st.state = (not focused) and st.kind or nil
 
-      if st.state then
-        counts[st.state] = (counts[st.state] or 0) + 1
-        totals[st.state] = (totals[st.state] or 0) + 1
-      end
       entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
     end
     local lead
     for _, e in ipairs(entries) do
       if e.info.is_active then lead = e.pane:pane_id() end
     end
-    tabs[tid] = { counts = counts, lead = lead or (entries[1] and entries[1].pane:pane_id()) }
+    tabs[tid] = { lead = lead or (entries[1] and entries[1].pane:pane_id()) }
     list[#list + 1] = { tab = mtab, id = tid, entries = entries }
   end
 
   for id, st in pairs(panes) do
     if st.wid == wid and not seen[id] then panes[id] = nil end
   end
-  wins[wid] = { at = now, list = list, totals = totals }
-  return list, totals
-end
-
--- State counts such as "✓8 ●1", each in its state colour, one space apart.
-local function marks(counts)
-  local items = {}
-  for _, key in ipairs(ORDER) do
-    local n = counts[key]
-    if n then
-      if #items > 0 then items[#items + 1] = { Text = ' ' } end
-      items[#items + 1] = { Foreground = { Color = STATES[key].color } }
-      items[#items + 1] = { Text = STATES[key].glyph .. n }
-    end
-  end
-  return items
+  wins[wid] = { at = now, list = list }
+  return list
 end
 
 local api = { internals = { markers = markers, step = step } }
 
--- Right-status items; refreshes state as a side effect. opts.bare returns the marks
--- without a pill around them, for the caller to place in its own group.
-function api.status(window, opts)
-  local _, totals = scan(window)
-  local items = marks(totals)
-  if #items == 0 then return {} end
-  if type(opts) == 'table' and opts.bare then return items end
-  return theme.pill(items, P.pill)
-end
-
--- Minimap of the active tab: one glyph per layout cell, rows split by a bar,
--- the active pane highlighted, digit = agent number. Empty for a single pane
--- or a layout wider than opts.max_width (default 24).
-function api.minimap(window, opts)
-  local list = scan(window)
-  local active = window:active_tab():tab_id()
-  for _, t in ipairs(list) do
-    if t.id == active then
-      if #t.entries < 2 then return {} end
-      local geoms = {}
-      for i, e in ipairs(t.entries) do geoms[i] = e.info end
-      local g = panemap.grid(geoms, opts)
-      if not g then return {} end
-      local items = panemap.render(g, function(i)
-        local e = t.entries[i]
-        local s = STATES[e.st.kind or 'idle']
-        return { glyph = s.glyph, color = s.color, active = e.info.is_active, zoomed = e.info.is_zoomed }
-      end)
-      if opts and opts.bare then return items end
-      return theme.pill(items, P.pill)
-    end
-  end
-  return {}
-end
-
--- Pieces of a tab title: the pane's directory, the agent/process running there (nil
--- for a plain shell), and the state marks of the tab's background panes.
+-- Pieces of a tab title: the pane's directory and the agent/process running there (nil
+-- for a plain shell).
 function api.tab_parts(tab)
   -- A sidebar pane is not tracked: name the tab after the grid pane it sits beside.
   local st = panes[tab.active_pane.pane_id] or panes[(tabs[tab.tab_id] or {}).lead]
@@ -303,9 +283,7 @@ function api.tab_parts(tab)
       name = tab.active_pane.title
     end
   end
-  local counts = (tabs[tab.tab_id] or {}).counts or {}
-  local tail = marks(counts)
-  return { name = name, proc = proc, marks = tail, marks_width = theme.width(tail) }
+  return { name = name, proc = proc }
 end
 
 -- Called from the parent's bell handler; never returns false so the toast runs.
@@ -334,6 +312,34 @@ end
 -- Reading-order number of a pane within its tab (matches the minimap digits).
 function api.agent_number(pane_id)
   return panes[pane_id] and panes[pane_id].num or nil
+end
+
+-- Rows for the overview dock, one per grid pane of tab `tab_id` in reading order:
+-- { id, num, kind, glyph, text, color, name, title, proc, since, active, zoomed }. `kind` is the
+-- state key ('working', 'waiting', ...; 'idle' when nothing is known), `since` the epoch
+-- second it last changed, `name` the pane's directory, `title` omp's session title (or
+-- the pane title of another program).
+function api.overview(window, tab_id)
+  for _, t in ipairs(scan(window)) do
+    if t.id == tab_id then
+      local rows = {}
+      for _, e in ipairs(t.entries) do
+        local st = e.st
+        local kind = st.kind or 'idle'
+        local s = STATES[kind]
+        local name = basename(st.cwd or '')
+        if name == '' then name = st.cwd or '' end
+        rows[#rows + 1] = {
+          id = e.pane:pane_id(), num = e.num, kind = kind, glyph = s.glyph, text = s.text,
+          color = s.color, name = name, title = st.heading or '', proc = st.proc or '',
+          since = st.since, active = e.info.is_active, zoomed = e.info.is_zoomed,
+        }
+      end
+      table.sort(rows, function(a, b) return a.num < b.num end)
+      return rows
+    end
+  end
+  return {}
 end
 
 -- InputSelector over every pane in the window: "agent N [state] cwd".
@@ -412,7 +418,7 @@ local function cycle(delta)
     local tab = window:active_tab()
     local infos = {}
     for _, info in ipairs(tab:panes_with_info()) do
-      if not require('sidebar').is_sidebar(info.pane:pane_id()) then infos[#infos + 1] = info end
+      if not require('sidebar').is_dock(info.pane:pane_id()) then infos[#infos + 1] = info end
     end
     if #infos < 2 then return end
     local cur

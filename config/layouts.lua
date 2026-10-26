@@ -45,8 +45,8 @@ return function(config, wezterm)
   -- to even positions per axis. A divider can only be moved through a pane whose
   -- nearest same-axis split it is; layouts built by split-pane/omp-grid all qualify.
   local AXES = {
-    { pos = 'left', len = 'cols', dec = 'Left', inc = 'Right' },
-    { pos = 'top', len = 'rows', dec = 'Up', inc = 'Down' },
+    { pos = 'left', len = 'cols', cpos = 'top', clen = 'rows', dec = 'Left', inc = 'Right' },
+    { pos = 'top', len = 'rows', cpos = 'left', clen = 'cols', dec = 'Up', inc = 'Down' },
   }
   local MAX_PASSES = 5
 
@@ -99,8 +99,11 @@ return function(config, wezterm)
     return panes
   end
 
-  -- Actual divider positions along an axis and the evenly spaced positions they
-  -- should have. A pane at [pos, pos+len) is followed by a divider cell at pos+len.
+  -- Actual divider positions along an axis, the evenly spaced positions they should snap
+  -- to, the end of the grid and its origin (not 0 when the sidebar bar sits left of it).
+  -- A pane at [pos, pos+len) is followed by a divider cell at pos+len. The number of
+  -- columns is the most panes side by side on any line across the axis, not the number of
+  -- distinct pane starts: independently split rows put their dividers a cell or two apart.
   local function dividers(panes, a)
     local starts, seen, total = {}, {}, 0
     for _, p in pairs(panes) do
@@ -111,44 +114,58 @@ return function(config, wezterm)
       total = math.max(total, p[a.pos] + p[a.len])
     end
     table.sort(starts)
-    local k = #starts
     local actual, ideal = {}, {}
-    for j = 2, k do
+    for j = 2, #starts do
       table.insert(actual, starts[j] - 1)
     end
-    for j = 1, k - 1 do
-      table.insert(ideal, math.floor(j * (total + 1) / k) - 1)
+    local k = 1
+    for _, p in pairs(panes) do
+      local c, n = p[a.cpos], 0
+      for _, q in pairs(panes) do
+        if q[a.cpos] <= c and c < q[a.cpos] + q[a.clen] then
+          n = n + 1
+        end
+      end
+      k = math.max(k, n)
     end
-    return actual, ideal, total
+    local origin = starts[1] or 0
+    for j = 1, k - 1 do
+      ideal[j] = origin + math.floor(j * (total - origin + 1) / k) - 1
+    end
+    return actual, ideal, total, origin
   end
 
-  local function ideal_for(x, actual, ideal)
+  -- The evenly spaced position nearest to divider x.
+  local function ideal_for(x, ideal)
     local best, target = math.huge, nil
-    for j, d in ipairs(actual) do
+    for _, d in ipairs(ideal) do
       if math.abs(d - x) < best then
-        best, target = math.abs(d - x), ideal[j]
+        best, target = math.abs(d - x), d
       end
     end
     return target
   end
 
-  local function pane_dividers(p, a, total)
+  -- The dividers of a pane that lie inside the grid (not against its outer edge, where a
+  -- sidebar or the overview dock may sit).
+  local function pane_dividers(p, a, total, origin)
     local xs = {}
     if p[a.pos] + p[a.len] < total then
       table.insert(xs, p[a.pos] + p[a.len])
     end
-    if p[a.pos] > 0 then
+    if p[a.pos] > origin then
       table.insert(xs, p[a.pos] - 1)
     end
     return xs
   end
 
   local function misaligned(panes, a)
-    local actual, ideal, total = dividers(panes, a)
+    local _, ideal, total, origin = dividers(panes, a)
     local ids = {}
     for id, p in pairs(panes) do
-      for _, x in ipairs(pane_dividers(p, a, total)) do
-        if ideal_for(x, actual, ideal) ~= x then
+      for _, x in ipairs(pane_dividers(p, a, total, origin)) do
+        -- A cell off is rounding, not misalignment (and would never settle).
+        if math.abs((ideal_for(x, ideal) or x) - x) > 1 then
           table.insert(ids, id)
           break
         end
@@ -175,7 +192,18 @@ return function(config, wezterm)
         end
         local p = cur[id]
         local actual, ideal = dividers(cur, a)
-        -- Probe by one cell to learn which divider this pane's resize actually moves.
+        local function is_inner(x)
+          for _, d in ipairs(actual) do
+            if d == x then
+              return true
+            end
+          end
+          return false
+        end
+        -- AdjustPaneSize acts on the active pane, whatever --pane-id says.
+        cli('activate-pane', '--pane-id', id)
+        -- Probe by one cell to learn which divider this pane's resize actually moves. A
+        -- divider against a sidebar or the overview dock is none of our business: undo it.
         local moved
         for _, dir in ipairs { a.inc, a.dec } do
           cli('adjust-pane-size', '--pane-id', id, '--amount', 1, dir)
@@ -189,11 +217,15 @@ return function(config, wezterm)
           elseif q[a.pos] ~= p[a.pos] then
             moved = { old = p[a.pos] - 1, new = q[a.pos] - 1 }
           end
+          if moved and not is_inner(moved.old) then
+            cli('adjust-pane-size', '--pane-id', id, '--amount', 1, dir == a.inc and a.dec or a.inc)
+            moved = nil
+          end
           if moved then
             break
           end
         end
-        local target = moved and ideal_for(moved.old, actual, ideal)
+        local target = moved and ideal_for(moved.old, ideal)
         if target and target ~= moved.new then
           local delta = target - moved.new
           cli('adjust-pane-size', '--pane-id', id, '--amount', math.abs(delta),
@@ -208,7 +240,7 @@ return function(config, wezterm)
     local tab = window:active_tab()
     local ids, n = {}, 0
     for _, p in ipairs(tab:panes()) do
-      if not require('sidebar').is_sidebar(p:pane_id()) then
+      if not require('sidebar').is_dock(p:pane_id()) then
         ids[p:pane_id()] = true
         n = n + 1
       end
@@ -235,9 +267,11 @@ return function(config, wezterm)
     for _, a in ipairs(AXES) do
       if not equalize_axis(cli, ids, a) then
         toast(window, 'equalize: wezterm cli failed')
-        return
+        break
       end
     end
+    -- equalize_axis activates the panes it resizes; the keyboard goes back where it was.
+    cli('activate-pane', '--pane-id', pane:pane_id())
     local final = snapshot(cli, ids)
     if final and (#misaligned(final, AXES[1]) > 0 or #misaligned(final, AXES[2]) > 0) then
       toast(window, 'equalize: layout is not a regular grid; got as close as possible')
@@ -246,6 +280,11 @@ return function(config, wezterm)
 
   local equalize_action = wezterm.action_callback(equalize)
   bind('LEADER', 'e', equalize_action)
+  local eq_key = require('settings')(config, wezterm).key('equalize', 'CTRL+SHIFT+e')
+  bind(eq_key.mods, eq_key.key, equalize_action)
+
+  -- equalize(window, pane) is also called by the overview dock's button.
+  local api = { equalize = equalize }
 
   -- Pane mode -----------------------------------------------------------
   local function once(...)
@@ -303,7 +342,7 @@ return function(config, wezterm)
         return
       end
       for _, p in ipairs(tab:panes()) do
-        if not require('sidebar').is_sidebar(p:pane_id()) then send(window, p) end
+        if not require('sidebar').is_dock(p:pane_id()) then send(window, p) end
       end
     end)
   end
@@ -368,4 +407,5 @@ return function(config, wezterm)
       end),
     }, pane)
   end))
+  return api
 end

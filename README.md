@@ -10,17 +10,16 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 
 ## Features
 
-- Agent state per pane (working, waiting, ask, finished, exited) in tab titles and the header status, plus bell toasts for background panes.
-- Pane minimap in the header with agent numbers, and a pane picker (`LEADER+g`) listing every agent with its state and directory.
+- Overview dock at the right edge of a tab (`LEADER+o`): every grid pane with its number, state (working, waiting, ask, finished, exited), directory, time in that state and omp's session title; click a row or press its digit to jump there, `▦` equalizes the grid. A pane picker (`LEADER+g`) lists every agent too, and background panes raise bell toasts. omp panes report their state exactly, through the run-state glyph omp puts in the terminal title.
 - `omp-grid` launcher: equal grids, main-plus-side and column layouts, per-pane directories, optional new tab.
 - Resize, pane and broadcast key tables, and an equalize command that evens out all dividers.
 - Broadcast mode that types into every pane of the tab, with a visible `BROADCAST` marker.
 - System stats in the header: CPU, RAM, disk, GPU, each with its percentage, a slim bar and, when the window is wide enough, the absolute amount (`11.7G/31G`, `165G free`).
 - Claude Code usage (5h and 7d windows) for every account as a header chip with numbers and slim bars (an account that needs a login shows only an amber `login` chip); accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
-- Panels inside the window (logo click, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
-- Left sidebar with a yazi file explorer or a git view, toggled by key or by clicking its handle. The git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory.
+- Panels inside the window (the gear button of the left bar, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
+- Permanent narrow bar at the left of every tab with buttons for the file explorer, the git view and the settings panel. The explorer is a yazi sidebar; the git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory. `Ctrl+F` / `Ctrl+G` do the same as the buttons.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
-- Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (a click opens the settings panel), wide padding, and dimmed inactive panes.
+- Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (not clickable yet), wide padding, and dimmed inactive panes.
 
 ## Install
 
@@ -46,9 +45,10 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | `Alt+z` | zoom pane |
 | | `LEADER+r` | resize mode (arrows or `h/j/k/l`, `Esc`/`Enter` leaves) |
 | | `LEADER+p` | pane mode: `r`/`R` rotate, `g` select, `s`/`S` swap, `x` close, `t` to new tab, `z` zoom, `e` equalize, `Esc`/`q` leaves |
-| Grid | `LEADER+e` | equalize panes |
+| Grid | `LEADER+e`, `Ctrl+Shift+E` | equalize panes (also the `▦` button of the overview dock) |
 | | `LEADER+1` / `2` / `3` | new tab with `omp` / 2x2 grid / 3x3 grid (also in the `+` right-click menu) |
 | Agents | `Alt+n`, `LEADER+n` | jump to the next pane needing attention |
+| | `LEADER+o` | show or hide the overview dock (right edge) |
 | | `Alt+]`, `Alt+[` | next / previous agent pane |
 | | `LEADER+g` | pane picker |
 | | `LEADER+b` | toggle broadcast typing to all panes of the tab |
@@ -66,7 +66,7 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | `Alt+q` | Claude quota selector with all accounts; `LEADER+q` hides or shows the header chip |
 | | `Ctrl+Shift+R` | reload config |
 
-Leader, sidebar toggles, splits, the account launcher and the panel keys can be rebound in the settings panel (Keys); everything else is fixed.
+Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), splits, the account launcher and the panel keys can be rebound in the settings panel (Keys); everything else is fixed.
 
 ## Panels
 
@@ -74,9 +74,9 @@ Leader, sidebar toggles, splits, the account launcher and the panel keys can be 
 
 | Open it with | Panel |
 | --- | --- |
-| click the logo at the top left, `LEADER+,`, `+` menu `Hivegrid settings` | settings |
+| the gear button of the left bar, `LEADER+,`, `+` menu `Hivegrid settings` | settings |
 | right-click an account pill, `LEADER+h`, `+` menu `Usage history` | usage |
-| right-click the agents pill (path, pane count, minimap), `+` menu `Agent overview` | agents |
+| `+` menu `Agent overview` | agents |
 | click the system group (CPU, RAM, DSK, GPU), `+` menu `System monitor` | monitor |
 
 - **Settings** writes `~/.config/hivegrid/settings.json`; the WezTerm config watches it, so *Save* applies at once (a missing file means today's defaults).
@@ -125,11 +125,11 @@ If the pane looks busy (agent working or asking), a dialog asks "switch anyway?"
 
 ## Notes and limits
 
-- State is shown through tab titles, the right status and the minimap; on stock WezTerm the header is not clickable.
+- Agent state is shown in the overview dock, the pane picker and bell toasts, not in the header or the tab titles; a background tab's state is only visible after switching to it. On stock WezTerm the header is not clickable.
 - The overlay covers the whole active tab; there is no centred modal mode.
 - Moving an omp chat to another account needs omp's per-terminal session record (omp 18); with several omp processes in one terminal it refuses rather than guess. The busy check uses the same heuristic as the agent states.
-- omp state detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
-- The sidebar takes the full window height only in a single-pane tab; in a grid it is docked beside the leftmost pane.
+- omp's state comes from the run-state glyph in its terminal title (`tui.titleState`, on by default in omp); when that is off, and for other agents, detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
+- The sidebar bar spans the full window height on the Hivegrid build (a top-level split); on stock WezTerm 20240203, which mis-sizes top-level splits, it and the overview dock sit beside the leftmost / top-right pane only. The sidebar view itself is docked beside the leftmost pane.
 - The sidebar views start in the working directory of the pane they were opened from (the git view scans it for repositories: the one around it and those below it, `HIVEGRID_GIT_DEPTH` levels deep, default 3; with a single repository it opens lazygit there directly). A pane whose shell reports a path from another host, such as an ssh session, uses the directory of its local foreground process instead.
 - The explorer copies paths with the terminal clipboard escape (OSC 52), which WezTerm accepts, and also through `wl-copy`, `xclip` or `xsel` when present.
 - `Ctrl+V` paste is not fanned out in broadcast mode, because the clipboard is not readable from Lua.

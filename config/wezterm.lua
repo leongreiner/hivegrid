@@ -176,22 +176,18 @@ local function tab_cap(pixel_width, ntabs, cell)
 end
 
 -- Fits a tab's pieces into `cap` cells (the cap is read from wezterm.GLOBAL by the
--- format-tab-title handler, which has no window). Priority: marks, name, agent.
--- Returns name, proc, show_marks, width in cells (padding included).
+-- format-tab-title handler, which has no window). Priority: name, agent.
+-- Returns name, proc, width in cells (padding included).
 local function tab_layout(parts, tab_index, cap)
   cap = math.min(cap or TAB_CELLS + TAB_PAD_CELLS, TAB_CELLS + TAB_PAD_CELLS)
   local fixed = 2 + #tostring(tab_index + 1) + 2 -- end cells, " N "
   local room = cap - TAB_PAD_CELLS - fixed
   local nlen = utf8.len(parts.name) or #parts.name
-  local mneed = parts.marks_width > 0 and parts.marks_width + 1 or 0
   local pneed = parts.proc and (#parts.proc + 1) or 0
-  local name, proc, marks = parts.name, parts.proc, mneed > 0
-  if nlen + mneed + pneed > room then proc, pneed = nil, 0 end
-  if nlen + mneed + pneed > room then
-    name = wezterm.truncate_right(parts.name, math.max(3, room - mneed))
-    if room - mneed < 4 then marks, mneed = false, 0 end
-  end
-  return name, proc, marks, fixed + (utf8.len(name) or #name) + mneed + pneed + TAB_PAD_CELLS
+  local name, proc = parts.name, parts.proc
+  if nlen + pneed > room then proc, pneed = nil, 0 end
+  if nlen > room then name = wezterm.truncate_right(parts.name, math.max(3, room)) end
+  return name, proc, fixed + (utf8.len(name) or #name) + pneed + TAB_PAD_CELLS
 end
 
 -- How the right status gives up width: { 'tier', group, tier } takes a group to a
@@ -200,22 +196,14 @@ end
 -- (tier 2) until the quota group is down to its compact tiers.
 local PLAN = {
   { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'drop', 'S' }, { 'tier', 'B', 4 },
-  { 'tier', 'C', 3 }, { 'tier', 'A', 2 }, { 'tier', 'C', 4 }, { 'tier', 'A', 3 }, { 'tier', 'B', 5 },
-  { 'tier', 'C', 5 }, { 'tier', 'A', 4 }, { 'drop', 'C' }, { 'drop', 'B' }, { 'drop', 'A' },
+  { 'tier', 'C', 3 }, { 'tier', 'C', 4 }, { 'tier', 'B', 5 }, { 'tier', 'C', 5 },
+  { 'drop', 'C' }, { 'drop', 'B' },
 }
 
 -- Right side of the header, in the cells the tabs leave over: [BROADCAST] [sidebar
--- toggle] A (path, panes, minimap or agent marks), B (Claude quota), C (system stats).
--- Every group has tiers; PLAN says which one narrows first.
-wezterm.on('update-status', function(window, pane)
-  local cwd = pane:get_current_working_dir()
-  local path = cwd and cwd.file_path or ''
-  path = path:gsub('^' .. (os.getenv('HOME') or ''), '~')
-  local n = 0
-  for _, p in ipairs(window:active_tab():panes()) do
-    if not sb.is_sidebar(p:pane_id()) then n = n + 1 end
-  end
-
+-- toggle] B (Claude quota), C (system stats). Every group has tiers; PLAN says which one
+-- narrows first.
+wezterm.on('update-status', function(window)
   local dims = window:get_dimensions()
   local pixel_width = dims.pixel_width
   local cell = cell_px(dims.dpi)
@@ -232,50 +220,18 @@ wezterm.on('update-status', function(window, pane)
       tab_id = t:tab_id(),
       active_pane = { pane_id = ap:pane_id(), title = ap:get_title() },
     }
-    local _, _, _, w = tab_layout(parts, i - 1, cap)
+    local _, _, w = tab_layout(parts, i - 1, cap)
     used = used + w
   end
   local avail = total - used - 1
 
   cq.refresh_if_due(window)
 
-  -- Up to four visual groups: brand (left status), then right to left of the tabs
-  --   [broadcast] [sidebar] A: path, panes, minimap, agent marks   B: quota   C: system
+  -- Up to three visual groups: brand (left status), then right to left of the tabs
+  --   [broadcast] [sidebar]   B: quota   C: system
   -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
-  -- groups fit the free cells.
-  local function short_path(p)
-    if p == '~' then return '~/' end
-    if #p <= 22 then return p end
-    local tail = p:match('([^/]*/[^/]*)/?$') or p:sub(-20)
-    return '…/' .. tail
-  end
-  local a_tiers = {}
-  do
-    local minimap = as.minimap(window, { max_width = 28, bare = true })
-    local marks = as.status(window, { bare = true })
-    local function tier(with_path, with_minimap, with_marks)
-      local head = {}
-      if with_path and path ~= '' then
-        head = { { Foreground = { Color = P.muted } }, { Text = short_path(path) .. ' · ' } }
-      end
-      theme.extend(head, { { Foreground = { Color = P.bright } }, { Text = tostring(n) } })
-      local parts = { head }
-      if with_minimap and #minimap > 0 then parts[#parts + 1] = minimap end
-      if with_marks and #marks > 0 then parts[#parts + 1] = marks end
-      local flat = {}
-      for i, part in ipairs(parts) do
-        if i > 1 then
-          theme.extend(flat, { { Foreground = { Color = P.dim } }, { Text = ' │ ' } })
-        end
-        theme.extend(flat, part)
-      end
-      local items = theme.click('agents', theme.pill(flat, P.pill))
-      return { items = items, w = theme.width(items) }
-    end
-    a_tiers = { tier(true, true, false), tier(true, false, true), tier(false, false, true), tier(false, false, false) }
-  end
+  -- groups fit the free cells. Agent states live in the overview dock, not here.
   local groups = {
-    A = { tiers = a_tiers },
     B = { tiers = cq.visible() and cq.tiers() or {} },
     C = { tiers = ss.visible() and ss.tiers() or {} },
   }
@@ -316,14 +272,14 @@ wezterm.on('update-status', function(window, pane)
     theme.extend(items, it)
     items[#items + 1] = { Text = ' ' }
   end
-  for _, name in ipairs { 'A', 'B', 'C' } do
+  for _, name in ipairs { 'B', 'C' } do
     local t = groups[name].tiers[groups[name].tier]
     if t then
       theme.extend(items, t.items)
       items[#items + 1] = { Text = ' ' }
     end
   end
-  window:set_left_status(BRAND_DRAWN and '' or wezterm.format(theme.click('brand', theme.brand())))
+  window:set_left_status(BRAND_DRAWN and '' or wezterm.format(theme.brand()))
   window:set_right_status(wezterm.format(items))
 end)
 
@@ -343,8 +299,8 @@ local function settings_action() return panel_action('settings') end
 
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
--- Left click: start/switch omp (quota pill), agent picker, settings, monitor. Right click on
--- a quota pill, the agents pill or the system group opens the matching panel.
+-- Left click: start/switch omp (quota pill). Right click on a quota pill or a click on the
+-- system group opens the matching panel. The logo (id 'brand') is not clickable yet.
 wezterm.on('status-click', function(window, pane, id, button)
   if button ~= 'Left' and button ~= 'Right' then return end
   local account = id:match('^quota:(.+)$')
@@ -353,14 +309,6 @@ wezterm.on('status-click', function(window, pane, id, button)
       cq.start_omp(window, pane, account)
     else
       window:perform_action(panel_action('usage', { '--account', account }), pane)
-    end
-  elseif id == 'brand' then
-    window:perform_action(panel_action('settings'), pane)
-  elseif id == 'agents' then
-    if button == 'Left' then
-      window:perform_action(as.picker, pane)
-    else
-      window:perform_action(panel_action('agents'), pane)
     end
   elseif id == 'system' then
     window:perform_action(panel_action('monitor'), pane)
@@ -405,7 +353,7 @@ end
 -- tab is a raised box, hover a faint one, and inactive tabs are bare text on the bar.
 wezterm.on('format-tab-title', function(tab, tabs, panes, cfg, hover, max_width)
   local parts = as.tab_parts(tab)
-  local name, proc, marks = tab_layout(parts, tab.tab_index, wezterm.GLOBAL.hivegrid_tab_cap)
+  local name, proc = tab_layout(parts, tab.tab_index, wezterm.GLOBAL.hivegrid_tab_cap)
   local bg, text, num
   if tab.is_active then
     bg, text, num = P.raised, P.bright, P.cyan
@@ -420,13 +368,6 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, cfg, hover, max_width)
     { fg = text, text = name, bold = tab.is_active },
   }
   if proc then pieces[#pieces + 1] = { fg = P.dim, text = ' ' .. proc } end
-  if marks then
-    pieces[#pieces + 1] = { fg = P.dim, text = ' ' }
-    for _, it in ipairs(parts.marks) do
-      if it.Foreground then pieces[#pieces + 1] = { fg = it.Foreground.Color, text = '' } end
-      if it.Text then pieces[#pieces].text = pieces[#pieces].text .. it.Text end
-    end
-  end
   pieces[#pieces + 1] = { fg = text, text = ' ' }
   return theme.gradient(pieces, bg, bg)
 end)
@@ -451,12 +392,19 @@ wezterm.on('bell', function(window, pane)
   end
 end)
 
-require('layouts')(config, wezterm)
+local layouts = require('layouts')(config, wezterm)
 
 -- While the settings panel records a new key binding it sets the user var
 -- hivegrid_capture: the config's bindings are suspended meanwhile, so a chord such as
 -- CTRL+f reaches the panel instead of triggering what it is bound to.
 wezterm.on('user-var-changed', function(window, pane, name, value)
+  if name == 'sidebar_click' then
+    -- The settings button of the sidebar bar; its other buttons are handled in sidebar.lua.
+    if tostring(value):match('^settings') and sb.is_sidebar(pane:pane_id()) then
+      window:perform_action(settings_action(), pane)
+    end
+    return
+  end
   if name ~= 'hivegrid_capture' then return end
   if value == '1' then
     window:set_config_overrides {
@@ -473,5 +421,8 @@ end)
 -- bindings above stays as it was.
 table.insert(config.keys, bound('settings', 'LEADER+,', panel_action('settings')))
 table.insert(config.keys, bound('usage_panel', 'LEADER+h', panel_action('usage')))
+
+-- Overview dock: LEADER+o by default (settings key overview_toggle).
+require('overview')(config, wezterm, as, sb, layouts)
 
 return config
