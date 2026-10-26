@@ -1,3 +1,4 @@
-# init.lua's double-click detection needs click events.
+# init.lua's double-click detection needs click events; dragging a column border
+# (the rails between parent / current / preview) needs drag events.
 [mgr]
-mouse_events = [ "click", "scroll" ]
+mouse_events = [ "click", "scroll", "drag" ]

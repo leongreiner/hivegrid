@@ -57,6 +57,7 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | `Enter` / click, `r`, `q` in the git view | open lazygit in the selected repository (quit lazygit to return to the list), rescan, close; `j`/`k` or arrows move |
 | | `Ctrl+C` in the explorer | copy the absolute path of the hovered file or folder, or of all selected entries one per line |
 | | double click in the explorer | open a terminal in that folder (a file's folder), split right of the last active grid pane, or below it when that pane is narrow; it takes focus |
+| | drag a column border in the explorer | resize the parent / current / preview columns |
 | Panels | `LEADER+,` | settings panel |
 | | `LEADER+h` | usage history panel |
 | | `LEADER+u`, then `1`-`9` | start (or switch) omp with that account |
