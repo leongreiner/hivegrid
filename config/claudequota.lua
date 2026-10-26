@@ -360,8 +360,8 @@ return function(config, wezterm)
 
   -- Starting omp for an account / switching a running omp -----------------------
   -- omp picks its account with --profile (or OMP_PROFILE), not CLAUDE_CONFIG_DIR; the profile
-  -- paired with each account comes from settings.lua.
-  local DEFAULT_PROFILE = 'work' -- what a bare `omp` uses (OMP_PROFILE default in ~/.bashrc)
+  -- paired with each account comes from settings.lua. An account without a profile runs omp's
+  -- default config: a bare `omp`, and '' below.
   local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
   local SWITCH_BIN = os.getenv('OMP_SWITCH_BIN') or (HOME .. '/.local/bin/omp-switch')
   local EXIT_KEY = '\x04' -- Ctrl+D on an empty prompt quits omp; with a draft it does nothing
@@ -400,8 +400,9 @@ return function(config, wezterm)
     return first
   end
 
-  -- Profile of a running omp: --profile on its command line, else OMP_PROFILE from
-  -- its environment (only that variable is read), else the bare-omp default.
+  -- Profile of a running omp: --profile on its command line, else OMP_PROFILE from its
+  -- environment (only that variable is read), else '' (omp's default config). nil when the
+  -- environment cannot be read.
   local function running_profile(info)
     local argv = info.argv or {}
     for i, a in ipairs(argv) do
@@ -412,7 +413,7 @@ return function(config, wezterm)
     if not f then return nil end
     local env = f:read('*a') or ''
     f:close()
-    return env:match('%f[^%z]OMP_PROFILE=([^%z]*)') or env:match('^OMP_PROFILE=([^%z]*)') or DEFAULT_PROFILE
+    return env:match('%f[^%z]OMP_PROFILE=([^%z]*)') or env:match('^OMP_PROFILE=([^%z]*)') or ''
   end
 
   local function shquote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
@@ -509,11 +510,7 @@ return function(config, wezterm)
   end
 
   local function start_omp(window, pane, label)
-    local profile = profile_of(label)
-    if not profile then
-      return toast(window, 'No omp profile is paired with account ' .. tostring(label)
-        .. '; choose one in the settings panel')
-    end
+    local profile = profile_of(label) or ''
     local target = target_pane(window, pane)
     local info = target and target:get_foreground_process_info()
     if not info then return toast(window, 'Cannot tell what is running in the pane') end
@@ -521,8 +518,10 @@ return function(config, wezterm)
     if name == 'omp' then
       local running = running_profile(info)
       if running == profile then return toast(window, 'omp is already running with account ' .. label) end
-      if not running or not profile then
-        return toast(window, 'Cannot tell which account omp is running with')
+      if not running then return toast(window, 'Cannot tell which account omp is running with') end
+      if running == '' or profile == '' then
+        return toast(window, 'A chat moves only between omp profiles; account ' .. tostring(label)
+          .. (profile == '' and ' has none' or ' is reached from the default omp config'))
       end
       local kind = api.pane_kind and api.pane_kind(target:pane_id())
       local function go(working)
@@ -548,7 +547,7 @@ return function(config, wezterm)
     if not SHELLS[name] then
       return toast(window, string.format('%s is running in this pane, not a shell prompt', name))
     end
-    target:send_text('omp --profile=' .. profile .. '\r')
+    target:send_text(profile == '' and 'omp\r' or ('omp --profile=' .. profile .. '\r'))
   end
   api.start_omp = start_omp
 
@@ -570,7 +569,7 @@ return function(config, wezterm)
     local profile = running_profile(info)
     if not profile then return nil end
     for _, a in ipairs(S.accounts()) do
-      if a.profile == profile then return a.label end
+      if (a.profile or '') == profile then return a.label end
     end
     return nil
   end
@@ -603,7 +602,7 @@ return function(config, wezterm)
   config.keys = config.keys or {}
   local popup = S.key('quota_popup', 'ALT+q')
   table.insert(config.keys, { key = popup.key, mods = popup.mods, action = api.select })
-  -- LEADER+u then 1..9 starts omp for the n-th account (main / 2 / private today) without
+  -- LEADER+u then 1..9 starts omp for the n-th account without
   -- the popup. The key is resolved when pressed, so the order follows the account list.
   config.key_tables = config.key_tables or {}
   local account_keys = {}

@@ -4,8 +4,8 @@ local T = require 'tests.lua.t'
 
 local T0 = 1800000000
 local ACCOUNTS = {
-  { label = 'main', dir = '~/.claude', profile = 'work' },
-  { label = '2', dir = '~/.claude-2', profile = 'team' },
+  { label = 'main', dir = '~/.claude', profile = 'alpha' },
+  { label = '2', dir = '~/.claude-2', profile = 'beta' },
   { label = 'private', dir = '~/.claude-private', profile = 'private' },
 }
 
@@ -256,7 +256,7 @@ T.test('Alt+q lists the accounts and picking one starts omp with its profile in 
   T.eq(p.sent, {}, 'Esc starts nothing')
   wz.stub.perform(key(config, 'q', 'ALT'), win, p)
   wz.stub.picker(win).answer('2')
-  T.eq(p.sent, { 'omp --profile=team\r' })
+  T.eq(p.sent, { 'omp --profile=beta\r' })
 end)
 
 T.test('LEADER+u then a digit starts omp for that account in list order', function(wz)
@@ -273,7 +273,7 @@ end)
 T.test('starting omp refuses a pane running another program or omp with that account already', function(wz)
   local cq = setup(wz)
   local vim = shell_pane(wz, 1, { process_info = { name = 'vim', argv = { 'vim' }, pid = 9 } })
-  local same = shell_pane(wz, 2, { process_info = omp_info(10, 'work') })
+  local same = shell_pane(wz, 2, { process_info = omp_info(10, 'alpha') })
   local win = wz.fake.grid { { pane = vim, active = true }, { pane = same, left = 41 } }
   cq.start_omp(win, vim, 'main')
   cq.start_omp(win, same, 'main')
@@ -282,13 +282,23 @@ T.test('starting omp refuses a pane running another program or omp with that acc
   T.eq(#wz.stub.children, 0, 'omp-switch never ran')
 end)
 
-T.test('an account without a paired profile is refused with a hint', function(wz)
+T.test('an account without a paired profile starts a bare omp', function(wz)
   local cq = setup(wz, { accounts = { { label = 'work', dir = '~/.claude-work' } } })
   local p = shell_pane(wz, 1)
   local win = wz.fake.grid { { pane = p } }
   cq.start_omp(win, p, 'work')
+  T.eq(p.sent, { 'omp\r' })
+  T.eq(#win.toasts, 0)
+end)
+
+T.test('a running omp is not moved to an account without a profile', function(wz)
+  local cq = setup(wz, { accounts = { { label = 'work', dir = '~/.claude-work' } } })
+  local p = wz.fake.pane { id = 1, process_info = omp_info(11, 'alpha') }
+  local win = wz.fake.grid { { pane = p } }
+  cq.start_omp(win, p, 'work')
   T.eq(p.sent, {})
   T.eq(#win.toasts, 1)
+  T.eq(#wz.stub.children, 0, 'omp-switch never ran')
 end)
 
 T.test('from the sidebar the account starts in the grid pane used last', function(wz)
@@ -300,7 +310,7 @@ T.test('from the sidebar the account starts in the grid pane used last', functio
   }
   wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 1, last = 3 } }
   cq.start_omp(win, bar, 'main')
-  T.eq({ bar.sent, a.sent, b.sent }, { {}, {}, { 'omp --profile=work\r' } })
+  T.eq({ bar.sent, a.sent, b.sent }, { {}, {}, { 'omp --profile=alpha\r' } })
 end)
 
 -- Active account ----------------------------------------------------------------------------
@@ -328,8 +338,8 @@ T.test('the account of the focused omp pane is highlighted and follows focus', f
   local cq = setup(wz, { files = {
     main = ok_entry('main', 90, 95), ['2'] = ok_entry('2', 10, 20), private = ok_entry('private', 30, 40),
   } })
-  local work, priv = profile_pane(wz, 1, 'work'), profile_pane(wz, 2, 'private')
-  local win = wz.fake.grid { { pane = work, active = true }, { pane = priv, left = 41 } }
+  local alpha, priv = profile_pane(wz, 1, 'alpha'), profile_pane(wz, 2, 'private')
+  local win = wz.fake.grid { { pane = alpha, active = true }, { pane = priv, left = 41 } }
   T.eq(cq.active(win), 'main')
   T.eq(bold_labels(cq.tiers(cq.active(win))[1].items), { 'main' })
   priv:activate()
@@ -349,7 +359,7 @@ end)
 T.test('from the sidebar the highlight follows the grid pane used last', function(wz)
   local cq = setup(wz)
   local bar = shell_pane(wz, 1)
-  local a, b = profile_pane(wz, 2, 'work'), profile_pane(wz, 3, 'team')
+  local a, b = profile_pane(wz, 2, 'alpha'), profile_pane(wz, 3, 'beta')
   local win, tab = wz.fake.grid {
     { pane = bar, width = 5, active = true }, { pane = a, left = 6 }, { pane = b, left = 47 },
   }
@@ -379,7 +389,7 @@ end
 
 T.test('a busy omp is only switched after a Yes; Yes interrupts, quits, moves the chat and resumes it', function(wz)
   local cq = setup(wz)
-  local p = omp_pane(wz, 7, 'work')
+  local p = omp_pane(wz, 7, 'alpha')
   local win = wz.fake.grid { { pane = p } }
   cq.set_pane_kind(function(id) return id == 7 and 'working' or nil end)
   switch_script(wz, { state = 'ok', session = '/s/a.jsonl', cwd = '/w' }, { state = 'ok', session = '/s2/a.jsonl' })
@@ -391,16 +401,16 @@ T.test('a busy omp is only switched after a Yes; Yes interrupts, quits, moves th
   T.eq({ p.sent, #wz.stub.children }, { {}, 0 }, 'No keeps omp running')
   cq.start_omp(win, p, '2')
   wz.stub.picker(win).answer('yes')
-  T.eq(p.sent, { '\x1b', '\x04', "cd '/w' && omp --profile=team --resume '/s2/a.jsonl'\r" })
+  T.eq(p.sent, { '\x1b', '\x04', "cd '/w' && omp --profile=beta --resume '/s2/a.jsonl'\r" })
   T.eq(wz.stub.children, {
-    { '/fake/bin/omp-switch', 'locate', '--pid', '507', '--from', 'work' },
-    { '/fake/bin/omp-switch', 'transfer', '--session', '/s/a.jsonl', '--from', 'work', '--to', 'team' },
+    { '/fake/bin/omp-switch', 'locate', '--pid', '507', '--from', 'alpha' },
+    { '/fake/bin/omp-switch', 'transfer', '--session', '/s/a.jsonl', '--from', 'alpha', '--to', 'beta' },
   })
 end)
 
 T.test('an idle omp with no chat yet restarts fresh under the new profile', function(wz)
   local cq = setup(wz)
-  local p = omp_pane(wz, 8, 'work')
+  local p = omp_pane(wz, 8, 'alpha')
   local win = wz.fake.grid { { pane = p } }
   cq.set_pane_kind(function() return 'idle' end)
   switch_script(wz, { state = 'none' }, nil)
@@ -412,7 +422,7 @@ end)
 
 T.test('omp that does not quit keeps running and a later switch is not blocked', function(wz)
   local cq = setup(wz)
-  local p = omp_pane(wz, 9, 'work', true)
+  local p = omp_pane(wz, 9, 'alpha', true)
   local win = wz.fake.grid { { pane = p } }
   switch_script(wz, { state = 'ok', session = '/s/a.jsonl', cwd = '/elsewhere' }, { state = 'ok', session = '/s2/b' })
   cq.start_omp(win, p, '2')
@@ -427,7 +437,7 @@ end)
 
 T.test('a failed locate aborts before omp is touched', function(wz)
   local cq = setup(wz)
-  local p = omp_pane(wz, 10, 'work')
+  local p = omp_pane(wz, 10, 'alpha')
   local win = wz.fake.grid { { pane = p } }
   switch_script(wz, { state = 'error', reason = 'several omp in this terminal' }, nil)
   cq.start_omp(win, p, '2')
@@ -438,7 +448,7 @@ end)
 
 T.test('a failed transfer after omp quit reports it and resumes nothing', function(wz)
   local cq = setup(wz)
-  local p = omp_pane(wz, 11, 'work')
+  local p = omp_pane(wz, 11, 'alpha')
   local win = wz.fake.grid { { pane = p } }
   switch_script(wz, { state = 'ok', session = '/s/a.jsonl', cwd = '/elsewhere' },
     { state = 'error', reason = 'different chat under that name' })

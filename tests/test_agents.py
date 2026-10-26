@@ -63,7 +63,7 @@ class Base(unittest.TestCase):
 
     def write_state(self, pane_id, **kw):
         d = {"v": 1, "pane": pane_id, "pid": SELF_PID, "sessionId": "s1", "cwd": "/abs/p", "title": "T",
-             "profile": "work", "state": "working", "reason": None, "since": NOW - 30, "updated": NOW - 1,
+             "profile": "alpha", "state": "working", "reason": None, "since": NOW - 30, "updated": NOW - 1,
              "pending": None, "error": None}
         d.update(kw)
         with open(os.path.join(self.dir, f"{pane_id}.json"), "w") as f:
@@ -85,7 +85,7 @@ class TestCollect(Base):
         self.write_state(3, state="busy", reason="bash: npm test (42s)")
         a = self.collect([pane(3, "π ⠋ something")])[3]
         self.assertEqual((a.state, a.source, a.reason, a.since), ("busy", "ext", "bash: npm test (42s)", NOW - 30))
-        self.assertEqual((a.profile, a.cwd, a.title, a.session_id, a.pid), ("work", "/abs/p", "T", "s1", SELF_PID))
+        self.assertEqual((a.profile, a.cwd, a.title, a.session_id, a.pid), ("alpha", "/abs/p", "T", "s1", SELF_PID))
 
     def test_dead_pid_is_exited(self):
         self.write_state(3, pid=DEAD_PID, state="working")
@@ -148,13 +148,13 @@ class TestCollect(Base):
         fg = {"pts/1": (10, "bash", 5, "-bash"),
               "pts/2": (11, "python3", 5, "python3 /x/hivegrid-bar --surface #101010"),
               "pts/3": (12, "python3", 5, "python3 /x/hivegrid-overview"),
-              "pts/4": (13, "omp", 5, "omp --profile team"),
+              "pts/4": (13, "omp", 5, "omp --profile beta"),
               "pts/5": (14, "claude", 5, "claude"),
               "pts/6": (15, "bash", 5, "-bash")}
         rows = self.collect([pane(1), pane(2), pane(3), pane(4, "plain"), pane(5, "x"),
                              pane(6, "π > stale title")], fg=fg)
         self.assertEqual(sorted(rows), [4, 5])
-        self.assertEqual((rows[4].state, rows[4].profile, rows[4].source), ("idle", "team", "title"))
+        self.assertEqual((rows[4].state, rows[4].profile, rows[4].source), ("idle", "beta", "title"))
         self.assertEqual((rows[5].source, rows[5].state), ("scrape", "idle"))
 
     def test_dock_with_state_file_still_excluded(self):
@@ -436,7 +436,7 @@ class TestChrome(unittest.TestCase):
         self.assertTrue(A.is_chrome("python3", "env PWD=/x /home/u/.local/bin/hivegrid-git"))
         self.assertTrue(A.is_chrome("env", "env YAZI_CONFIG_HOME=/y /home/u/.local/bin/yazi"))
         self.assertTrue(A.is_chrome("lazygit", "lazygit"))
-        self.assertFalse(A.is_chrome("omp", "omp --profile work"))
+        self.assertFalse(A.is_chrome("omp", "omp --profile alpha"))
         self.assertFalse(A.is_chrome("bash", "bash"))
         self.assertFalse(A.is_chrome("", ""))
 

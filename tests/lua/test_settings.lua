@@ -33,7 +33,7 @@ T.test('malformed JSON falls back to defaults everywhere', function()
     T.eq(S.theme_palette(), {}, text)
     T.eq(S.theme_terminal(), {}, text)
     T.eq(S.key('equalize', 'CTRL+SHIFT+e'), { key = 'e', mods = 'CTRL|SHIFT' }, text)
-    T.eq(labels(S.accounts()), { 'main', '2', 'private' }, text)
+    T.eq(S.accounts(), {}, text)
   end
 end)
 
@@ -108,14 +108,11 @@ end)
 
 -- Accounts ------------------------------------------------------------------------
 
-T.test('default accounts: tilde expanded, creds detected, ~/.claude not listed twice', function(wz)
+T.test('no settings file: only the discovered accounts, tilde expanded, no profile', function(wz)
   creds(home() .. '/.claude')
   local S = load(wz, nil)
-  T.eq(S.accounts(), {
-    { label = 'main', profile = 'work', dir = home() .. '/.claude', creds = true },
-    { label = '2', profile = 'team', dir = home() .. '/.claude-2', creds = false },
-    { label = 'private', profile = 'private', dir = home() .. '/.claude-private', creds = false },
-  })
+  T.eq(S.accounts(), { { label = 'main', dir = home() .. '/.claude', creds = true } })
+  T.eq(S.signature(), 'main=')
 end)
 
 T.test('discovered ~/.claude-X with credentials are appended sorted by label', function(wz)
@@ -134,8 +131,8 @@ T.test('hidden accounts are skipped and their directory is not rediscovered', fu
   creds(home() .. '/.claude-2')
   creds(home() .. '/.claude-extra')
   local S = load(wz, { accounts = {
-    { label = 'main', dir = '~/.claude', profile = 'work' },
-    { label = '2', dir = '~/.claude-2', profile = 'team', hidden = true },
+    { label = 'main', dir = '~/.claude', profile = 'alpha' },
+    { label = '2', dir = '~/.claude-2', profile = 'beta', hidden = true },
   } })
   T.eq(labels(S.accounts()), { 'main', 'extra' })
 end)
@@ -150,14 +147,23 @@ T.test('malformed account entries are skipped, empty profile means none', functi
   T.eq(S.accounts(), { { label = 'ok', dir = home() .. '/x', creds = false } })
 end)
 
-T.test('discovered accounts pair with known or same-named omp profiles', function(wz)
+T.test('discovered accounts pair with the profile of the same name; main first, then by label', function(wz)
   for _, d in ipairs { '.claude', '.claude-2', '.claude-work', '.claude-solo' } do creds(home() .. '/' .. d) end
   os.execute('mkdir -p ' .. T.sh_quote(home() .. '/.omp/profiles/work'))
+  os.execute('mkdir -p ' .. T.sh_quote(home() .. '/.omp/profiles/other')) -- no account of that name
   local S = load(wz, { accounts = {} }) -- an empty list: everything is discovered
   local got = {}
   for _, a in ipairs(S.accounts()) do got[a.label] = a.profile or false end
-  T.eq(got, { main = 'work', ['2'] = 'team', work = 'work', solo = false })
-  T.eq(labels(S.accounts()), { '2', 'main', 'solo', 'work' })
+  T.eq(got, { main = false, ['2'] = false, work = 'work', solo = false })
+  T.eq(labels(S.accounts()), { 'main', '2', 'solo', 'work' })
+end)
+
+T.test('a profile directory named after the label pairs; an explicit profile wins', function(wz)
+  for _, d in ipairs { '.claude', '.claude-2' } do creds(home() .. '/' .. d) end
+  os.execute('mkdir -p ' .. T.sh_quote(home() .. '/.omp/profiles/main'))
+  os.execute('mkdir -p ' .. T.sh_quote(home() .. '/.omp/profiles/2'))
+  local S = load(wz, { accounts = { { label = '2', dir = '~/.claude-2', profile = 'beta' } } })
+  T.eq(S.signature(), '2=beta,main=main')
 end)
 
 T.test('account scan is cached for 10 s, then picks up new directories', function(wz)
@@ -170,7 +176,7 @@ T.test('account scan is cached for 10 s, then picks up new directories', functio
   T.eq(labels(S.accounts()), { 'main' }, 'still cached 9 s later')
   T.clock(1010)
   T.eq(labels(S.accounts()), { 'main', '2' }, 'rescanned after 10 s')
-  T.eq(S.signature(), 'main=,2=team')
+  T.eq(S.signature(), 'main=,2=')
 end)
 
 -- File watching -------------------------------------------------------------------

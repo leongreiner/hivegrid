@@ -192,7 +192,7 @@ describe("reduce", () => {
 
 describe("helpers", () => {
 	test("profileFromAgentDir", () => {
-		expect(profileFromAgentDir("/h/.omp/profiles/work/agent", {})).toBe("work");
+		expect(profileFromAgentDir("/h/.omp/profiles/alpha/agent", {})).toBe("alpha");
 		expect(profileFromAgentDir("/h/.omp/agent", {})).toBeNull();
 		expect(profileFromAgentDir("/h/.omp/agent", { OMP_PROFILE: "x" })).toBe("x");
 	});
@@ -256,7 +256,7 @@ describe("extension wiring (fake pi)", () => {
 		process.env.WEZTERM_PANE = "4242";
 		try {
 			const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
-			const pi = { on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h), pi: { getAgentDir: () => "/h/.omp/profiles/team/agent" } };
+			const pi = { on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h), pi: { getAgentDir: () => "/h/.omp/profiles/beta/agent" } };
 			const resolved: unknown[][] = [];
 			let tickFn: (() => void) | null = null;
 			const mkCtx = (kind: string) => ({
@@ -274,7 +274,7 @@ describe("extension wiring (fake pi)", () => {
 			const stateFile = path.join(dir, "hivegrid-agents", "4242.json");
 			await handlers.session_start({}, main);
 			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({
-				v: 1, pane: 4242, state: "idle", profile: "team", cwd: "/work", sessionId: "sid", title: "T", pending: null,
+				v: 1, pane: 4242, state: "idle", profile: "beta", cwd: "/work", sessionId: "sid", title: "T", pending: null,
 			});
 			await handlers.agent_start({}, mkCtx("sub"));
 			expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).state).toBe("idle");

@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in Hivegrid does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Keys pressed, buttons clicked, layout (number of panes, sidebar view, dock open?).
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: WezTerm build
+      options:
+        - Hivegrid fork build
+        - Stock WezTerm
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hivegrid version or commit
+      placeholder: v0.1.0-alpha.1 or a commit hash
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, window size, omp version
+      placeholder: Ubuntu 24.04, 1920x1080, omp 18.13.0
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Lua errors show in the WezTerm log (`dev/qa/hgq log N` in the sandbox). Remove tokens and private paths first.

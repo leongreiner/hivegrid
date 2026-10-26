@@ -40,7 +40,7 @@ class Model:
         self.accounts = accounts
 
 
-def sample(ts, label="work", five=None, seven=None, **extra):
+def sample(ts, label="alpha", five=None, seven=None, **extra):
     s = {"ts": ts, "label": label, **extra}
     if five is not None:
         s["five_hour"] = five
@@ -68,8 +68,8 @@ class LoadHistoryTest(Env):
     def test_malformed_lines_are_skipped(self):
         path = os.path.join(self.tmp, "history.jsonl")
         good = [sample(NOW - 60, five={"pct": 10}), sample(NOW, "2", seven={"pct": 5.5})]
-        lines = [json.dumps(good[0]), "", "not json", "[1, 2]", json.dumps({"ts": "yesterday", "label": "work"}),
-                 json.dumps({"ts": NOW, "label": 7}), json.dumps({"label": "work"}), json.dumps(good[1]),
+        lines = [json.dumps(good[0]), "", "not json", "[1, 2]", json.dumps({"ts": "yesterday", "label": "alpha"}),
+                 json.dumps({"ts": NOW, "label": 7}), json.dumps({"label": "alpha"}), json.dumps(good[1]),
                  '{"ts": 1700000100, "label": "se']  # a write cut short
         with open(path, "w") as f:
             f.write("\n".join(lines))
@@ -83,7 +83,7 @@ class SeriesForTest(Env):
     def test_range_start_is_inclusive_and_first_ignores_the_range(self):
         samples = [sample(NOW - 10 * H, five={"pct": 1}), sample(NOW - 6 * H, five={"pct": 2}),
                    sample(NOW - H, five={"pct": 3}, seven={"pct": 30})]
-        series, _, first = P.series_for(samples, "work", NOW - 6 * H)
+        series, _, first = P.series_for(samples, "alpha", NOW - 6 * H)
         self.assertEqual(series["five_hour"], [(NOW - 6 * H, 2.0), (NOW - H, 3.0)])
         self.assertEqual(series["seven_day"], [(NOW - H, 30.0)])
         self.assertEqual(first, NOW - 10 * H)
@@ -91,7 +91,7 @@ class SeriesForTest(Env):
     def test_points_are_sorted_and_bad_windows_skipped(self):
         samples = [sample(NOW - 1, five={"pct": 9}), sample(NOW - 3, five={"pct": 7}),
                    sample(NOW - 2, five={"pct": "high"}, seven="broken")]
-        series, _, _ = P.series_for(samples, "work", NOW - H)
+        series, _, _ = P.series_for(samples, "alpha", NOW - H)
         self.assertEqual(series["five_hour"], [(NOW - 3, 7.0), (NOW - 1, 9.0)])
         self.assertEqual(series["seven_day"], [])
 
@@ -99,24 +99,24 @@ class SeriesForTest(Env):
         r = 1_700_010_000  # a whole minute
         samples = [sample(NOW - 3, five={"pct": 1, "reset_at": r + 12}), sample(NOW - 2, five={"pct": 2, "reset_at": r - 20}),
                    sample(NOW - 1, five={"pct": 3, "reset_at": r + 5 * H})]
-        _, resets, _ = P.series_for(samples, "work", NOW - H)
+        _, resets, _ = P.series_for(samples, "alpha", NOW - H)
         self.assertEqual(resets["five_hour"], {r, r + 5 * H})
 
     def test_samples_follow_the_account_directory(self):
         samples = [sample(NOW - 3, "2", five={"pct": 1}),  # old label-only sample of ~/.claude-2
-                   sample(NOW - 2, "team", five={"pct": 2}, dir="~/.claude-2"),
-                   sample(NOW - 1, "team", five={"pct": 3}, dir="~/.claude-other")]  # another account, same label
-        series, _, _ = P.series_for(samples, "team", NOW - H, acc_dir="~/.claude-2")
+                   sample(NOW - 2, "beta", five={"pct": 2}, dir="~/.claude-2"),
+                   sample(NOW - 1, "beta", five={"pct": 3}, dir="~/.claude-other")]  # another account, same label
+        series, _, _ = P.series_for(samples, "beta", NOW - H, acc_dir="~/.claude-2")
         self.assertEqual([v for _, v in series["five_hour"]], [1.0, 2.0])
 
     def test_other_accounts_do_not_count_as_history(self):
-        _, _, first = P.series_for([sample(NOW - 5, "other", five={"pct": 1})], "work", NOW - H, acc_dir="~/.claude-work")
+        _, _, first = P.series_for([sample(NOW - 5, "other", five={"pct": 1})], "alpha", NOW - H, acc_dir="~/.claude-alpha")
         self.assertIsNone(first)
 
 
 class UsagePageTest(Env):
     def page(self, samples, range_name="24h"):
-        pg = P.UsagePage(Model([{"label": "work", "dir": "~/.claude-work"}]), "work", range_name,
+        pg = P.UsagePage(Model([{"label": "alpha", "dir": "~/.claude-alpha"}]), "alpha", range_name,
                          history=os.path.join(self.tmp, "none.jsonl"), now=lambda: NOW)
         pg.samples = samples
         return pg
@@ -212,9 +212,9 @@ class UsagePageTest(Env):
         self.assertFalse(any("not recorded" in row for row in self.render(pg)[2][5:]))
 
     def test_wide_layout_lists_every_account_beside_the_chart(self):
-        pg = P.UsagePage(Model([{"label": "work", "dir": "~/.claude-work"}, {"label": "team", "dir": "~/.claude-2"},
+        pg = P.UsagePage(Model([{"label": "alpha", "dir": "~/.claude-alpha"}, {"label": "beta", "dir": "~/.claude-2"},
                                 {"label": "gone", "dir": "~/.claude-gone", "hidden": True}]),
-                         "work", "24h", history=os.path.join(self.tmp, "none.jsonl"), now=lambda: NOW)
+                         "alpha", "24h", history=os.path.join(self.tmp, "none.jsonl"), now=lambda: NOW)
         pg.samples = [sample(NOW - 30 * H, five={"pct": 10}), sample(NOW - H, five={"pct": 20})]
         ui, w = FakeUI(), 240
         cv = U.Canvas(w, 50, "#ffffff", ui.pal["base"])
@@ -224,13 +224,13 @@ class UsagePageTest(Env):
         self.assertEqual(col, (ux - 2, uw + 4), "status and footer line up with the composition")
         sx = ux + uw - P.UsagePage.SIDE_W
         self.assertEqual(rows[0][sx + 2:sx + 9], "Account")
-        self.assertEqual([rows[2][sx + 2:sx + 9].strip(), rows[3][sx + 2:sx + 9].strip()], ["work", "team"])
+        self.assertEqual([rows[2][sx + 2:sx + 9].strip(), rows[3][sx + 2:sx + 9].strip()], ["alpha", "beta"])
         self.assertNotIn("gone", "".join(rows), "hidden accounts are not offered")
         self.assertNotIn("Account ", rows[0][:sx], "no account chips: the table picks")
         chart = [x for row in cv.cells[5:] for x, c in enumerate(row) if c[2] == ui.pal["deep"]]
         self.assertLess(max(chart), sx, "the chart ends before the table")
         cv.hit_at(sx + 4, 3)("left")
-        self.assertEqual(pg.account, "team")
+        self.assertEqual(pg.account, "beta")
 
 
 class QuotaLinesTest(unittest.TestCase):
@@ -311,11 +311,11 @@ class ParsePanesTest(unittest.TestCase):
         self.assertEqual([r["cwd"] for r in rows], ["~/proj", "~", "/home/leonard/x", "/"])
 
     def test_foreground_process_profile_and_kind(self):
-        fg = {"pts/1": (10, "omp", 75, "omp --profile=work"), "pts/2": (11, "omp", 5, "omp --profile team"),
+        fg = {"pts/1": (10, "omp", 75, "omp --profile=alpha"), "pts/2": (11, "omp", 5, "omp --profile beta"),
               "pts/3": (12, "bash", 9, "-bash"), "pts/4": (13, "claude", 3, "claude --profile=x")}
         rows = self.panes([{"pane_id": i, "tty_name": f"/dev/pts/{i}"} for i in (1, 2, 3, 4, 5)], fg)
         self.assertEqual([(r["proc"], r["profile"], r["agent"], r["idle"]) for r in rows],
-                         [("omp", "work", True, False), ("omp", "team", True, False), ("bash", "", False, True),
+                         [("omp", "alpha", True, False), ("omp", "beta", True, False), ("bash", "", False, True),
                           ("claude", "", True, False), ("?", "", False, False)])
         self.assertEqual(rows[0]["age"], 75)
 

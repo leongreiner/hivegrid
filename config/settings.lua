@@ -5,21 +5,15 @@
 --   S.key(name, default) -> { key = 'f', mods = 'CTRL' } from "CTRL+f" style strings (mods nil
 --                           when the binding has none); `default` is used when the file has no entry
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
---                          list (today's three when it has none) plus any ~/.claude[-X] directory
---                          holding a .credentials.json that the list does not mention
+--                          list plus any ~/.claude[-X] directory holding a .credentials.json that
+--                          the list does not mention (main first, then by label). An account pairs
+--                          with the omp profile of its label when ~/.omp/profiles/<label> exists,
+--                          otherwise it has no profile (omp's default config)
 --   S.signature()       -> string that changes when the account list changes
 -- The file's directory sits on the config reload watch list, so a save from the panel
 -- reloads the config. Credentials are only tested for existence, never read.
 local api
 
-local DEFAULT_ACCOUNTS = {
-  { label = 'main', profile = 'work', dir = '~/.claude' },
-  { label = '2', profile = 'team', dir = '~/.claude-2' },
-  { label = 'private', profile = 'private', dir = '~/.claude-private' },
-}
--- Profiles paired with a label by convention; any other label pairs with a profile of
--- the same name when ~/.omp/profiles/<label> exists.
-local KNOWN_PROFILES = { main = 'work', ['2'] = 'team', private = 'private' }
 local SCAN_TTL = 10
 
 local function build(wezterm)
@@ -115,7 +109,7 @@ local function build(wezterm)
   end
 
   local function pair_profile(label, profiles)
-    return KNOWN_PROFILES[label] or (profiles[label] and label) or nil
+    return profiles[label] and label or nil
   end
 
   local scan = { t = -math.huge, list = nil }
@@ -125,7 +119,7 @@ local function build(wezterm)
     local profiles = profile_names()
     local base = type(data.accounts) == 'table' and data.accounts or nil
     local list, seen = {}, {}
-    for _, a in ipairs(base or DEFAULT_ACCOUNTS) do
+    for _, a in ipairs(base or {}) do
       if type(a) == 'table' and type(a.label) == 'string' and type(a.dir) == 'string' then
         seen[expand(a.dir)] = true
         if not a.hidden then
@@ -147,7 +141,10 @@ local function build(wezterm)
         extra[#extra + 1] = { label = label, profile = pair_profile(label, profiles), dir = p, creds = true }
       end
     end
-    table.sort(extra, function(a, b) return a.label < b.label end)
+    table.sort(extra, function(a, b)
+      if (a.label == 'main') ~= (b.label == 'main') then return a.label == 'main' end
+      return a.label < b.label
+    end)
     for _, e in ipairs(extra) do list[#list + 1] = e end
     scan.t, scan.list = now, list
     return list

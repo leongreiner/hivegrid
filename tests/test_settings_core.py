@@ -90,14 +90,14 @@ class SettingsFileNormalisation(TempHome):
 
     def test_stored_accounts_drop_malformed_entries_and_coerce_fields(self):
         s = S.Settings(self.settings_file({"accounts": [
-            {"label": "main", "dir": "~/.claude", "profile": "work", "auto": 1},
+            {"label": "main", "dir": "~/.claude", "profile": "alpha", "auto": 1},
             {"label": "x"},  # no dir
             {"dir": "~/.claude-y"},  # no label
             "garbage",
             {"label": "w", "dir": "~/w", "profile": "", "hidden": "yes"},
         ]}))
         self.assertEqual(s.stored_accounts(), [
-            {"label": "main", "profile": "work", "dir": "~/.claude", "auto": True, "hidden": False},
+            {"label": "main", "profile": "alpha", "dir": "~/.claude", "auto": True, "hidden": False},
             {"label": "w", "profile": None, "dir": "~/w", "auto": False, "hidden": True},
         ])
         self.assertIsNone(S.Settings(self.settings_file({"accounts": {"a": 1}})).stored_accounts())
@@ -164,30 +164,36 @@ class AccountDiscovery(TempHome):
         self.claude_dir(".claude-")  # no name after the dash
         (self.home / ".claude-file").write_text("not a dir")
         self.profile("work")
+        self.profile("main")
+        self.profile("alpha")  # no account of that name
         found = S.discover_accounts()
         self.assertEqual([(a["label"], a["profile"], a["dir"]) for a in found], [
-            ("main", "work", "~/.claude"),
-            ("2", "team", "~/.claude-2"),
-            ("private", "private", "~/.claude-private"),
-            ("work", "work", "~/.claude-work"),  # other label: profile of the same name exists
+            ("main", "main", "~/.claude"),  # main first, then by name
+            ("2", None, "~/.claude-2"),
+            ("private", None, "~/.claude-private"),
+            ("work", "work", "~/.claude-work"),  # the profile of the same name exists
             ("zeta", None, "~/.claude-zeta"),  # no such profile: unpaired
         ])
         self.assertTrue(all(a["auto"] and not a["hidden"] for a in found))
 
-    def test_known_labels_pair_by_convention_not_by_name(self):
-        self.profile("main")
+    def test_without_profile_directories_nothing_pairs(self):
+        self.claude_dir(".claude")
+        self.claude_dir(".claude-2")
+        self.assertEqual([a["profile"] for a in S.discover_accounts()], [None, None])
+
+    def test_pairing_needs_a_profile_of_the_same_name(self):
         self.profile("2")
-        self.assertEqual(S.pair_profile("main", S.omp_profiles()), "work")
-        self.assertEqual(S.pair_profile("2", S.omp_profiles()), "team")
+        self.assertEqual(S.pair_profile("2", S.omp_profiles()), "2")
+        self.assertIsNone(S.pair_profile("main", S.omp_profiles()))
 
 
 class MergeAccounts(TempHome):
     def test_rescan_keeps_manual_entries_and_drops_vanished_auto_ones(self):
         self.claude_dir(".claude")
         existing = [
-            {"label": "main", "profile": "work", "dir": "~/.claude", "auto": True, "hidden": False},
+            {"label": "main", "profile": "alpha", "dir": "~/.claude", "auto": True, "hidden": False},
             {"label": "gone", "profile": None, "dir": "~/.claude-gone", "auto": True, "hidden": False},
-            {"label": "mine", "profile": "work", "dir": "~/elsewhere", "auto": False, "hidden": False},
+            {"label": "mine", "profile": "alpha", "dir": "~/elsewhere", "auto": False, "hidden": False},
         ]
         merged = S.merge_accounts(existing, S.discover_accounts())
         self.assertEqual([a["label"] for a in merged], ["main", "mine"])
@@ -202,7 +208,7 @@ class MergeAccounts(TempHome):
     def test_newly_found_directories_are_appended(self):
         self.claude_dir(".claude")
         self.claude_dir(".claude-new")
-        existing = [{"label": "main", "profile": "work", "dir": "~/.claude", "auto": True, "hidden": False}]
+        existing = [{"label": "main", "profile": "alpha", "dir": "~/.claude", "auto": True, "hidden": False}]
         merged = S.merge_accounts(existing, S.discover_accounts())
         self.assertEqual([(a["label"], a["auto"]) for a in merged], [("main", True), ("new", True)])
 
@@ -214,7 +220,7 @@ class MergeAccounts(TempHome):
         self.claude_dir(".claude")
         self.claude_dir(".claude-x")
         path = self.settings_file({"accounts": [
-            {"label": "boss", "profile": "work", "dir": "~/.claude", "auto": True},
+            {"label": "boss", "profile": "alpha", "dir": "~/.claude", "auto": True},
             {"label": "manual", "dir": "/opt/claude", "auto": False},
         ]})
         self.assertEqual([a["label"] for a in S.Settings(path).accounts()], ["boss", "manual", "x"])

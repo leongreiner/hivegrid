@@ -1,5 +1,5 @@
 [submodule "wezterm"]
 	path = wezterm
-	url = git@github.com:leongreiner/wezterm.git
+	url = https://github.com/leongreiner/wezterm.git
 	branch = hivegrid
 	shallow = true

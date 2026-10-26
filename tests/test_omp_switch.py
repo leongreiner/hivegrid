@@ -22,8 +22,8 @@ class Base(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.home = Path(os.path.realpath(tmp.name))
-        self.src = self.agent("work")
-        self.dst = self.agent("team")
+        self.src = self.agent("alpha")
+        self.dst = self.agent("beta")
 
     def agent(self, profile):
         a = self.home / ".omp" / "profiles" / profile / "agent"
@@ -71,7 +71,7 @@ class Locate(Base):
         rec.write_text("\n".join([str(cwd or self.cwd), str(session)] + (["fresh"] if fresh else [])) + "\n")
 
     def locate(self, proc):
-        return self.run_cli("locate", "--pid", str(proc.pid), "--from", "work")
+        return self.run_cli("locate", "--pid", str(proc.pid), "--from", "alpha")
 
     def test_terminal_record_finds_the_session(self):
         s = self.session(self.src)
@@ -107,7 +107,7 @@ class Locate(Base):
         proc = self.spawn()
         self.record(outside)
         self.assertEqual(self.locate(proc)["state"], "error")
-        sneaky = self.src / "sessions" / ".." / ".." / ".." / "team" / "agent" / "sessions" / "--proj--" / "2026_chat.jsonl"
+        sneaky = self.src / "sessions" / ".." / ".." / ".." / "beta" / "agent" / "sessions" / "--proj--" / "2026_chat.jsonl"
         self.record(sneaky)
         self.assertEqual(self.locate(proc)["state"], "error")
 
@@ -137,10 +137,10 @@ class Locate(Base):
     def test_unknown_profile_and_dead_process_are_errors(self):
         proc = self.spawn()
         self.assertEqual(self.run_cli("locate", "--pid", str(proc.pid), "--from", "nope")["state"], "error")
-        self.assertEqual(self.run_cli("locate", "--pid", str(proc.pid), "--from", "../work")["state"], "error")
+        self.assertEqual(self.run_cli("locate", "--pid", str(proc.pid), "--from", "../alpha")["state"], "error")
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        self.assertEqual(self.run_cli("locate", "--pid", str(dead.pid), "--from", "work")["state"], "error")
+        self.assertEqual(self.run_cli("locate", "--pid", str(dead.pid), "--from", "alpha")["state"], "error")
 
 
 def snapshot(root):
@@ -171,14 +171,14 @@ class Transfer(Base):
         (blobs / f"{H2}.png").write_bytes(b"blob2")
         (blobs / H3).write_bytes(b"unreferenced")
         self.target = self.dst / "sessions" / "--proj--" / "2026_chat.jsonl"
-        self.before = snapshot(self.home / ".omp" / "profiles" / "work")
+        self.before = snapshot(self.home / ".omp" / "profiles" / "alpha")
 
     def tearDown(self):
-        self.assertEqual(snapshot(self.home / ".omp" / "profiles" / "work"), self.before,
+        self.assertEqual(snapshot(self.home / ".omp" / "profiles" / "alpha"), self.before,
                          "the source profile was modified")
 
     def transfer(self, session=None):
-        return self.run_cli("transfer", "--session", str(session or self.s), "--from", "work", "--to", "team")
+        return self.run_cli("transfer", "--session", str(session or self.s), "--from", "alpha", "--to", "beta")
 
     def test_copies_session_artifacts_and_referenced_blobs_under_the_same_names(self):
         self.assertEqual(self.transfer(), {"state": "ok", "session": str(self.target)})
@@ -236,11 +236,11 @@ class Transfer(Base):
         self.assertEqual(self.transfer(self.src / "sessions" / "--proj--" / "missing.jsonl")["state"], "error")
         notes = self.src / "sessions" / "--proj--" / "notes.txt"
         notes.write_text("x")
-        self.before = snapshot(self.home / ".omp" / "profiles" / "work")
+        self.before = snapshot(self.home / ".omp" / "profiles" / "alpha")
         self.assertEqual(self.transfer(notes)["state"], "error")
-        sneaky = self.src / "sessions" / ".." / ".." / ".." / "team" / "agent" / "sessions" / "--x--" / "other.jsonl"
+        sneaky = self.src / "sessions" / ".." / ".." / ".." / "beta" / "agent" / "sessions" / "--x--" / "other.jsonl"
         self.assertEqual(self.transfer(sneaky)["state"], "error")
-        out = self.run_cli("transfer", "--session", str(self.s), "--from", "work", "--to", "../evil")
+        out = self.run_cli("transfer", "--session", str(self.s), "--from", "alpha", "--to", "../evil")
         self.assertEqual(out["state"], "error")
         self.assertFalse((self.home / ".omp" / "profiles" / "evil").exists())
         self.assertFalse(self.target.exists())

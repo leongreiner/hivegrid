@@ -344,7 +344,7 @@ class SettingsPage(U.Page):
                 self.cursor[2] = len(accts) - 1
                 login = "" if (Path(untilde(d)) / ".credentials.json").exists() else f"; log in: CLAUDE_CONFIG_DIR={d} claude"
                 self.changed(ui, f"added {label}{login}")
-                if not profile:
+                if not profile and self.profiles:
                     ui.close_modal()
                     self.pick_profile(ui, len(accts) - 1)
                 return None
@@ -519,12 +519,12 @@ class SettingsPage(U.Page):
         dim_bg = U.mix(t["base"], t["deep"], 0.35)  # inactive panes are dimmed
         cv.fill(rx, by, rw, body, bg=dim_bg)
         lines = [
-            [("leon@hive", ansi[2]), (":", t["text"]), ("~/proj", ansi[4]), ("$ git status", t["text"])],
+            [("user@hive", ansi[2]), (":", t["text"]), ("~/proj", ansi[4]), ("$ git status", t["text"])],
             [("On branch ", t["text"]), ("main", ansi[6])],
             [("  modified:   src/app.py", ansi[1])],
             [("  new file:   README.md", ansi[2])],
             [("selected text", t["bright"], term["selection_bg"])],
-            [("leon@hive", ansi[2]), (":", t["text"]), ("~/proj", ansi[4]), ("$ ", t["text"]), ("█", t["accent"])],
+            [("user@hive", ansi[2]), (":", t["text"]), ("~/proj", ansi[4]), ("$ ", t["text"]), ("█", t["accent"])],
         ]
         for k, parts in enumerate(lines[:max(body - 1, 0)]):
             pos = lx + 1
@@ -782,7 +782,7 @@ def same_dir(a, b):
 def sample_of(s, label, acc_dir):
     """A history sample belongs to the account with its directory. Older samples carry only the
     label they were written under, so they also match through the label convention: history
-    written as `2` stays with ~/.claude-2 after the account was renamed `team`."""
+    written as `2` stays with ~/.claude-2 after the account was renamed `work`."""
     d = s.get("dir")
     if isinstance(d, str):
         return bool(acc_dir) and same_dir(d, acc_dir)

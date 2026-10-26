@@ -54,20 +54,20 @@ HISTORY_EVERY = 120  # at most one sample per account this often, unless a numbe
 
 
 def label_for(path):
-    """~/.claude -> main, ~/.claude-2 -> 2, ~/.claude-private -> private."""
+    """~/.claude -> main, ~/.claude-2 -> 2, ~/.claude-work -> work."""
     name = Path(path).name.lstrip(".")
     name = re.sub(r"^claude[-_.]?", "", name)
     return name or "main"
 
 
 def profile_for(label):
-    """The omp profile paired with an account label (main -> work, 2 -> team, ...) as in
-    settings.lua and the settings panel; the label itself when nothing pairs."""
+    """The omp profile paired with an account label: the one of the same name when
+    ~/.omp/profiles/<label> exists (as in settings.lua and the settings panel), else None."""
     try:
         names = [p.name for p in OMP_PROFILES.iterdir() if p.is_dir()]
     except OSError:
         names = []
-    return pair_profile(label, names) or label
+    return pair_profile(label, names)
 
 
 def discover_dirs(home=None):
@@ -83,8 +83,7 @@ def discover_dirs(home=None):
             d = home / name
             if d.is_dir() and (d / ".credentials.json").exists():
                 found.append(d)
-    order = {".claude": 0, ".claude-2": 1, ".claude-private": 2}
-    found.sort(key=lambda d: (order.get(d.name, 99), d.name))
+    found.sort(key=lambda d: (d.name != ".claude", d.name))
     return found
 
 

@@ -2,6 +2,18 @@
 
 # Hivegrid
 
+<p align="center">
+  <a href="https://github.com/leongreiner/hivegrid/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/leongreiner/hivegrid/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange">
+  <a href="https://github.com/leongreiner/hivegrid/releases"><img alt="Release" src="https://img.shields.io/github/v/release/leongreiner/hivegrid?include_prereleases&label=release"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-lightgrey">
+  <a href="https://wezterm.org"><img alt="WezTerm 20240203+" src="https://img.shields.io/badge/WezTerm-20240203%2B-4e49ee"></a>
+  <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen"></a>
+</p>
+
+> **Alpha software.** Hivegrid works and is used daily, but expect rough edges, changing settings and keys, and bugs. Bug reports and pull requests are very welcome (see [Contributing](#contributing)).
+
 A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi) AI coding agents side by side in a pane grid, with per-agent state visible at a glance.
 
 ![Hivegrid UI with sidebar and main-side layout](assets/screenshots/hivegrid-ui.png)
@@ -29,7 +41,7 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 Requires WezTerm 20240203 or newer, Python 3, curl and unzip.
 
 ```sh
-git clone git@github.com:leongreiner/hivegrid.git
+git clone https://github.com/leongreiner/hivegrid.git
 cd hivegrid
 ./install.sh [--tools]
 ```
@@ -94,7 +106,7 @@ Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), `C
 - **Settings** writes `~/.config/hivegrid/settings.json`; the WezTerm config watches it, so *Save* applies at once to the header, tabs and terminal colours, and the bar, dock and git view repaint in the new theme while they run (a missing file means today's defaults). Closing with unsaved changes asks: *Save and close*, *Discard* or *Back*.
   - *Theme*: Hivegrid Navy (the default), Midnight Black, Slate and Forest, each shown as a card in its own colours, a live preview (a miniature window with header, bar, two panes, the dock and the 16 terminal colours) and an accent colour (quick swatches, `[` / `]` to step through them, or any `#rrggbb` with *Edit…*). A preset sets the header and tab palette and the terminal colours, and brings its own accent.
   - *Keys*: click a binding (or `Enter`) and press the new keys. Conflicts with another setting, with the fixed Hivegrid bindings and with WezTerm defaults (`wezterm --skip-config show-keys`) are shown inline; the first two refuse, the last asks. While recording, the config's own bindings are suspended (user var `hivegrid_capture`), so bound chords such as `Ctrl+F` reach the panel. A terminal reports only Ctrl+letter, Alt+key and plain keys; other chords (`CTRL+SHIFT+k`) are typed with *Type it*. *Reset* restores a default.
-  - *Accounts*: add, rename, pick the omp profile, hide or remove, rescan. Every `~/.claude` and `~/.claude-<name>` directory that contains a `.credentials.json` is an account (existence only; the file is never read), labelled `main` for `~/.claude` and `<name>` otherwise. omp profiles pair by convention: `main` with `work`, `2` with `team`, `private` with `private`; any other label pairs with `~/.omp/profiles/<label>` when it exists, and otherwise the panel asks for a profile. Entries carry `auto: true/false`, so manual ones survive rescans; removing an entry whose directory still holds credentials hides it instead. A directory the list does not mention yet is shown in the header anyway and offered under *Found on this machine*. Hidden or removed accounts leave the header, the quota refresh and the `LEADER+u` keys at once.
+  - *Accounts*: add, rename, pick the omp profile, hide or remove, rescan. Every `~/.claude` and `~/.claude-<name>` directory that contains a `.credentials.json` is an account (existence only; the file is never read), labelled `main` for `~/.claude` and `<name>` otherwise, `main` first, then by name. An account pairs with the omp profile of the same name when `~/.omp/profiles/<label>` exists; otherwise it has no profile and omp starts with its default config (the panel offers a profile only when some exist). Entries carry `auto: true/false`, so manual ones survive rescans; removing an entry whose directory still holds credentials hides it instead. A directory the list does not mention yet is shown in the header anyway and offered under *Found on this machine*. Hidden or removed accounts leave the header, the quota refresh and the `LEADER+u` keys at once.
   - *About*: panel version, settings file, WezTerm version and whether the Hivegrid build (clickable segments, overlay action) is running.
   - On a wide window the sections are a list on the left (with a summary of each, amber `●` while it has unsaved edits; `←→`, `Tab` or a click switch), and Keys and Accounts show the selected binding or account in a detail pane with its actions (*Change*, *Reset*, *Reset all*; *Rename*, *Profile*, *Hide*/*Show*, *Remove*, plus the account's quota and reset times).
 - **Usage** shows the account's current 5h and 7d numbers with their reset countdowns (as the header does) and charts both windows over 6 h, 24 h, 7 d or 30 d (`←→` account, `↑↓` or `1`-`4` range) with dotted window-reset markers, from `~/.cache/wezterm-claude-quota/history.jsonl`, which `claude-quota refresh` appends to (percentages, reset times and the account's directory only, one sample per account every two minutes, sooner when a number moved by a point or more, trimmed to about 30 days, mode 0600). Samples belong to the account directory, so renaming an account keeps its history (older label-only samples follow the `main` = `~/.claude`, `<name>` = `~/.claude-<name>` convention). The span before the first sample is shaded, labelled "not recorded" inside it and dated above the chart, and a line breaks where nothing was recorded for 20 minutes or more. On a wide window a table of every account (5h and 7d use, when the 5h window resets, the age of the last sample) sits beside the chart; click a row to show that account.
@@ -125,7 +137,7 @@ The accounts are, in order of precedence: `CLAUDE_QUOTA_DIRS` (or `--dirs`), a c
 
 ### Switching accounts without losing the chat
 
-Clicking an account pill (or `Alt+q`, or `LEADER+u <n>`) in a pane that runs a shell starts `omp --profile=<profile>`. In a pane that already runs omp under another profile it moves the chat over:
+Clicking an account pill (or `Alt+q`, or `LEADER+u <n>`) in a pane that runs a shell starts `omp --profile=<profile>` (a bare `omp` for an account without a profile). In a pane that already runs omp under another profile it moves the chat over (a chat moves only between omp profiles: an account without a profile starts a bare `omp`, but a running omp is not moved to or from it):
 
 1. `omp-switch locate` finds the session (omp records each terminal's session in `<profile>/agent/terminal-sessions/pts-N`; only paths are read, never the conversation);
 2. omp is asked to quit with `Ctrl+D` and has five seconds; with unsent text in its prompt it stays, the switch is abandoned and a toast says so (never `kill`);
@@ -136,7 +148,7 @@ If the pane looks busy (agent working or asking), a dialog asks "switch anyway?"
 
 ## Custom WezTerm build
 
-`wezterm/` is a submodule pointing at a private WezTerm fork (branch `hivegrid`) that adds clickable header segments (`status-click`), the `ShowOverlayCommand` key assignment, which runs a program in an overlay over the active tab until it exits (the panels), and the drawn header mark. The mark is the option `tab_bar_brand = { enabled, size, margin_left, margin_right, colors = { center, center_outline, glow, ring, ring_outline } }` (`theme.BRAND_MARK` in `config/theme.lua` sets the icon's colours; the centre cell is blue and the six outer cells show agent-state colours), and `tab_bar_floating_tabs` puts tabs and `+` on the pills' line. The config also runs on stock WezTerm 20240203: clicks are ignored, the panels open in a new tab, the header shows a row of `⬢` glyphs instead of the drawn mark and the tabs rise from the bar's lower edge. To build it without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`; `wezterm/HIVEGRID.md` has the details.
+`wezterm/` is a submodule pointing at the [WezTerm fork](https://github.com/leongreiner/wezterm) (branch `hivegrid`) that adds clickable header segments (`status-click`), the `ShowOverlayCommand` key assignment, which runs a program in an overlay over the active tab until it exits (the panels), and the drawn header mark. The mark is the option `tab_bar_brand = { enabled, size, margin_left, margin_right, colors = { center, center_outline, glow, ring, ring_outline } }` (`theme.BRAND_MARK` in `config/theme.lua` sets the icon's colours; the centre cell is blue and the six outer cells show agent-state colours), and `tab_bar_floating_tabs` puts tabs and `+` on the pills' line. The config also runs on stock WezTerm 20240203: clicks are ignored, the panels open in a new tab, the header shows a row of `⬢` glyphs instead of the drawn mark and the tabs rise from the bar's lower edge. To build it without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`; `wezterm/HIVEGRID.md` has the details.
 
 The fork also tells a program that grabs the mouse when the pointer leaves its pane (private mode 8800, `wezterm/HIVEGRID.md`), which is what lets the bar and dock end their hover; stock WezTerm ignores the mode. It keeps the bar and the dock at their widths when the window is resized (the grid's columns shrink and grow in proportion), never dims them or gives the bar the keyboard focus on a click, and runs their background and divider from the header to the bottom border.
 
@@ -155,9 +167,13 @@ The fork also tells a program that grabs the mouse when the pointer leaves its p
 
 `dev/check` runs every check locally, the same ones CI runs: `py_compile` of all Python files and the unittest suite (`tests/*.py`, standard library only; PIL cases skip without PIL), `luac -p` of `config/` and the Lua tests (`tests/lua/`, a stdlib-only runner with a fake `wezterm` module, Lua 5.4), luacheck (`.luacheckrc`), the bun tests of the omp extension (`tests/ext`), shellcheck and actionlint. `dev/check py lua` runs only those steps; a tool that is not installed is skipped with a note.
 
-CI (`.github/workflows/ci.yml`, GitHub Actions on pushes and pull requests to `main`) runs one job per group of steps (Python, Lua, bun, shellcheck + actionlint), each calling `dev/check`; there a missing tool fails. It checks out without submodules, since the WezTerm fork is private.
+CI (`.github/workflows/ci.yml`, GitHub Actions on pushes and pull requests to `main`) runs one job per group of steps (Python, Lua, bun, shellcheck + actionlint), each calling `dev/check`; there a missing tool fails. It checks out without submodules, since the checks need only `config/`, `bin/`, `ext/` and `tests/`.
 
 `dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` uses it (slot 11, local only) to open the bar's views and the overview dock with their keys, check the panes, save screenshots and look for Lua errors.
+
+## Contributing
+
+Hivegrid is open to pull requests: bug fixes, new features, themes, docs and tests. Small focused changes are merged fastest; for a bigger feature or a redesign, open an issue first so the direction can be agreed. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run the checks (`dev/check`) and how to try a change in an isolated sandbox window (`dev/qa/hgq`). Found a bug or have an idea? Use the [issue templates](https://github.com/leongreiner/hivegrid/issues/new/choose). Security problems go through [SECURITY.md](SECURITY.md); everyone is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

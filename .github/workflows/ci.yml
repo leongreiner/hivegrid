@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # No submodules: wezterm/ is a private fork the workflow token cannot read.
+      # No submodules: the checks need only config/, bin/, ext/ and tests/, not the WezTerm fork.
       - uses: actions/checkout@v4
         with:
           submodules: false

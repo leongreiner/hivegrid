@@ -269,9 +269,6 @@ def check_binding(name, combo, keys, wez_defaults=None):
 
 # ---- accounts ----------------------------------------------------------------------
 
-KNOWN_PROFILES = {"main": "work", "2": "team", "private": "private"}
-KNOWN_ORDER = ["main", "2", "private"]
-
 
 def home():
     return Path(os.environ.get("HOME") or str(Path.home()))
@@ -295,9 +292,7 @@ def omp_profiles():
 
 
 def pair_profile(label, profiles):
-    """main/2/private pair by convention; any other label pairs with the profile of the same name."""
-    if label in KNOWN_PROFILES:
-        return KNOWN_PROFILES[label]
+    """The omp profile of the same name as the account label, when ~/.omp/profiles/<label> exists."""
     return label if label in profiles else None
 
 
@@ -320,7 +315,7 @@ def discover_accounts():
         if d.is_dir() and (d / ".credentials.json").exists():
             found.append({"label": label, "profile": pair_profile(label, profiles), "dir": tilde(d),
                           "auto": True, "hidden": False})
-    found.sort(key=lambda a: (KNOWN_ORDER.index(a["label"]) if a["label"] in KNOWN_ORDER else 99, a["label"]))
+    found.sort(key=lambda a: (a["label"] != "main", a["label"]))
     return found
 
 

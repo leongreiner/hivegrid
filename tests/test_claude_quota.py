@@ -129,14 +129,14 @@ class AccountPrecedence(Env):
             self.claude_dir(name)
         self.claude_dir(".claude-nocreds", token=None)
         self.settings({"accounts": [
-            {"label": "boss", "dir": "~/.claude", "profile": "work"},
+            {"label": "boss", "dir": "~/.claude", "profile": "alpha"},
             {"label": "two", "dir": "~/.claude-2", "hidden": True},
             {"label": "w", "dir": "~/work-claude", "profile": "work"},  # manual, no credentials yet
         ]})
         got = Q.resolve_accounts(ns())
-        self.assertEqual(got, [(self.home / ".claude", "boss", "work"),
+        self.assertEqual(got, [(self.home / ".claude", "boss", "alpha"),
                                (self.home / "work-claude", "w", "work"),
-                               (self.home / ".claude-x", "x", "x")])
+                               (self.home / ".claude-x", "x", None)])
 
     def test_without_settings_list_discovered_dirs_alone_in_order(self):
         for name in (".claude-zz", ".claude-private", ".claude-2", ".claude"):
@@ -147,15 +147,30 @@ class AccountPrecedence(Env):
         Q.SETTINGS.unlink()
         self.assertEqual([lb for _, lb, _ in Q.resolve_accounts(ns())], ["main", "2", "private", "zz"])
 
-    def test_unlisted_accounts_pair_with_conventional_profiles(self):
+    def test_unlisted_accounts_pair_with_the_profile_of_the_same_name(self):
         self.claude_dir(".claude")
         self.claude_dir(".claude-2")
         self.claude_dir(".claude-work")
         (Q.OMP_PROFILES / "work").mkdir(parents=True)
+        (Q.OMP_PROFILES / "main").mkdir()
+        (Q.OMP_PROFILES / "alpha").mkdir()  # no account of that name
         got = {lb: pf for _, lb, pf in Q.resolve_accounts(ns())}
-        self.assertEqual((got["main"], got["2"], got["work"]), ("work", "team", "work"))
+        self.assertEqual(got, {"main": "main", "2": None, "work": "work"})
+
+    def test_without_profile_directories_no_account_has_a_profile(self):
+        self.claude_dir(".claude")
+        self.claude_dir(".claude-2")
+        self.assertEqual([pf for _, _, pf in Q.resolve_accounts(ns())], [None, None])
+
+    def test_explicit_profile_wins_and_a_missing_one_pairs_by_name(self):
+        self.claude_dir(".claude")
+        self.claude_dir(".claude-2")
+        (Q.OMP_PROFILES / "main").mkdir(parents=True)
+        self.settings({"accounts": [{"label": "main", "dir": "~/.claude", "profile": "alpha"},
+                                    {"label": "2", "dir": "~/.claude-2", "profile": None}]})
+        self.assertEqual([pf for _, _, pf in Q.resolve_accounts(ns())], ["alpha", None])
         self.settings({"accounts": [{"label": "main", "dir": "~/.claude", "profile": None}]})
-        self.assertEqual(Q.resolve_accounts(ns())[0][2], "work")
+        self.assertEqual(Q.resolve_accounts(ns())[0][2], "main")
 
     def test_hidden_account_is_not_refreshed(self):
         self.claude_dir(".claude")
@@ -402,28 +417,28 @@ class TokenSources(Env):
 
     def test_omp_profile_token_wins_over_credentials(self):
         d = self.claude_dir(".claude", token="cred")
-        self.omp_db("work", [self.row("omp", FAR)])
-        self.assertEqual(self.refresh(d, "work")["state"], "ok")
+        self.omp_db("alpha", [self.row("omp", FAR)])
+        self.assertEqual(self.refresh(d, "alpha")["state"], "ok")
         self.assertEqual(self.calls, ["omp"])
 
     def test_expired_or_unusable_omp_rows_fall_back_to_credentials(self):
         d = self.claude_dir(".claude", token="cred")
-        self.omp_db("work", [self.row("old", PAST), self.row("dis", FAR, disabled="revoked"),
+        self.omp_db("alpha", [self.row("old", PAST), self.row("dis", FAR, disabled="revoked"),
                              self.row("oa", FAR, provider="openai"), self.row("key", FAR, kind="api_key"),
                              ("anthropic", "oauth", "not json", None), self.row("", FAR)])
-        self.refresh(d, "work")
+        self.refresh(d, "alpha")
         self.assertEqual(self.calls, ["cred"])
 
     def test_latest_expiring_omp_row_is_used(self):
         d = self.claude_dir(".claude", token=None)
-        self.omp_db("work", [self.row("a", FAR), self.row("b", FAR + 1000), self.row("c", FAR - 1000)])
-        self.refresh(d, "work")
+        self.omp_db("alpha", [self.row("a", FAR), self.row("b", FAR + 1000), self.row("c", FAR - 1000)])
+        self.refresh(d, "alpha")
         self.assertEqual(self.calls, ["b"])
 
     def test_no_valid_token_anywhere_is_login_without_request(self):
         d = self.claude_dir(".claude", token="cred", expires=PAST)
-        self.omp_db("work", [self.row("omp", PAST)])
-        e = self.refresh(d, "work")
+        self.omp_db("alpha", [self.row("omp", PAST)])
+        e = self.refresh(d, "alpha")
         self.assertEqual(e["state"], "login")
         self.assertEqual(self.calls, [])
         self.assertEqual(e["next_at"], NOW + Q.LOGIN_TTL)
@@ -438,25 +453,25 @@ class TokenSources(Env):
         self.assertEqual(Q.read_token(self.home / "missing", NOW), (None, "login"))
 
     def test_profile_names_cannot_escape_the_profiles_dir(self):
-        self.omp_db("work", [self.row("omp", FAR)])
-        for bad in ("../profiles/work", "work/../work", ".hidden", "", None):
+        self.omp_db("alpha", [self.row("omp", FAR)])
+        for bad in ("../profiles/alpha", "alpha/../alpha", ".hidden", "", None):
             self.assertIsNone(Q.read_omp_token(bad, NOW), bad)
-        self.assertEqual(Q.read_omp_token("work", NOW), "omp")
+        self.assertEqual(Q.read_omp_token("alpha", NOW), "omp")
 
     def test_agent_db_is_never_modified(self):
         d = self.claude_dir(".claude", token="cred")
-        db = self.omp_db("work", [self.row("omp", FAR)])
+        db = self.omp_db("alpha", [self.row("omp", FAR)])
         before = (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns, sorted(os.listdir(db.parent)))
-        self.refresh(d, "work")
+        self.refresh(d, "alpha")
         after = (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns, sorted(os.listdir(db.parent)))
         self.assertEqual(after, before)
 
     def test_corrupt_db_falls_back_to_credentials(self):
         d = self.claude_dir(".claude", token="cred")
-        bad = Q.OMP_PROFILES / "work" / "agent"
+        bad = Q.OMP_PROFILES / "alpha" / "agent"
         bad.mkdir(parents=True)
         (bad / "agent.db").write_bytes(b"not a database at all" * 10)
-        self.refresh(d, "work")
+        self.refresh(d, "alpha")
         self.assertEqual(self.calls, ["cred"])
 
     def test_settings_profile_drives_the_token_lookup(self):

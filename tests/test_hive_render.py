@@ -924,7 +924,7 @@ class RealCore(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "7.json"), "w") as f:
             json.dump({"v": 1, "pane": 7, "pid": os.getpid(), "sessionId": "s", "cwd": "/home/u/proj", "title": "T",
-                       "profile": "work", "state": "busy", "reason": "2 background jobs", "since": NOW - 5,
+                       "profile": "alpha", "state": "busy", "reason": "2 background jobs", "since": NOW - 5,
                        "updated": NOW, "pending": None, "error": None}, f)
         panes = [{"pane_id": 7, "tab_id": 1, "window_id": 0, "title": "π ⠋ T", "cwd": "file://h/home/u/proj",
                   "is_active": True, "tty_name": "/dev/pts/7"},
