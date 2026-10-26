@@ -2,7 +2,7 @@
 Name=Hivegrid
 Comment=WezTerm workspace for many AI coding agents
 Exec=@WEZTERM@ start --cwd .
-Icon=@HOME@/.local/share/wezterm/wezterm-icon.png
+Icon=@HOME@/.local/share/wezterm/hivegrid-icon.png
 Type=Application
 Categories=System;TerminalEmulator;
 StartupWMClass=org.wezfurlong.wezterm

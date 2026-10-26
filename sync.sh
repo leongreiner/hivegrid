@@ -5,7 +5,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cfg=$HOME/.config/wezterm
 bindir=$HOME/.local/bin
-icon=$HOME/.local/share/wezterm/wezterm-icon.png
+icon=$HOME/.local/share/wezterm/hivegrid-icon.png
 
 changed=0
 copy() { # src dst
