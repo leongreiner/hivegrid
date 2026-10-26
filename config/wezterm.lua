@@ -140,8 +140,8 @@ config.launch_menu = {
   grid_entry('omp grid 3x3', 3, 3),
 }
 
--- Leader (Ctrl+Shift+Space) then 1/2/3 opens a new tab with the matching menu entry.
-config.leader = { key = 'Space', mods = 'CTRL|SHIFT', timeout_milliseconds = 1000 }
+-- Leader (Ctrl+Space) then 1/2/3 opens a new tab with the matching menu entry.
+config.leader = { key = 'Space', mods = 'CTRL', timeout_milliseconds = 1000 }
 for i, entry in ipairs(config.launch_menu) do
   table.insert(config.keys, {
     key = tostring(i),

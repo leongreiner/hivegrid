@@ -29,7 +29,7 @@ The installer copies `config/` to `~/.config/wezterm/`, `bin/` to `~/.local/bin/
 
 ## Keys
 
-`LEADER` is `Ctrl+Shift+Space`.
+`LEADER` is `Ctrl+Space`.
 
 | Group | Keys | Action |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ The installer copies `config/` to `~/.config/wezterm/`, `bin/` to `~/.local/bin/
 | | `Alt+]`, `Alt+[` | next / previous agent pane |
 | | `LEADER+g` | pane picker |
 | | `LEADER+b` | toggle broadcast typing to all panes of the tab |
-| Sidebar | `LEADER+f` / `LEADER+t` | file explorer / git view |
+| Sidebar | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | | `LEADER+Tab` | hide or show, remembering the view |
 | Misc | `Ctrl+C` / `Ctrl+V` | smart copy or interrupt / paste |
 | | `Alt+s` / `Alt+q` | toggle system stats / Claude quota |
