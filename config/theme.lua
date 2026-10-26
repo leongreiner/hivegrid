@@ -92,97 +92,46 @@ end
 
 -- Rounded cap glyphs (Powerline half circles, drawn by WezTerm itself).
 M.CAP_L, M.CAP_R = '\u{e0b6}', '\u{e0b4}'
-local EIGHTHS = { '▏', '▎', '▍', '▌', '▋', '▊', '▉' }
 
--- Rounded progress bar `cells` wide (caps included): `fill` over a rounded track a
--- shade lighter than the pill body `bg`, eighth-cell precision.
-function M.gauge(pct, cells, fill, bg)
-  local track = M.lerp(bg, M.P.edge_hi, 0.3)
-  local inner = cells - 2
-  local eighths = math.floor(math.max(0, math.min(100, pct)) / 100 * inner * 8 + 0.5)
-  if pct > 0 and eighths == 0 then eighths = 1 end
-  local full, part = eighths // 8, eighths % 8
-  local items = {
-    { Foreground = { Color = eighths > 0 and fill or track } }, { Background = { Color = bg } },
-    { Text = M.CAP_L },
-  }
-  if full > 0 then
-    items[#items + 1] = { Background = { Color = fill } }
-    items[#items + 1] = { Text = string.rep(' ', full) }
+-- Slim progress bar `cells` wide: `fill` over a dimmer track, one ▬ per cell. It is a
+-- font glyph, so it sits on the same line as the digits (the box-drawing lines are
+-- scaled to the whole pill and ride above them), and no text ever sits on the bar.
+-- The cell the fill edge falls in takes a blend of fill and track in proportion, so
+-- nothing straddles the boundary. `bg` is the colour the bar sits on; the track is a
+-- shade lighter than it.
+function M.meter(pct, cells, fill, bg)
+  local track = M.lerp(bg, M.P.edge_hi, 0.48)
+  local filled = math.max(0, math.min(100, pct)) / 100 * cells
+  if pct > 0 and filled < 0.5 then filled = 0.5 end
+  local items = { { Background = { Color = bg } } }
+  local run, run_color = 0, nil
+  local function flush()
+    if run == 0 then return end
+    items[#items + 1] = { Foreground = { Color = run_color } }
+    items[#items + 1] = { Text = string.rep('▬', run) }
+    run = 0
   end
-  local rest = inner - full
-  if part > 0 then
-    items[#items + 1] = { Foreground = { Color = fill } }
-    items[#items + 1] = { Background = { Color = track } }
-    items[#items + 1] = { Text = EIGHTHS[part] }
-    rest = rest - 1
+  for k = 1, cells do
+    local share = math.max(0, math.min(1, filled - (k - 1)))
+    local c = share >= 0.95 and fill or (share <= 0.05 and track or M.lerp(track, fill, share))
+    if c ~= run_color then flush() end
+    run_color = c
+    run = run + 1
   end
-  if rest > 0 then
-    items[#items + 1] = { Background = { Color = track } }
-    items[#items + 1] = { Text = string.rep(' ', rest) }
-  end
-  items[#items + 1] = { Foreground = { Color = eighths >= inner * 8 and fill or track } }
-  items[#items + 1] = { Background = { Color = bg } }
-  items[#items + 1] = { Text = M.CAP_R }
+  flush()
   return items
 end
 
--- Bar `cells` wide (rounded caps included) with `text` laid over it, centred: cells
--- up to the fill carry `fill` as background and dark text, the rest the track and light
--- text, so the text stays legible on both sides of the fill edge. A cell the fill edge
--- cuts through is drawn in eighths when it is blank and flips whole otherwise.
--- Returns wezterm.format items that end on background `bg`.
-function M.gauge_text(pct, cells, fill, bg, text, opts)
-  opts = opts or {}
-  local track = opts.track or M.lerp(bg, M.P.edge_hi, 0.3)
-  local on_fill, on_track = opts.on_fill or M.P.deep, opts.on_track or M.P.text
-  local inner = cells - 2
-  text = text or ''
-  if (utf8.len(text) or #text) > inner then text = wezterm.truncate_right(text, inner) end
-  local len = utf8.len(text) or #text
-  local chars = {}
-  for k = 1, inner do chars[k] = ' ' end
-  local at = (inner - len) // 2
-  for _, c in utf8.codes(text) do
-    at = at + 1
-    chars[at] = utf8.char(c)
-  end
-  local eighths = math.floor(math.max(0, math.min(100, pct)) / 100 * inner * 8 + 0.5)
-  if pct > 0 and eighths == 0 then eighths = 1 end
-  local full, part = eighths // 8, eighths % 8
-
-  local items = {
-    { Foreground = { Color = eighths > 0 and fill or track } }, { Background = { Color = bg } },
-    { Text = M.CAP_L },
+-- A small rounded chip with `text` on `color` (dark text), sitting on background `bg`:
+-- the "login" flag of a quota account.
+function M.chip(text, color, bg)
+  return {
+    { Foreground = { Color = color } }, { Background = { Color = bg } }, { Text = M.CAP_L },
+    { Foreground = { Color = M.P.deep } }, { Background = { Color = color } },
+    { Attribute = { Intensity = 'Bold' } }, { Text = text },
+    { Attribute = { Intensity = 'Normal' } },
+    { Foreground = { Color = color } }, { Background = { Color = bg } }, { Text = M.CAP_R },
   }
-  local run, run_fg, run_bg = '', nil, nil
-  local function flush()
-    if run == '' then return end
-    items[#items + 1] = { Foreground = { Color = run_fg } }
-    items[#items + 1] = { Background = { Color = run_bg } }
-    items[#items + 1] = { Text = run }
-    run = ''
-  end
-  for k = 1, inner do
-    local ch, fg, cbg = chars[k], on_track, track
-    if k <= full then
-      fg, cbg = on_fill, fill
-    elseif k == full + 1 and part > 0 then
-      if ch == ' ' then
-        ch, fg, cbg = EIGHTHS[part], fill, track
-      elseif part >= 4 then
-        fg, cbg = on_fill, fill
-      end
-    end
-    if fg ~= run_fg or cbg ~= run_bg then flush() end
-    run_fg, run_bg = fg, cbg
-    run = run .. ch
-  end
-  flush()
-  items[#items + 1] = { Foreground = { Color = full >= inner and fill or track } }
-  items[#items + 1] = { Background = { Color = bg } }
-  items[#items + 1] = { Text = M.CAP_R }
-  return items
 end
 
 -- Thin-line bar for popups: the selector highlights its current row by reversing
@@ -257,7 +206,23 @@ function M.group(parts, bg)
   return M.pill(body, bg)
 end
 
--- The Hivegrid mark: the logo's seven hexagons as a row of ⬢ glyphs, centre strong
+-- The mark drawn by the Hivegrid WezTerm fork (option tab_bar_brand): the app icon's
+-- seven hexagons, centre strong blue, the ring by agent state (done green, working
+-- light blue, needs input light red, waiting grey-blue). Sizes in pixels at 96 dpi.
+M.BRAND_MARK = {
+  enabled = true,
+  size = 30,
+  margin_left = 10,
+  margin_right = 8,
+  colors = {
+    center = '#1e90ff',
+    center_outline = '#96cdff',
+    ring = { '#1ea876', '#70aaee', '#ec6e76', '#70aaee', '#7a8eb8', '#70aaee' },
+    ring_outline = { '#82f0c3', '#c4e0ff', '#ffbebe', '#c4e0ff', '#cddaf0', '#c4e0ff' },
+  },
+}
+
+-- The Hivegrid mark for stock WezTerm: the logo's seven hexagons as a row of ⬢ glyphs, centre strong
 -- blue and the others coloured by agent state as in the icon (done green, working
 -- light blue, needs input light red, waiting grey-blue). No text, no pill; air around it
 -- so it never touches the first tab. opts.glyph and opts.color switch to a single-colour

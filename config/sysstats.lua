@@ -171,53 +171,57 @@ return function(config, wezterm)
   local function gib(kib) return kib / 1048576 end
   local function size(g) return g >= 10 and string.format('%.0f', g) or string.format('%.1f', g) end
 
-  -- One entry per available source: { label, pct, amount, inner }. inner is the width of
-  -- the bar's text area in the amount tier, fixed per source so a changing number
-  -- never shifts the groups beside it.
+  -- One entry per available source: { label, pct, amount, amount width }. The amount
+  -- is padded to a fixed width so a changing number never shifts what follows it.
   local function metrics()
     local out = {}
-    if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct, nil, 6 } end
+    if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct } end
     if mem.total then
       local used = gib(mem.total - mem.avail)
       out[#out + 1] = {
         'RAM', 100 * (mem.total - mem.avail) / mem.total,
-        string.format('%.1fG/%sG', used, size(gib(mem.total))), 10,
+        string.format('%.1fG/%sG', used, size(gib(mem.total))), 9,
       }
     end
     if disk.pct then
-      out[#out + 1] = { 'DSK', disk.pct, string.format('%sG free', size(gib(disk.free_kib))), 10 }
+      out[#out + 1] = { 'DSK', disk.pct, string.format('%sG free', size(gib(disk.free_kib))), 9 }
     end
     if gpu.util and gpu.kind == 'nvidia' and gpu.total_mib then
       out[#out + 1] = {
         'GPU', gpu.util, string.format('%.1f/%sG', gpu.used_mib / 1024, size(gpu.total_mib / 1024)), 8,
       }
     elseif gpu.util and gpu.kind == 'jetson' then
-      out[#out + 1] = { 'GPU', gpu.util, nil, 6 }
+      out[#out + 1] = { 'GPU', gpu.util }
     end
     return out
   end
 
-  -- Richest first; the caller takes the first tier that fits its cell budget.
-  -- bar: gauges with the value inside (inside = 'amount': the size, 'pct': the
-  -- percentage); without bar only label and percentage. only = labels kept.
+  -- Richest first; the caller takes the first tier that fits its cell budget. bar =
+  -- cells of the slim progress line after the percentage, amount = the absolute size
+  -- after it, only = labels kept.
   local TIERS = {
-    { bar = true, inside = 'amount' },
-    { bar = true, inside = 'pct', inner = 5 },
-    { bar = false },
-    { bar = false, only = { CPU = true, RAM = true } },
+    { bar = 6, amount = true },
+    { amount = true },
+    { bar = 5 },
+    {},
+    { only = { CPU = true, RAM = true } },
   }
 
-  -- Items of one metric: muted label, then a gauge with its value inside (bar tiers)
-  -- or the coloured percentage.
+  -- Items of one metric on the pill: muted label, the percentage in its state colour,
+  -- then the slim bar and the muted amount when the tier has them. Text always sits on
+  -- the plain pill, never on the bar.
   local function body(m, tier)
-    local items = { { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' } }
+    local items = {
+      { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' },
+      { Foreground = { Color = color(m[2]) } }, { Text = string.format('%3.0f%%', m[2]) },
+    }
     if tier.bar then
-      local text = tier.inside == 'amount' and m[3] or string.format('%.0f%%', m[2])
-      theme.extend(items, theme.gauge_text(
-        m[2], (tier.inner or m[4]) + 2, color(m[2]), P.pill, text))
-    else
-      items[#items + 1] = { Foreground = { Color = color(m[2]) } }
-      items[#items + 1] = { Text = string.format('%3.0f%%', m[2]) }
+      items[#items + 1] = { Text = ' ' }
+      theme.extend(items, theme.meter(m[2], tier.bar, color(m[2]), P.pill))
+    end
+    if tier.amount and m[3] then
+      items[#items + 1] = { Foreground = { Color = P.muted } }
+      items[#items + 1] = { Text = ' ' .. string.format('%-' .. m[4] .. 's', m[3]) }
     end
     return items
   end

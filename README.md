@@ -15,12 +15,12 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 - `omp-grid` launcher: equal grids, main-plus-side and column layouts, per-pane directories, optional new tab.
 - Resize, pane and broadcast key tables, and an equalize command that evens out all dividers.
 - Broadcast mode that types into every pane of the tab, with a visible `BROADCAST` marker.
-- System stats in the header: CPU, RAM, disk, GPU.
-- Claude Code usage (5h and 7d windows) for every account as a header chip; accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
+- System stats in the header: CPU, RAM, disk, GPU, each with its percentage, a slim bar and, when the window is wide enough, the absolute amount (`11.7G/31G`, `165G free`).
+- Claude Code usage (5h and 7d windows) for every account as a header chip with numbers and slim bars (an account that needs a login shows only an amber `login` chip); accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
 - Panels inside the window (logo click, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
 - Left sidebar with a yazi file explorer or lazygit, toggled by key or by clicking its handle.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
-- Dark-blue theme with raised tabs, a `HIVEGRID` header pill, wide padding, and dimmed inactive panes.
+- Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (a click opens the settings panel), wide padding, and dimmed inactive panes.
 
 ## Install
 
@@ -119,7 +119,7 @@ If the pane looks busy (agent working or asking), a dialog asks "switch anyway?"
 
 ## Custom WezTerm build
 
-`wezterm/` is a submodule pointing at a private WezTerm fork (branch `hivegrid`) that adds clickable header segments (`status-click`) and the `ShowOverlayCommand` key assignment, which runs a program in an overlay over the active tab until it exits (the panels). The config also runs on stock WezTerm 20240203: clicks are ignored and the panels open in a new tab. To build it without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`; `wezterm/HIVEGRID.md` has the details.
+`wezterm/` is a submodule pointing at a private WezTerm fork (branch `hivegrid`) that adds clickable header segments (`status-click`), the `ShowOverlayCommand` key assignment, which runs a program in an overlay over the active tab until it exits (the panels), and the drawn header mark. The mark is the option `tab_bar_brand = { enabled, size, margin_left, margin_right, colors = { center, center_outline, glow, ring, ring_outline } }` (`theme.BRAND_MARK` in `config/theme.lua` sets the icon's colours; the centre cell is blue and the six outer cells show agent-state colours), and `tab_bar_floating_tabs` puts tabs and `+` on the pills' line. The config also runs on stock WezTerm 20240203: clicks are ignored, the panels open in a new tab, the header shows a row of `⬢` glyphs instead of the drawn mark and the tabs rise from the bar's lower edge. To build it without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`; `wezterm/HIVEGRID.md` has the details.
 
 ## Notes and limits
 

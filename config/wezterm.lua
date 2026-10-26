@@ -112,7 +112,7 @@ config.colors.tab_bar = {
   inactive_tab = { bg_color = P.surface, fg_color = P.muted },
   inactive_tab_hover = { bg_color = T.tab_hover, fg_color = P.text },
   inactive_tab_edge = T.tab_edge,
-  new_tab = { bg_color = P.surface, fg_color = P.muted },
+  new_tab = { bg_color = P.deep, fg_color = P.muted },
   new_tab_hover = { bg_color = T.button_hover, fg_color = P.bright },
 }
 
@@ -134,9 +134,14 @@ for key, value in pairs {
   tab_bar_status_scale = 1.75,
   tab_bar_separator_height = 1,
   tab_bar_separator_color = P.border,
+  tab_bar_floating_tabs = true,
 } do
   pcall(function() config[key] = value end)
 end
+
+-- The Hivegrid mark is drawn by the fork (seven hexagons, like the app icon); stock
+-- WezTerm rejects the option and the header falls back to the glyph row in theme.brand.
+local BRAND_DRAWN = pcall(function() config.tab_bar_brand = theme.BRAND_MARK end)
 
 -- Agent state tracking registers its own update-status first, so the state is fresh below.
 local as = require('agentstatus')(config, wezterm)
@@ -153,7 +158,11 @@ config.status_update_interval = 1000
 -- and never shrinks tabs for the right status, so titles are fitted to that cap here
 -- and the status is fitted to what the tabs leave over.
 local LEFT_PX, NEW_TAB_PX, BUTTONS_PX = 14, 21, 146
-local BRAND_CELLS = theme.width(theme.brand())
+local BRAND_CELLS = BRAND_DRAWN and 0 or theme.width(theme.brand())
+if BRAND_DRAWN then
+  local m = theme.BRAND_MARK
+  LEFT_PX = m.margin_left + m.size + m.margin_right + 4 -- 4: the tab row's half-cell padding
+end
 local TAB_PAD_CELLS = 4 -- element padding, border and the close button
 local TAB_CELLS = 34 -- widest title text
 
@@ -186,11 +195,13 @@ local function tab_layout(parts, tab_index, cap)
 end
 
 -- How the right status gives up width: { 'tier', group, tier } takes a group to a
--- narrower tier, { 'drop', group } removes it (S = the sidebar toggle).
+-- narrower tier (a tier that is not narrower than the current one is skipped), { 'drop',
+-- group } removes it (S = the sidebar toggle). The system group keeps its amounts
+-- (tier 2) until the quota group is down to its compact tiers.
 local PLAN = {
-  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'C', 3 }, { 'tier', 'B', 3 }, { 'drop', 'S' },
-  { 'tier', 'A', 2 }, { 'tier', 'C', 4 }, { 'tier', 'B', 4 }, { 'tier', 'A', 3 }, { 'tier', 'B', 5 },
-  { 'tier', 'A', 4 }, { 'drop', 'C' }, { 'drop', 'B' }, { 'drop', 'A' },
+  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'drop', 'S' }, { 'tier', 'B', 4 },
+  { 'tier', 'C', 3 }, { 'tier', 'A', 2 }, { 'tier', 'C', 4 }, { 'tier', 'A', 3 }, { 'tier', 'B', 5 },
+  { 'tier', 'C', 5 }, { 'tier', 'A', 4 }, { 'drop', 'C' }, { 'drop', 'B' }, { 'drop', 'A' },
 }
 
 -- Right side of the header, in the cells the tabs leave over: [BROADCAST] [sidebar
@@ -293,7 +304,8 @@ wezterm.on('update-status', function(window, pane)
     if total() <= avail then break end
     local g = groups[step[2]]
     if step[1] == 'tier' then
-      if g.tiers[step[3]] then g.tier = math.max(g.tier, step[3]) end
+      local cur, to = g.tiers[g.tier], g.tiers[step[3]]
+      if to and (not cur or to.w < cur.w) then g.tier = step[3] end
     elseif step[1] == 'drop' then
       if step[2] == 'S' then lead_w, lead = 0, {} else g.tier = math.huge end
     end
@@ -311,7 +323,7 @@ wezterm.on('update-status', function(window, pane)
       items[#items + 1] = { Text = ' ' }
     end
   end
-  window:set_left_status(wezterm.format(theme.click('brand', theme.brand())))
+  window:set_left_status(BRAND_DRAWN and '' or wezterm.format(theme.click('brand', theme.brand())))
   window:set_right_status(wezterm.format(items))
 end)
 
