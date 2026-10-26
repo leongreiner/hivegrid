@@ -296,11 +296,17 @@ local function panel_action(name, extra)
   return act.SpawnCommandInNewTab { args = args }
 end
 local function settings_action() return panel_action('settings') end
+-- The hive needs to know which pane it covers: inside the overlay WezTerm reports the
+-- overlay's own pane, so the origin is passed on the command line (--origin).
+local function open_hive(window, pane)
+  window:perform_action(panel_action('hive', { '--origin', tostring(pane:pane_id()) }), pane)
+end
+local function hive_action() return wezterm.action_callback(open_hive) end
 
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
 -- Left click: start/switch omp (quota pill). Right click on a quota pill or a click on the
--- system group opens the matching panel. The logo (id 'brand') is not clickable yet.
+-- system group opens the matching panel; the logo (id 'brand') opens the agent hive.
 wezterm.on('status-click', function(window, pane, id, button)
   if button ~= 'Left' and button ~= 'Right' then return end
   local account = id:match('^quota:(.+)$')
@@ -312,6 +318,8 @@ wezterm.on('status-click', function(window, pane, id, button)
     end
   elseif id == 'system' then
     window:perform_action(panel_action('monitor'), pane)
+  elseif id == 'brand' then
+    open_hive(window, pane)
   end
 end)
 
@@ -397,6 +405,7 @@ local layouts = require('layouts')(config, wezterm)
 -- While the settings panel records a new key binding it sets the user var
 -- hivegrid_capture: the config's bindings are suspended meanwhile, so a chord such as
 -- CTRL+f reaches the panel instead of triggering what it is bound to.
+local overview -- set at the end, once the dock module is loaded
 wezterm.on('user-var-changed', function(window, pane, name, value)
   if name == 'sidebar_click' then
     -- The settings and overview buttons of the sidebar bar; its other buttons are handled
@@ -411,7 +420,13 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     end
     return
   end
-local overview -- set at the end, once the dock module is loaded
+  if name == 'hivegrid_hive_equalize' then
+    -- The hive panel asks for the regular equalize after it spawned, moved or removed
+    -- agent panes; the value is the pane id that should keep the keyboard focus.
+    local id = tonumber(tostring(value):match('^(%d+)'))
+    layouts.equalize(window, (id and wezterm.mux.get_pane(id)) or pane)
+    return
+  end
   if name ~= 'hivegrid_capture' then return end
   if value == '1' then
     window:set_config_overrides {
@@ -428,6 +443,7 @@ end)
 -- bindings above stays as it was.
 table.insert(config.keys, bound('settings', 'LEADER+,', panel_action('settings')))
 table.insert(config.keys, bound('usage_panel', 'LEADER+h', panel_action('usage')))
+table.insert(config.keys, bound('hive_panel', 'LEADER+a', hive_action()))
 
 -- Overview dock: LEADER+o by default (settings key overview_toggle).
 overview = require('overview')(config, wezterm, as, sb, layouts)

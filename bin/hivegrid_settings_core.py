@@ -105,6 +105,7 @@ BINDINGS = {
     "quota_toggle": ("Quota chip on/off", "LEADER+q", "leader"),
     "settings": ("Settings panel", "LEADER+,", "leader"),
     "usage_panel": ("Usage history panel", "LEADER+h", "leader"),
+    "hive_panel": ("Agent hive panel", "LEADER+a", "leader"),
 }
 
 # Bindings of the Hivegrid config that this panel does not change.

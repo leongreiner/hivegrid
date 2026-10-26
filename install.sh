@@ -50,6 +50,11 @@ for f in "$repo"/config/*.lua; do install_file "$f" "$cfg/$(basename "$f")"; don
 while IFS= read -r f; do install_file "$f" "$yazi_dst/${f#"$repo"/config/yazi/}"; done \
   < <(find "$repo/config/yazi" -type f | sort)
 for f in "$repo"/bin/*; do install_file "$f" "$bindir/$(basename "$f")" 755; done
+# omp extension publishing agent state for the hive panel (default agent dir + every profile)
+for agent_dir in "$HOME/.omp/agent" "$HOME"/.omp/profiles/*/agent; do
+  [ "$agent_dir" = "$HOME/.omp/agent" ] || [ -d "$agent_dir" ] || continue
+  install_file "$repo/ext/hivegrid-agent-state.ts" "$agent_dir/extensions/hivegrid-agent-state.ts" 644
+done
 install_file "$repo/assets/icon.png" "$icon_dst"
 
 rendered=$(mktemp)

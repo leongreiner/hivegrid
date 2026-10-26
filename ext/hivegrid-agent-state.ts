@@ -1,0 +1,562 @@
+/**
+ * hivegrid-agent-state: omp extension that publishes the main session's state to
+ *   ${XDG_RUNTIME_DIR:-/tmp}/hivegrid-agents/<WEZTERM_PANE>.json
+ * for the hivegrid hive panel, and executes plan-review answers the hive drops into
+ *   <dir>/<pane>.cmd.<unique>.json
+ *
+ * The state machine is the pure, exported `reduce`; everything else is thin I/O that
+ * never writes to stdout/stderr (omp's TUI owns the terminal) and never throws into omp.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+// ---------------------------------------------------------------------------------
+// Pure state machine
+// ---------------------------------------------------------------------------------
+
+export type AgentStateName = "working" | "busy" | "done" | "idle" | "attention";
+
+export type Pending =
+	| { kind: "plan_review"; reviewId: string; title: string; choices: { id: string; label: string }[] }
+	| { kind: "approval"; tool: string; summary: string }
+	| { kind: "ask"; question: string; options: string[] };
+
+export interface ToolRun {
+	name: string;
+	start: number;
+	summary: string;
+}
+
+export interface AgentModel {
+	state: AgentStateName;
+	reason: string | null;
+	since: number;
+	pending: Pending | null;
+	error: string | null;
+	/** the agent loop is running (between agent_start and agent_end/session_stop) */
+	running: boolean;
+	/** an agent loop has run at least once (idle -> done once it settles) */
+	started: boolean;
+	/** running async/background jobs, as last observed */
+	jobs: number;
+	tools: Record<string, ToolRun>;
+	approvalPending: boolean;
+}
+
+export type HiveEvent =
+	| { type: "agent_start" }
+	| { type: "agent_end"; jobs?: number }
+	| { type: "session_stop"; jobs?: number }
+	| { type: "tool_start"; id: string; name: string; args?: unknown }
+	| { type: "tool_end"; id: string; name?: string; isError?: boolean; errorText?: string }
+	| { type: "approval_requested"; tool: string; summary?: string }
+	| { type: "approval_resolved" }
+	| { type: "plan_review_requested"; review: unknown }
+	| { type: "plan_review_resolved" }
+	| { type: "tick"; jobs: number };
+
+/** A tool running longer than this with no model output turns `working` into `busy`. */
+export const BUSY_AFTER_S = 8;
+/** Tools that block on subagents / the human: never "busy". */
+const NON_BUSY_TOOLS = new Set(["task", "ask"]);
+
+export function initialModel(now: number): AgentModel {
+	return {
+		state: "idle",
+		reason: null,
+		since: now,
+		pending: null,
+		error: null,
+		running: false,
+		started: false,
+		jobs: 0,
+		tools: {},
+		approvalPending: false,
+	};
+}
+
+function clip(text: string, max: number): string {
+	const one = text.replace(/\s+/g, " ").trim();
+	return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+	return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+}
+
+/** One-line summary of a tool call's args ("npm test", a path, ...). */
+export function summarizeArgs(args: unknown): string {
+	const a = asRecord(args);
+	for (const key of ["command", "cmd", "path", "file_path", "pattern", "query", "url", "description", "prompt"]) {
+		const v = a[key];
+		if (typeof v === "string" && v) return clip(v, 60);
+	}
+	return "";
+}
+
+/** Extract question + options from an `ask` tool call's args (shape unverified: tolerate variants). */
+export function extractAsk(args: unknown): { question: string; options: string[] } {
+	const a = asRecord(args);
+	const first = Array.isArray(a.questions) && a.questions.length ? asRecord(a.questions[0]) : a;
+	const q = first.question ?? first.prompt ?? first.text ?? a.question;
+	const rawOptions = Array.isArray(first.options) ? first.options : Array.isArray(a.options) ? a.options : [];
+	const options: string[] = [];
+	for (const o of rawOptions) {
+		if (typeof o === "string") options.push(clip(o, 80));
+		else {
+			const r = asRecord(o);
+			const label = r.label ?? r.title ?? r.text ?? r.value ?? r.id;
+			if (typeof label === "string") options.push(clip(label, 80));
+		}
+	}
+	return { question: typeof q === "string" ? clip(q, 300) : "", options };
+}
+
+/** Normalise omp's plan_review_requested payload (or ctx.getPendingPlanReview()) into a Pending. */
+export function planReviewPending(review: unknown): Pending | null {
+	const r = asRecord(review);
+	const reviewId = r.reviewId;
+	if (typeof reviewId !== "string" || !reviewId) return null;
+	const choices: { id: string; label: string }[] = [];
+	if (Array.isArray(r.choices)) {
+		for (const c of r.choices) {
+			if (typeof c === "string") choices.push({ id: c, label: c });
+			else {
+				const cr = asRecord(c);
+				const id = cr.id ?? cr.choice ?? cr.value;
+				if (typeof id === "string") choices.push({ id, label: typeof cr.label === "string" ? cr.label : id });
+			}
+		}
+	}
+	return {
+		kind: "plan_review",
+		reviewId,
+		title: typeof r.title === "string" ? clip(r.title, 200) : "",
+		choices,
+	};
+}
+
+function pickTool(tools: Record<string, ToolRun>, filter: (t: ToolRun) => boolean, oldest: boolean): ToolRun | null {
+	let best: ToolRun | null = null;
+	for (const t of Object.values(tools)) {
+		if (!filter(t)) continue;
+		if (!best || (oldest ? t.start < best.start : t.start > best.start)) best = t;
+	}
+	return best;
+}
+
+function toolLabel(t: ToolRun, now: number | null): string {
+	const base = t.summary ? `${t.name}: ${t.summary}` : t.name;
+	return now === null ? base : `${base} (${Math.max(0, Math.floor(now - t.start))}s)`;
+}
+
+/** Derive state/reason from the facts held in the model; preserves `since` while the state is unchanged. */
+function settle(m: AgentModel, now: number): AgentModel {
+	let state: AgentStateName;
+	let reason: string | null;
+	if (m.pending) {
+		state = "attention";
+		reason =
+			m.pending.kind === "plan_review"
+				? "plan review"
+				: m.pending.kind === "approval"
+					? `approval: ${m.pending.tool}`
+					: "ask";
+	} else if (m.running) {
+		const slow = pickTool(m.tools, t => !NON_BUSY_TOOLS.has(t.name) && now - t.start > BUSY_AFTER_S, true);
+		if (slow) {
+			state = "busy";
+			reason = toolLabel(slow, now);
+		} else {
+			state = "working";
+			const cur = pickTool(m.tools, () => true, false);
+			reason = cur ? toolLabel(cur, null) : null;
+		}
+	} else if (m.jobs > 0) {
+		state = "busy";
+		reason = m.jobs === 1 ? "1 background job" : `${m.jobs} background jobs`;
+	} else {
+		state = m.started ? "done" : "idle";
+		reason = null;
+	}
+	const since = state === m.state ? m.since : now;
+	if (state === m.state && reason === m.reason && since === m.since) return m;
+	return { ...m, state, reason, since };
+}
+
+/** Pure transition function. Never mutates `m`. */
+export function reduce(m: AgentModel, ev: HiveEvent, now: number): AgentModel {
+	let n: AgentModel = m;
+	switch (ev.type) {
+		case "agent_start":
+			n = { ...m, running: true, started: true, tools: {}, pending: null, approvalPending: false };
+			break;
+		case "agent_end":
+		case "session_stop":
+			// omp (print mode, 18.12.6) fires session_stop BEFORE agent_end; both mean "loop over".
+			n = {
+				...m,
+				running: false,
+				tools: {},
+				// approvals/asks die with the loop; an open plan review is answered independently
+				pending: m.pending?.kind === "plan_review" ? m.pending : null,
+				approvalPending: false,
+				jobs: ev.jobs ?? m.jobs,
+			};
+			break;
+		case "tool_start": {
+			const tools = { ...m.tools, [ev.id]: { name: ev.name, start: now, summary: summarizeArgs(ev.args) } };
+			n = { ...m, tools, running: true, started: true };
+			if (ev.name === "ask") {
+				const a = extractAsk(ev.args);
+				n = { ...n, pending: { kind: "ask", question: a.question, options: a.options } };
+			}
+			break;
+		}
+		case "tool_end": {
+			const tools = { ...m.tools };
+			const ended = tools[ev.id];
+			delete tools[ev.id];
+			n = { ...m, tools };
+			if ((ended?.name ?? ev.name) === "ask" && m.pending?.kind === "ask") n = { ...n, pending: null };
+			n = { ...n, error: ev.isError ? clip(ev.errorText || "tool error", 300) : null };
+			break;
+		}
+		case "approval_requested":
+			n = {
+				...m,
+				pending: { kind: "approval", tool: ev.tool, summary: clip(ev.summary ?? "", 120) },
+				approvalPending: true,
+			};
+			break;
+		case "approval_resolved":
+			n = { ...m, pending: m.pending?.kind === "approval" ? null : m.pending, approvalPending: false };
+			break;
+		case "plan_review_requested": {
+			const p = planReviewPending(ev.review);
+			n = p ? { ...m, pending: p } : m;
+			break;
+		}
+		case "plan_review_resolved":
+			n = { ...m, pending: m.pending?.kind === "plan_review" ? null : m.pending };
+			break;
+		case "tick":
+			n = { ...m, jobs: ev.jobs };
+			break;
+	}
+	return settle(n, now);
+}
+
+/** Error text written by the I/O layer (e.g. a rejected plan-review answer). */
+export function withError(m: AgentModel, error: string | null): AgentModel {
+	return m.error === error ? m : { ...m, error };
+}
+
+// ---------------------------------------------------------------------------------
+// State file document
+// ---------------------------------------------------------------------------------
+
+export interface DocMeta {
+	pane: number;
+	pid: number;
+	sessionId: string | null;
+	cwd: string;
+	title: string | null;
+	profile: string | null;
+}
+
+export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<string, unknown> {
+	return {
+		v: 1,
+		pane: meta.pane,
+		pid: meta.pid,
+		sessionId: meta.sessionId,
+		cwd: meta.cwd,
+		title: meta.title,
+		profile: meta.profile,
+		state: m.state,
+		reason: m.reason,
+		since: m.since,
+		updated,
+		pending: m.pending,
+		error: m.error,
+	};
+}
+
+/** profile = path component after `profiles/` in the agent dir, else $OMP_PROFILE/$PI_PROFILE, else null. */
+export function profileFromAgentDir(agentDir: string | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
+	if (agentDir) {
+		const parts = agentDir.split(/[\\/]+/);
+		const i = parts.lastIndexOf("profiles");
+		if (i >= 0 && parts[i + 1]) return parts[i + 1];
+	}
+	return env.OMP_PROFILE || env.PI_PROFILE || null;
+}
+
+export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
+	return path.join(env.XDG_RUNTIME_DIR || "/tmp", "hivegrid-agents");
+}
+
+/** Does `name` look like a command file for `pane`? */
+export function isCmdFile(name: string, pane: number): boolean {
+	return name.startsWith(`${pane}.cmd.`) && name.endsWith(".json");
+}
+
+// ---------------------------------------------------------------------------------
+// Command channel
+// ---------------------------------------------------------------------------------
+
+export interface CmdCtx {
+	resolvePlanReview(reviewId: string, choice: string, input?: { feedback?: string; role?: string }): boolean | Promise<boolean>;
+}
+
+/**
+ * Execute one parsed command. Returns an error message to surface in the state file, or null.
+ * Unknown command types are ignored (null).
+ */
+export async function handleCommand(cmd: unknown, ctx: CmdCtx): Promise<string | null> {
+	const c = asRecord(cmd);
+	if (c.type !== "plan_review") return null;
+	const reviewId = c.reviewId;
+	const choice = c.choice;
+	if (typeof reviewId !== "string" || typeof choice !== "string") return "plan review answer malformed";
+	const input: { feedback?: string; role?: string } = {};
+	if (typeof c.feedback === "string" && c.feedback) input.feedback = c.feedback;
+	if (typeof c.role === "string" && c.role) input.role = c.role;
+	const ok = await ctx.resolvePlanReview(reviewId, choice, Object.keys(input).length ? input : undefined);
+	return ok ? null : `plan review answer "${choice}" was rejected (review closed or choice unavailable)`;
+}
+
+// ---------------------------------------------------------------------------------
+// Extension (I/O layer)
+// ---------------------------------------------------------------------------------
+
+const TICK_MS = 1000;
+const HEARTBEAT_S = 5;
+
+export default function hivegridAgentState(pi: any): void {
+	try {
+		const paneEnv = process.env.WEZTERM_PANE;
+		const pane = paneEnv && /^\d+$/.test(paneEnv) ? Number(paneEnv) : NaN;
+		if (!Number.isFinite(pane)) return;
+
+		const dir = stateDir();
+		const file = path.join(dir, `${pane}.json`);
+		const nowS = () => Date.now() / 1000;
+
+		let model = initialModel(nowS());
+		let ctxRef: any = null;
+		let lastSig = "";
+		let lastWrite = 0;
+		let timer: unknown = null;
+		let dead = false;
+		let busyCmd = false;
+
+		const isMain = (ctx: any): boolean => {
+			try {
+				return ctx?.agent?.kind === "main";
+			} catch {
+				return false;
+			}
+		};
+
+		const meta = (): DocMeta => {
+			let agentDir: string | null = null;
+			try {
+				agentDir = pi?.pi?.getAgentDir?.() ?? process.env.PI_CODING_AGENT_DIR ?? null;
+			} catch {
+				agentDir = process.env.PI_CODING_AGENT_DIR ?? null;
+			}
+			let sessionId: string | null = null;
+			let title: string | null = null;
+			try {
+				sessionId = ctxRef?.sessionManager?.getSessionId?.() ?? null;
+			} catch {}
+			try {
+				title = ctxRef?.sessionManager?.getSessionName?.() ?? pi?.getSessionName?.() ?? null;
+			} catch {}
+			return {
+				pane,
+				pid: process.pid,
+				sessionId,
+				cwd: ctxRef?.cwd ?? process.cwd(),
+				title: title || null,
+				profile: profileFromAgentDir(agentDir),
+			};
+		};
+
+		const write = (force: boolean) => {
+			if (dead) return;
+			try {
+				const t = nowS();
+				const doc = toDoc(model, meta(), t);
+				const sig = JSON.stringify({ ...doc, updated: 0 });
+				if (!force && sig === lastSig && t - lastWrite < HEARTBEAT_S) return;
+				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+				const tmp = `${file}.tmp.${process.pid}`;
+				fs.writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
+				fs.renameSync(tmp, file);
+				lastSig = sig;
+				lastWrite = t;
+			} catch {}
+		};
+
+		const jobCount = (ctx: any): number | undefined => {
+			try {
+				const snap = ctx?.getAsyncJobSnapshot?.();
+				if (!snap || !Array.isArray(snap.running)) return undefined;
+				return snap.running.filter((j: any) => !j?.status || j.status === "running").length;
+			} catch {
+				return undefined;
+			}
+		};
+
+		const apply = (ev: HiveEvent) => {
+			try {
+				model = reduce(model, ev, nowS());
+				write(false);
+			} catch {}
+		};
+
+		const remove = () => {
+			dead = true;
+			try {
+				fs.rmSync(file, { force: true });
+			} catch {}
+		};
+
+		const pollCommands = async (ctx: any) => {
+			if (busyCmd) return;
+			busyCmd = true;
+			try {
+				let names: string[] = [];
+				try {
+					names = fs.readdirSync(dir).filter(n => isCmdFile(n, pane)).sort();
+				} catch {
+					return;
+				}
+				for (const name of names) {
+					const p = path.join(dir, name);
+					let parsed: unknown = null;
+					try {
+						parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+					} catch {}
+					try {
+						fs.rmSync(p, { force: true });
+					} catch {}
+					if (parsed === null) continue;
+					let err: string | null = null;
+					try {
+						err = await handleCommand(parsed, ctx);
+					} catch (e) {
+						err = `plan review answer failed: ${e instanceof Error ? e.message : String(e)}`;
+					}
+					if (err) {
+						model = withError(model, err);
+						write(true);
+					}
+				}
+			} finally {
+				busyCmd = false;
+			}
+		};
+
+		const tick = (ctx: any) => {
+			try {
+				if (dead) return;
+				const jobs = jobCount(ctx);
+				apply({ type: "tick", jobs: jobs ?? model.jobs });
+				write(false); // heartbeat
+				void pollCommands(ctx).catch(() => {});
+			} catch {}
+		};
+
+		const guard =
+			(fn: (e: any, ctx: any) => void) =>
+			(e: any, ctx: any) => {
+				try {
+					if (!isMain(ctx)) return;
+					ctxRef = ctx;
+					fn(e, ctx);
+				} catch {}
+			};
+
+		pi.on(
+			"session_start",
+			guard((_e, ctx) => {
+				write(true);
+				const pr = ctx?.getPendingPlanReview?.();
+				if (pr) apply({ type: "plan_review_requested", review: pr });
+				if (!timer) timer = ctx.setInterval(() => tick(ctx), TICK_MS);
+			}),
+		);
+		pi.on(
+			"agent_start",
+			guard(() => apply({ type: "agent_start" })),
+		);
+		pi.on(
+			"agent_end",
+			guard((_e, ctx) => apply({ type: "agent_end", jobs: jobCount(ctx) })),
+		);
+		pi.on(
+			"session_stop",
+			guard((_e, ctx) => apply({ type: "session_stop", jobs: jobCount(ctx) })),
+		);
+		pi.on(
+			"tool_execution_start",
+			guard(e => apply({ type: "tool_start", id: String(e?.toolCallId ?? ""), name: String(e?.toolName ?? ""), args: e?.args })),
+		);
+		pi.on(
+			"tool_execution_end",
+			guard((e, ctx) => {
+				let errorText = "";
+				if (e?.isError) {
+					const first = Array.isArray(e?.result?.content) ? e.result.content.find((c: any) => c?.type === "text") : null;
+					errorText = typeof first?.text === "string" ? first.text : "";
+				}
+				apply({ type: "tool_end", id: String(e?.toolCallId ?? ""), name: e?.toolName, isError: !!e?.isError, errorText });
+				const jobs = jobCount(ctx);
+				if (jobs !== undefined) apply({ type: "tick", jobs });
+			}),
+		);
+		pi.on(
+			"tool_approval_requested",
+			guard(e => {
+				const tool = String(e?.toolName ?? e?.tool ?? e?.name ?? "tool");
+				apply({ type: "approval_requested", tool, summary: summarizeArgs(e?.args ?? e?.input ?? e?.arguments) });
+			}),
+		);
+		pi.on(
+			"tool_approval_resolved",
+			guard(() => apply({ type: "approval_resolved" })),
+		);
+		pi.on(
+			"plan_review_requested",
+			guard(e => apply({ type: "plan_review_requested", review: e })),
+		);
+		pi.on(
+			"plan_review_resolved",
+			guard(() => apply({ type: "plan_review_resolved" })),
+		);
+		pi.on("session_shutdown", (_e: any, ctx: any) => {
+			try {
+				if (!isMain(ctx)) return;
+				try {
+					if (timer) ctx.clearTimer(timer);
+				} catch {}
+				timer = null;
+				remove();
+			} catch {}
+		});
+
+		// best-effort cleanup if the process ends without session_shutdown (sync-only in 'exit')
+		process.on("exit", () => {
+			try {
+				if (ctxRef) remove();
+			} catch {}
+		});
+	} catch {
+		// never throw into omp
+	}
+}

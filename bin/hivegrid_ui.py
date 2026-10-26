@@ -694,7 +694,9 @@ class UI:
         if key == "c" and mods == {"CTRL"}:
             self.running = False
             return
-        if not mods and key in ("F1", "F2", "F3", "F4"):
+        if self.page().captures(mods, key):
+            self.page().key(self, mods, key)
+        elif not mods and key in ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"):
             self.switch(int(key[1]) - 1)
         elif not mods and key == "Tab" or key == "Tab" and mods == {"SHIFT"}:
             self.page().cycle(self, -1 if mods else 1)
@@ -776,6 +778,10 @@ class Page:
 
     def hints(self):
         return "Tab next section  q close"
+
+    def captures(self, mods, key):
+        """True when the page wants this key itself, before the frame's own q / Esc / s / Tab."""
+        return False
 
     def cycle(self, ui, step):
         ui.switch((ui.active + step) % len(ui.pages), step)

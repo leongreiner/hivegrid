@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Hivegrid panels: settings, usage history, agent overview and system monitor in one terminal UI.
 
-Usage: hivegrid-panel [settings|usage|agents|monitor] [options]
+Usage: hivegrid-panel [settings|usage|agents|monitor|hive] [options]
 
 Runs in a terminal (WezTerm overlay or tab); the mouse works, so do the keys: Tab or F1-F4 and
-a click on the tabs switch panels, q or Esc closes. The settings panel reads and writes
-~/.config/hivegrid/settings.json (env HIVEGRID_SETTINGS), which the WezTerm config watches.
+a click on the tabs switch panels (F5 is the hive, where Tab selects agents), q or Esc closes. The
+settings panel reads and writes ~/.config/hivegrid/settings.json (env HIVEGRID_SETTINGS), which the
+WezTerm config watches.
 
 Options:
   --account LABEL   usage: account to show first
@@ -13,6 +14,7 @@ Options:
   --settings PATH   use another settings file
   --history PATH    usage: use another history.jsonl
   --print           settings: print the effective settings as JSON and exit (no writes)
+  --dump COLSxROWS  print one frame of the chosen panel as plain text and exit (no terminal needed)
   -h, --help        show this help
 Environment: HIVEGRID_NO_IMAGES=1 draws charts in braille instead of inline images.
 """
@@ -24,12 +26,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from hivegrid_settings_core import Model, Settings, settings_path  # noqa: E402
 
-PANELS = ["settings", "usage", "agents", "monitor"]
+PANELS = ["settings", "usage", "agents", "monitor", "hive"]
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    panel, path, account, rng, history, do_print = "settings", None, None, "24h", None, False
+    panel, path, account, rng, history, do_print, dump = "settings", None, None, "24h", None, False, None
     while argv:
         a = argv.pop(0)
         if a in ("-h", "--help"):
@@ -39,7 +41,14 @@ def main(argv=None):
             panel = a
         elif a == "--print":
             do_print = True
-        elif a in ("--settings", "--account", "--range", "--history") and argv:
+        elif a == "--dump" and argv:
+            try:
+                cols, rows = argv.pop(0).lower().split("x")
+                dump = (int(cols), int(rows))
+            except ValueError:
+                print("hivegrid-panel: --dump takes COLSxROWS", file=sys.stderr)
+                return 2
+        elif a in ("--settings", "--account", "--range", "--history", "--origin") and argv:
             value = argv.pop(0)
             if a == "--settings":
                 path = value
@@ -47,6 +56,8 @@ def main(argv=None):
                 account = value
             elif a == "--range":
                 rng = value
+            elif a == "--origin":
+                os.environ["HIVEGRID_ORIGIN_PANE"] = value  # the pane the overlay covers (hive)
             else:
                 history = value
         else:
@@ -57,16 +68,24 @@ def main(argv=None):
         json.dump(settings.effective(), sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not dump and not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("hivegrid-panel: needs a terminal (--print gives the settings as JSON)", file=sys.stderr)
         return 2
+    import hivegrid_hive as HV
     import hivegrid_panels as P
     import hivegrid_ui as U
 
     model = Model(settings)
     pages = [P.SettingsPage(model), P.UsagePage(model, account=account, range_name=rng, history=history),
-             P.AgentsPage(model), P.MonitorPage(model)]
+             P.AgentsPage(model), P.MonitorPage(model), HV.HivePage(model)]
     ui = U.UI(model, pages, active=PANELS.index(panel))
+    if dump:
+        import io
+        ui.size, ui.out = dump, io.StringIO()
+        ui.page().on_show(ui)
+        ui.draw()
+        print("\n".join("".join(c[0] for c in row).rstrip() for row in ui.cv.cells))
+        return 0
     ui.tickers.append(pages[3].sampler.tick)
     if settings.error:
         ui.say(settings.error, True)
