@@ -3,3 +3,9 @@
 # over a border needs move events.
 [mgr]
 mouse_events = [ "click", "scroll", "drag", "move" ]
+
+# Empty files: plugins/hivegrid.yazi (a centred note, not yazi's reversed slab).
+[plugin]
+prepend_previewers = [
+	{ mime = "inode/empty", run = "hivegrid" },
+]

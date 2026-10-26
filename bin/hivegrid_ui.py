@@ -2,6 +2,7 @@
 output with truecolor, SGR mouse input, modal dialogs, inline images (iTerm2 protocol, rendered with
 PIL when available) and braille charts as the image-free fallback. Standard library only."""
 import base64
+import datetime
 import fcntl
 import io
 import json
@@ -12,8 +13,10 @@ import signal
 import struct
 import sys
 import termios
+import textwrap
 import time
 import tty
+import unicodedata
 
 BOLD, DIM, REV, UL = 1, 2, 4, 8
 
@@ -42,6 +45,39 @@ def mix(a, b, t):
     return "#%02x%02x%02x" % (round(ra + (rb - ra) * t), round(ga + (gb - ga) * t), round(ba + (bb - ba) * t))
 
 
+def char_width(ch):
+    """Terminal cells of `ch`: 0 for combining marks, joiners and variation selectors, 2 for East
+    Asian wide/fullwidth, else 1. Mirrors WezTerm's default layout (unicode_version 9, where
+    U+FE0F does not widen a char) of the titles and screen text the panels show; omp titles
+    carry emoji."""
+    o = ord(ch)
+    if o < 0x300:
+        return 1
+    if unicodedata.combining(ch) or o in (0x200B, 0x200C, 0x200D, 0xFE0E, 0xFE0F) or unicodedata.category(ch) == "Mn":
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def text_width(text):
+    """Terminal cells `text` takes."""
+    return sum(char_width(c) for c in text)
+
+
+def fit_cells(text, w, ellipsis="…"):
+    """`text` cut to at most `w` cells, ending in `ellipsis` when cut."""
+    if text_width(text) <= w:
+        return text
+    room = w - text_width(ellipsis)
+    out, n = [], 0
+    for c in text:
+        cw = char_width(c)
+        if n + cw > room:
+            break
+        out.append(c)
+        n += cw
+    return "".join(out) + ellipsis if w > 0 else ""
+
+
 # ---- canvas -------------------------------------------------------------------------
 
 
@@ -55,24 +91,53 @@ class Canvas:
         self.keys = []
         self.images = []
 
+    def _clear_wide(self, row, cx):
+        """Before cell cx is overwritten: blank the other half of a wide char it belongs to."""
+        if row[cx][0] == "" and cx > 0:
+            old = row[cx - 1]
+            row[cx - 1] = (" ", old[1], old[2], old[3])
+        if cx + 1 < self.w and row[cx + 1][0] == "":
+            old = row[cx + 1]
+            row[cx + 1] = (" ", old[1], old[2], old[3])
+
     def put(self, x, y, text, fg=None, bg=None, attrs=0):
-        """Writes `text` at (x, y), clipped to the canvas; returns the width written."""
+        """Writes `text` at (x, y), clipped to the canvas; returns the cells written. A wide char
+        takes two cells (the second holds "" and is skipped by render); zero-width chars join the
+        char before them."""
         if y < 0 or y >= self.h:
             return 0
         row = self.cells[y]
-        n = 0
+        n, base = 0, None  # base: cell of the last char written, for zero-width chars to join
         for ch in text:
+            cw = char_width(ch)
+            if cw == 0:
+                if base is not None:
+                    old = row[base]
+                    row[base] = (old[0] + ch, old[1], old[2], old[3])
+                continue
             cx = x + n
-            n += 1
-            if 0 <= cx < self.w:
-                old = row[cx]
-                row[cx] = (ch, fg or old[1], bg or old[2], attrs)
+            n += cw
+            base = None
+            if not 0 <= cx < self.w:
+                continue
+            self._clear_wide(row, cx)
+            old = row[cx]
+            if cw == 2 and cx + 1 >= self.w:
+                row[cx] = (" ", fg or old[1], bg or old[2], attrs)
+                continue
+            row[cx] = (ch, fg or old[1], bg or old[2], attrs)
+            base = cx
+            if cw == 2:
+                self._clear_wide(row, cx + 1)
+                nxt = row[cx + 1]
+                row[cx + 1] = ("", fg or nxt[1], bg or nxt[2], attrs)
         return n
 
     def fill(self, x, y, w, h, bg=None, fg=None, ch=" "):
         for yy in range(max(y, 0), min(y + h, self.h)):
             row = self.cells[yy]
             for xx in range(max(x, 0), min(x + w, self.w)):
+                self._clear_wide(row, xx)
                 old = row[xx]
                 row[xx] = (ch, fg or old[1], bg or old[2], 0)
 
@@ -228,6 +293,25 @@ def decode(data):
     return out
 
 
+def split_complete(data):
+    """-> (head, tail): `tail` is an escape sequence or UTF-8 character that the read boundary
+    cut off (motion reports arrive fast enough to be split); prepend it to the next read. A lone
+    ESC also waits in `tail`: the caller decodes it as Escape when nothing follows soon."""
+    i = data.rfind(b"\x1b")
+    if i >= 0:
+        rest = data[i + 1:]
+        if not rest or rest == b"O" or (rest[:1] == b"[" and not re.search(rb"[\x40-\x7e]", rest[1:])):
+            return data[:i], data[i:]
+    for k in range(1, min(4, len(data)) + 1):
+        b = data[-k]
+        if b & 0xC0 == 0x80:  # continuation byte: look further back for the lead byte
+            continue
+        if b >= 0xC0 and (2 if b < 0xE0 else 3 if b < 0xF0 else 4) > k:
+            return data[:-k], data[-k:]
+        break
+    return data, b""
+
+
 # ---- images and charts --------------------------------------------------------------
 
 try:
@@ -268,7 +352,8 @@ _FONT_CACHE = {}
 
 def font(size):
     if size not in _FONT_CACHE:
-        for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        for path in (os.path.expanduser("~/.local/share/fonts/DejaVuSansMNerdFont/DejaVuSansMNerdFontMono-Regular.ttf"),
+                     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                      "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"):
             try:
                 _FONT_CACHE[size] = ImageFont.truetype(path, size)
@@ -280,22 +365,61 @@ def font(size):
     return _FONT_CACHE[size]
 
 
-def _fmt_time(t, span):
-    lt = time.localtime(t)
-    if span <= 2 * 86400:
-        return time.strftime("%H:%M", lt)
-    return time.strftime("%d %b", lt)
+_TICK_STEPS = (900, 1800, 3600, 2 * 3600, 3 * 3600, 4 * 3600, 6 * 3600, 12 * 3600, 86400, 2 * 86400, 7 * 86400)
 
 
-def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%", ymin=0.0, title=None):
-    """series: [{'pts': [(t, v)], 'color', 'label'}]; markers: [(t, color)] vertical dotted lines.
-    Drawn at 2x and scaled down for smooth lines. -> PNG bytes."""
+def time_ticks(x0, x1, n=6):
+    """At most about n ticks in [x0, x1] on whole local wall-clock times (quarter hours, hours,
+    midnights; DST-safe) -> [(t, label)]. A tick on a midnight shows the date, so day changes stand
+    out; multi-day steps start on even days or Mondays."""
+    span = max(x1 - x0, 1)
+    step = next((s for s in _TICK_STEPS if span / s <= max(n, 1)), _TICK_STEPS[-1])
+    start = datetime.datetime.fromtimestamp(x0)
+    midnight = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    if step >= 86400:
+        days = step // 86400
+        wall = midnight if midnight.timestamp() >= x0 else midnight + datetime.timedelta(days=1)
+        while wall.toordinal() % days != (1 if days == 7 else 0) % days:  # ordinal 1 is a Monday
+            wall += datetime.timedelta(days=1)
+        delta = datetime.timedelta(days=days)
+    else:
+        sec = (start - midnight).total_seconds()
+        wall = midnight + datetime.timedelta(seconds=-(-sec // step) * step)
+        delta = datetime.timedelta(seconds=step)
+    out = []
+    while (t := wall.timestamp()) <= x1:
+        if t >= x0:
+            day = step >= 86400 or (wall.hour == 0 and wall.minute == 0)
+            out.append((t, wall.strftime("%d %b" if day else "%H:%M")))
+        wall += delta
+    return out
+
+
+def runs_of(pts, gap=None):
+    """[(t, v)] split where two neighbours are more than `gap` apart (no samples in between), so a
+    chart does not draw a straight line across a stretch nobody recorded."""
+    runs = []
+    for i, pt in enumerate(pts):
+        if not runs or (gap is not None and pt[0] - pts[i - 1][0] > gap):
+            runs.append([])
+        runs[-1].append(pt)
+    return runs
+
+
+def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%", ymin=0.0, title=None,
+                   since=None, marker_label=None, text_px=11, gap=None):
+    """series: [{'pts': [(t, v)], 'color', 'label'}]; markers: [(t, color)] vertical dotted lines,
+    named `marker_label` in the legend; the plot left of `since` is shaded as having no data and
+    a line breaks where samples are more than `gap` apart.
+    Text is `text_px` high (pass ~0.7 of the cell height so it matches the terminal font) and
+    the margins follow it. Drawn at 2x and scaled down for smooth lines. -> PNG bytes."""
     S = 2
+    K = S * text_px / 11  # layout unit: 1 px at the 11 px design size, supersampled
     W, H = width * S, height * S
     img = Image.new("RGB", (W, H), pal["base"])
     d = ImageDraw.Draw(img)
-    f = font(11 * S)
-    left, right, top, bottom = 44 * S, 10 * S, (22 if title else 8) * S, 20 * S
+    f = font(round(text_px * S))
+    left, right, top, bottom = 44 * K, 10 * K, 22 * K, 20 * K
     pw, ph = W - left - right, H - top - bottom
     if pw < 10 or ph < 10:
         return _png(img.resize((width, height)))
@@ -309,63 +433,86 @@ def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%
     def py(v):
         return top + ph - (v - ymin) / ysp * ph
 
+    if since is not None and since > x0:
+        nx = px(min(since, x1))
+        d.rectangle([left, top, nx, top + ph], fill=pal["base"])
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         y = top + ph - frac * ph
         d.line([left, y, left + pw, y], fill=pal["border"], width=S)
         label = f"{ymin + ysp * frac:.0f}{unit}"
-        d.text((left - 4 * S, y), label, fill=pal["muted"], font=f, anchor="rm")
-    ticks = 6
-    for i in range(ticks + 1):
-        t = x0 + span * i / ticks
+        d.text((left - 4 * K, y), label, fill=pal["muted"], font=f, anchor="rm")
+    for t, label in time_ticks(x0, x1, min(8, int(pw // (110 * K)))):
         x = px(t)
-        d.line([x, top + ph, x, top + ph + 3 * S], fill=pal["muted"], width=S)
-        anchor = "ma" if 0 < i < ticks else ("la" if i == 0 else "ra")
-        d.text((x, top + ph + 5 * S), _fmt_time(t, span), fill=pal["muted"], font=f, anchor=anchor)
+        d.line([x, top + ph, x, top + ph + 3 * K], fill=pal["muted"], width=S)
+        half = d.textlength(label, font=f) / 2
+        d.text((min(max(x, left + half), W - half - 2 * S), top + ph + 5 * K), label, fill=pal["muted"], font=f, anchor="ma")
     for t, color in markers:
         if x0 <= t <= x1:
             x = px(t)
             for yy in range(int(top), int(top + ph), 6 * S):
                 d.line([x, yy, x, min(yy + 3 * S, top + ph)], fill=color, width=S)
     for s in series:
-        pts = [(px(t), py(v)) for t, v in s["pts"] if x0 <= t <= x1]
-        if len(pts) >= 2:
-            d.line(pts, fill=s["color"], width=2 * S, joint="curve")
-        elif pts:
-            x, y = pts[0]
-            d.ellipse([x - 3 * S, y - 3 * S, x + 3 * S, y + 3 * S], fill=s["color"])
+        for run in runs_of([(t, v) for t, v in s["pts"] if x0 <= t <= x1], gap):
+            pts = [(px(t), py(v)) for t, v in run]
+            if len(pts) >= 2:
+                d.line(pts, fill=s["color"], width=2 * S, joint="curve")
+            else:
+                x, y = pts[0]
+                d.ellipse([x - 2 * S, y - 2 * S, x + 2 * S, y + 2 * S], fill=s["color"])
     if title:
-        d.text((left, 3 * S), title, fill=pal["bright"], font=f, anchor="la")
+        d.text((left, 3 * K), title, fill=pal["bright"], font=f, anchor="la")
     lx = left + pw
     for s in reversed(series):
         w = d.textlength(s["label"], font=f)
-        lx -= w + 22 * S
-        d.line([lx, 11 * S, lx + 12 * S, 11 * S], fill=s["color"], width=3 * S)
-        d.text((lx + 16 * S, 3 * S), s["label"], fill=pal["text"], font=f, anchor="la")
+        lx -= w + 22 * K
+        d.line([lx, 10 * K, lx + 12 * K, 10 * K], fill=s["color"], width=3 * S)
+        d.text((lx + 16 * K, 10 * K), s["label"], fill=pal["text"], font=f, anchor="lm")
+    if marker_label and any(x0 <= t <= x1 for t, _ in markers):
+        lx -= d.textlength(marker_label, font=f) + 22 * K
+        for yy in (3 * K, 9 * K, 15 * K):
+            d.line([lx + 6 * K, yy, lx + 6 * K, yy + 3 * K], fill=pal["muted"], width=S)
+        d.text((lx + 16 * K, 10 * K), marker_label, fill=pal["text"], font=f, anchor="lm")
     return _png(img.resize((width, height), Image.LANCZOS))
 
 
-def sparkline_png(width, height, values, color, pal, label, value_text, ymax=100.0):
-    """A filled mini graph with its label and current value, for the monitor."""
+def sparkline_png(width, height, values, color, pal, label, value_text, ymax=100.0, value_color=None, text_px=12):
+    """A filled mini graph with its label and current value, for the monitor. `values` are evenly
+    spaced over the width, oldest first; None leaves a gap (not sampled yet). Text is `text_px`
+    high and the margins follow it."""
     S = 2
+    K = S * text_px / 12
     W, H = width * S, height * S
     img = Image.new("RGB", (W, H), pal["deep"])
     d = ImageDraw.Draw(img)
-    f = font(12 * S)
+    f = font(round(text_px * S))
     d.rectangle([0, 0, W - 1, H - 1], outline=pal["border"], width=S)
-    d.text((8 * S, 5 * S), label, fill=pal["muted"], font=f, anchor="la")
-    d.text((W - 8 * S, 5 * S), value_text, fill=color, font=f, anchor="ra")
-    top, bottom = 22 * S, H - 6 * S
-    if len(values) >= 2 and bottom - top > 4:
-        n = len(values)
-        pts = [(8 * S + i / (n - 1) * (W - 16 * S), bottom - min(max(v, 0), ymax) / ymax * (bottom - top))
-               for i, v in enumerate(values)]
+    d.text((8 * K, 5 * K), label, fill=pal["muted"], font=f, anchor="la")
+    d.text((W - 8 * K, 5 * K), value_text, fill=value_color or color, font=f, anchor="ra")
+    top, bottom = 22 * K, H - 6 * K
+    n = len(values)
+    if n >= 2 and bottom - top > 4:
+        mid = (top + bottom) / 2  # dashed 50% line
+        for xx in range(int(8 * K), int(W - 8 * K), 8 * S):
+            d.line([xx, mid, xx + 3 * S, mid], fill=pal["border"], width=S)
+        runs = []
+        prev = None
+        for i, v in enumerate(values):
+            if v is not None:
+                if prev is None:
+                    runs.append([])
+                runs[-1].append((8 * K + i / (n - 1) * (W - 16 * K), bottom - min(max(v, 0), ymax) / ymax * (bottom - top)))
+            prev = v
         fill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         fd = ImageDraw.Draw(fill)
         r, g, b = _rgb(color)
-        fd.polygon(pts + [(pts[-1][0], bottom), (pts[0][0], bottom)], fill=(r, g, b, 70))
+        for pts in runs:
+            if len(pts) >= 2:
+                fd.polygon(pts + [(pts[-1][0], bottom), (pts[0][0], bottom)], fill=(r, g, b, 70))
         img.paste(fill, (0, 0), fill)
-        d.line(pts, fill=color, width=2 * S, joint="curve")
-        d.line([8 * S, bottom, W - 8 * S, bottom], fill=pal["border"], width=S)
+        for pts in runs:
+            if len(pts) >= 2:
+                d.line(pts, fill=color, width=2 * S, joint="curve")
+        d.line([8 * K, bottom, W - 8 * K, bottom], fill=pal["border"], width=S)
     return _png(img.resize((width, height), Image.LANCZOS))
 
 
@@ -378,9 +525,10 @@ def _png(img):
 BRAILLE_BITS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
 
 
-def braille_chart(cols, rows, series, x0, x1, ymax, ymin=0.0):
+def braille_chart(cols, rows, series, x0, x1, ymax, ymin=0.0, gap=None):
     """Line chart in braille dots. series: [{'pts': [(t, v)], 'color'}]. -> rows of [(char, color)]
-    with each series drawn in its own colour (a cell keeps the colour of the last series that set it)."""
+    with each series drawn in its own colour (a cell keeps the colour of the last series that set it);
+    a line breaks where samples are more than `gap` apart."""
     dw, dh = cols * 2, rows * 4
     dots = [[0] * cols for _ in range(rows)]
     owner = [[None] * cols for _ in range(rows)]
@@ -399,13 +547,14 @@ def braille_chart(cols, rows, series, x0, x1, ymax, ymin=0.0):
             owner[cy][cx] = color
 
     for s in series:
-        pts = [to_dot(t, v) for t, v in s["pts"] if x0 <= t <= x1]
-        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-            steps = max(abs(bx - ax), abs(by - ay), 1)
-            for k in range(steps + 1):
-                plot(round(ax + (bx - ax) * k / steps), round(ay + (by - ay) * k / steps), s["color"])
-        if len(pts) == 1:
-            plot(pts[0][0], pts[0][1], s["color"])
+        for run in runs_of([(t, v) for t, v in s["pts"] if x0 <= t <= x1], gap):
+            pts = [to_dot(t, v) for t, v in run]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                steps = max(abs(bx - ax), abs(by - ay), 1)
+                for k in range(steps + 1):
+                    plot(round(ax + (bx - ax) * k / steps), round(ay + (by - ay) * k / steps), s["color"])
+            if len(pts) == 1:
+                plot(pts[0][0], pts[0][1], s["color"])
     return [[(chr(0x2800 + dots[r][c]) if dots[r][c] else " ", owner[r][c]) for c in range(cols)] for r in range(rows)]
 
 
@@ -424,10 +573,12 @@ class Modal:
 
 
 def box(ui, cv, w, h, title):
-    """Centred dialog frame; returns its (x, y, w, h). Clicks outside are swallowed."""
+    """Centred dialog frame over a dimmed page; returns its (x, y, w, h). Clicks outside are
+    swallowed."""
     p = ui.pal
     w, h = min(w, cv.w - 2), min(h, cv.h - 2)
     x, y = (cv.w - w) // 2, (cv.h - h) // 2
+    _scrim(cv, p["deep"])
     cv.hit(0, 0, cv.w, cv.h, lambda b: None)
     cv.fill(x, y, w, h, bg=p["surface"])
     cv.put(x, y, "┌" + "─" * (w - 2) + "┐", p["edge_hi"], p["surface"])
@@ -437,6 +588,28 @@ def box(ui, cv, w, h, title):
     cv.put(x, y + h - 1, "└" + "─" * (w - 2) + "┘", p["edge_hi"], p["surface"])
     cv.put(x + 2, y, f" {title} ", p["bright"], p["surface"], BOLD)
     return x, y, w, h
+
+
+def _scrim(cv, deep):
+    """Fades the page behind a dialog towards `deep`, so the dialog is what the eye finds."""
+    memo = {}
+
+    def fade(c, t):
+        if (c, t) not in memo:
+            memo[c, t] = mix(c, deep, t)
+        return memo[c, t]
+    for row in cv.cells:
+        for i, (ch, fg, bg, attrs) in enumerate(row):
+            row[i] = (ch, fade(fg, 0.55), fade(bg, 0.45), attrs & ~BOLD)
+
+
+def dialog_footer(ui, cv, x, y, w, buttons, hint):
+    """The bottom row every dialog shares: buttons [(label, fn, accent)] then a muted key hint."""
+    pos = x + 2
+    for label, fn, accent in buttons:
+        pos += ui.button(cv, pos, y, label, fn, accent=accent) + 1
+    if hint:
+        cv.put(pos + 1, y, hint[:max(x + w - 2 - pos - 1, 0)], ui.pal["muted"], ui.pal["surface"])
 
 
 class PromptModal(Modal):
@@ -453,8 +626,8 @@ class PromptModal(Modal):
             cv.put(x + 2, y + 4, self.hint[:w - 4], p["muted"], p["surface"])
         if self.error:
             cv.put(x + 2, y + 5, self.error[:w - 4], p["red"], p["surface"])
-        ui.button(cv, x + 2, y + h - 2, "OK", lambda b: ui.finish(self, self.key(ui, set(), "Enter")), accent=True)
-        ui.button(cv, x + 10, y + h - 2, "Cancel", lambda b: ui.close_modal())
+        dialog_footer(ui, cv, x, y + h - 2, w, [("OK", lambda b: ui.finish(self, self.key(ui, set(), "Enter")), True),
+                                                ("Cancel", lambda b: ui.close_modal(), False)], "Enter OK  Esc cancel")
 
     def key(self, ui, mods, key):
         if key == "Enter":
@@ -481,9 +654,9 @@ class ChoiceModal(Modal):
     def render(self, ui, cv):
         p = ui.pal
         n = len(self.options)
-        shown = min(n, max(cv.h - 8, 3))
+        shown = min(n, max(cv.h - 9, 3))
         top = max(0, min(self.idx - shown // 2, n - shown))
-        x, y, w, h = box(ui, cv, 46, shown + 4, self.title)
+        x, y, w, h = box(ui, cv, 46, shown + 5, self.title)
         for row in range(shown):
             i = top + row
             sel = i == self.idx
@@ -491,7 +664,7 @@ class ChoiceModal(Modal):
             cv.put(x + 3, y + 2 + row, self.options[i][:w - 6], p["bright"] if sel else p["text"],
                    p["raised"] if sel else p["surface"])
             cv.hit(x + 2, y + 2 + row, w - 4, 1, lambda b, i=i: self._pick(ui, i))
-        cv.put(x + 2, y + h - 2, "↑↓ choose  Enter ok  Esc cancel", p["muted"], p["surface"])
+        cv.put(x + 2, y + h - 2, "↑↓ choose  Enter OK  Esc cancel", p["muted"], p["surface"])
 
     def _pick(self, ui, i):
         self.on_pick(i)
@@ -511,23 +684,42 @@ class ChoiceModal(Modal):
 
 
 class ConfirmModal(Modal):
-    def __init__(self, text, on_yes, title="Confirm"):
+    """A question with Yes / No. With `on_no` the No button and `n` do something too (e.g.
+    discard), and Esc alone goes back; the labels name what each button does."""
+
+    def __init__(self, text, on_yes, title="Confirm", yes="Yes", no="No", on_no=None):
         self.text, self.on_yes, self.title = text, on_yes, title
+        self.yes, self.no, self.on_no = yes, no, on_no
 
     def render(self, ui, cv):
         p = ui.pal
-        x, y, w, h = box(ui, cv, min(max(len(self.text) + 6, 36), 70), 6, self.title)
-        cv.put(x + 3, y + 2, self.text[:w - 6], p["text"], p["surface"])
-        ui.button(cv, x + 2, y + h - 2, "Yes", lambda b: self._yes(ui), accent=True)
-        ui.button(cv, x + 10, y + h - 2, "No", lambda b: ui.close_modal())
+        buttons = [(self.yes, lambda b: self._yes(ui), True), (self.no, lambda b: self._no(ui), False)]
+        if self.on_no:
+            buttons.append(("Back", lambda b: ui.close_modal(), False))
+        hint = "y  n  Esc back" if self.on_no else "y  n"
+        footer = sum(len(label) + 3 for label, _, _ in buttons) + len(hint) + 5
+        width = min(max(len(self.text) + 6, footer, 44), 64)
+        lines = textwrap.wrap(self.text, width - 6) or [""]
+        x, y, w, h = box(ui, cv, width, len(lines) + 5, self.title)
+        for k, line in enumerate(lines):
+            cv.put(x + 3, y + 2 + k, line, p["text"], p["surface"])
+        dialog_footer(ui, cv, x, y + h - 2, w, buttons, hint)
 
     def _yes(self, ui):
         ui.close_modal()
         self.on_yes()
 
+    def _no(self, ui):
+        ui.close_modal()
+        if self.on_no:
+            self.on_no()
+
     def key(self, ui, mods, key):
         if key in ("y", "Enter"):
             self.on_yes()
+            return True
+        if key == "n" and self.on_no:
+            self.on_no()
             return True
         return key in ("n", "Escape")
 
@@ -547,6 +739,8 @@ class UI:
         self.running = True
         self.size = (0, 0)
         self.tickers = []
+        self.hover = None  # (x, y, w, h) of the click region under the pointer, or None
+        self.pointer = None  # last pointer cell, None once it left the pane
 
     # theme ------------------------------------------------------------------
     @property
@@ -612,7 +806,7 @@ class UI:
         p = self.pal
         cv = Canvas(cols, rows, p["text"], p["base"])
         cv.fill(0, 0, cols, 1, bg=p["deep"])
-        x = cv.put(1, 0, "⬡ Hivegrid ", p["accent"], p["deep"], BOLD) + 1
+        x = 1 + cv.put(1, 0, "⬡ Hivegrid", p["accent"], p["deep"], BOLD) + 2
         for i, pg in enumerate(self.pages):
             label = f" {pg.title} "
             sel = i == self.active
@@ -630,10 +824,19 @@ class UI:
         self.page().render(self, cv, 0, 2, cols, rows - 4)
         msg_color = p["red"] if self.message_error else p["green"]
         cv.put(1, rows - 2, self.message[:cols - 2], msg_color, p["base"])
-        cv.put(1, rows - 1, self.page().hints()[:cols - 2], p["muted"], p["base"], DIM)
+        self.hint_line(cv, 1, rows - 1, self.page().hints(), cols - 2)
         if self.modal:
             self.modal.render(self, cv)
         self.cv = cv
+        if self.pointer:
+            # Regions move when the page changes under a still pointer: re-find the hover.
+            self.set_hover(self.region_at(*self.pointer))
+        hx, hy, hw, hh = self.hover or (0, 0, 0, 0)
+        if hh == 1:  # one-row regions (buttons, tabs, rows) take the lighter shade
+            row = cv.cells[hy] if 0 <= hy < cv.h else []
+            for i in range(max(hx, 0), min(hx + hw, cv.w)):
+                ch, fg, bg, attrs = row[i]
+                row[i] = (ch, fg, mix(bg, p["bright"], 0.14), attrs)
         probe = os.environ.get("HIVEGRID_PANEL_DEBUG")
         if probe:
             self._probe(probe, cv)
@@ -660,10 +863,25 @@ class UI:
         ok, message = self.model.save()
         self.say(message, not ok)
 
+    def hint_line(self, cv, x, y, text, width):
+        """Key hints "key label  key label": the key in text colour, its label muted, so the keys
+        stand out when scanning the line."""
+        p = self.pal
+        end = x + width
+        for k, pair in enumerate(text.split("  ")):
+            if not pair:
+                continue
+            key, _, label = pair.partition(" ")
+            if k:
+                x += 2
+            x += cv.put(x, y, key[:max(end - x, 0)], p["text"], p["base"])
+            if label:
+                x += cv.put(x, y, (" " + label)[:max(end - x, 0)], p["muted"], p["base"])
+
     def quit(self):
         if self.model.dirty and not isinstance(self.modal, ConfirmModal):
-            self.open_modal(ConfirmModal("Unsaved changes: y saves and closes, n discards, Esc goes back.", self._save_and_quit, "Close"))
-            self.modal.key = self._quit_key  # y save, n discard, Esc back
+            self.open_modal(ConfirmModal("There are unsaved changes.", self._save_and_quit, "Close",
+                                         yes="Save and close", no="Discard", on_no=self._discard))
             return
         self.running = False
 
@@ -672,14 +890,29 @@ class UI:
         if not self.model.dirty:
             self.running = False
 
-    def _quit_key(self, ui, mods, key):
-        if key in ("y", "Enter"):
-            self._save_and_quit()
-            return True
-        if key == "n":
-            self.running = False
-            return True
-        return key == "Escape"
+    def _discard(self):
+        self.running = False
+
+    def region_at(self, x, y):
+        """The click region under (x, y) as (x, y, w, h); None over plain cells and over a
+        dialog's backdrop (the region that swallows clicks around it spans the whole canvas)."""
+        if not self.cv:
+            return None
+        for rx, ry, rw, rh, _ in reversed(self.cv.hits):
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return None if (rw, rh) == (self.cv.w, self.cv.h) else (rx, ry, rw, rh)
+        return None
+
+    def set_hover(self, rect):
+        """Hand pointer over anything clickable (OSC 22, like the bar and the dock), and a
+        lighter shade on the region under it."""
+        if rect == self.hover:
+            return
+        if (rect is None) != (self.hover is None):
+            self.out.write("\x1b]22;" + ("pointer" if rect else "") + "\x07")
+            self.out.flush()
+        self.hover = rect
+        self.dirty = True
 
     # events -----------------------------------------------------------------
     def handle(self, ev):
@@ -689,6 +922,10 @@ class UI:
                 if not self.modal:
                     self.page().wheel(self, -1 if button == "up" else 1)
                 return
+            # Motion without a button arrives as a drag (see decode); 8800 reports the pointer
+            # leaving the pane at column 0, row 0 (-1 here).
+            self.pointer = (x, y) if x >= 0 and y >= 0 else None
+            self.set_hover(self.region_at(x, y) if self.pointer else None)
             if action == "press" and self.cv:
                 fn = self.cv.hit_at(x, y)
                 if fn:
@@ -720,19 +957,24 @@ class UI:
         self.dirty = True
 
     def next_events(self, timeout):
-        r, _, _ = select.select([self.fd], [], [], timeout)
+        pending = getattr(self, "_pending", b"")
+        r, _, _ = select.select([self.fd], [], [], 0.05 if pending else timeout)
         if not r:
-            return []
+            self._pending = b""
+            return decode(pending) if pending else []
         data = os.read(self.fd, 4096)
         if not data:
             raise EOFError
+        data, self._pending = split_complete(pending + data)
         return decode(data)
 
     def run(self):
         old = termios.tcgetattr(self.fd)
         try:
             tty.setraw(self.fd)
-            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+            # 1003: pointer motion for the hover; 8800 (Hivegrid build): a report when the
+            # pointer leaves the pane, so the hover ends.
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
             self.out.flush()
             signal.signal(signal.SIGWINCH, lambda *_: None)
             self.page().on_show(self)
@@ -762,7 +1004,7 @@ class UI:
         finally:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
             self.raw_keys(False)
-            self.out.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+            self.out.write("\x1b]22;\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
             self.out.flush()
 
 

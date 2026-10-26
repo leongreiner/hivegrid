@@ -109,12 +109,18 @@ return function(config, wezterm)
     return s
   end
 
+  -- Usage first; without numbers a login request ranks above plain no data.
+  local function rank(s)
+    if s.pct >= 0 then return s.pct end
+    return s.login and -0.5 or -1
+  end
+
   -- The account the chip spells out: highest worst-window usage; an account that needs
   -- a login outranks one with merely no data when none has numbers.
   local function most_critical(sums)
     local best
     for _, s in ipairs(sums) do
-      if not best or s.pct > best.pct then best = s end
+      if not best or rank(s) > rank(best) then best = s end
     end
     return best
   end
@@ -207,7 +213,7 @@ return function(config, wezterm)
         end
         if s.stale then
           items[#items + 1] = { Foreground = { Color = P.amber } }
-          items[#items + 1] = { Text = '~' }
+          items[#items + 1] = { Text = opts.bar and ' ~' or '~' } -- never glued to a bar
         end
       end
       if lit then
@@ -246,9 +252,7 @@ return function(config, wezterm)
         theme.extend(body, click(s, { { Foreground = { Color = s.color } }, { Text = '● ' } }))
       end
       local c = crit
-      if not c then
-        for _, s in ipairs(sums) do if not c or s.pct > c.pct then c = s end end
-      end
+      if not c then c = most_critical(sums) end
       local seg = label_items(c, true)
       if c.pct < 0 or c.login then
         theme.extend(seg, { { Foreground = { Color = c.color } }, { Text = c.login and 'login' or '--' } })
@@ -375,13 +379,6 @@ return function(config, wezterm)
   local function profile_of(label)
     for _, a in ipairs(S.accounts()) do
       if a.label == label then return a.profile end
-    end
-    return nil
-  end
-
-  local function label_of(profile)
-    for _, a in ipairs(S.accounts()) do
-      if a.profile == profile then return a.label end
     end
     return nil
   end
@@ -534,11 +531,11 @@ return function(config, wezterm)
         info.working = working
         switch_account(window, target, info, running, profile, label)
       end
-      if kind == 'working' or kind == 'ask' then
+      if kind == 'working' or kind == 'busy' or kind == 'attention' then
         window:perform_action(wezterm.action.InputSelector {
           title = 'Switch account',
           description = string.format('omp is %s in this pane. Switch to %s anyway? Esc keeps omp as it is.',
-            kind == 'ask' and 'waiting for an answer' or 'working', label),
+            kind == 'attention' and 'waiting for an answer' or 'working', label),
           choices = { { id = 'no', label = 'No, keep omp running' }, { id = 'yes', label = 'Yes, switch now' } },
           action = wezterm.action_callback(function(_, _, id)
             if id == 'yes' then go(true) end

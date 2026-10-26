@@ -32,10 +32,14 @@ class Agent:
     active: bool = False
     profile: str = None
     error: str = None
+    num: int = 0
+    tab_index: int = 1
 
 
 class FakeCore:
     """Stands in for hivegrid_agents; records every action."""
+
+    PLAN_CHOICES = ("execute", "compact", "keep", "refine", "save")
 
     def __init__(self, agents=()):
         self.agents = list(agents)
@@ -103,6 +107,7 @@ class FakeUI(U.UI):
         self.modal, self.message, self.message_error = None, "", False
         self.cv, self.dirty, self.running, self.size, self.tickers = None, True, True, (0, 0), []
         self.out = io.StringIO()
+        self.hover = self.pointer = None
 
 
 def key(k, *mods):
@@ -293,7 +298,7 @@ class Popover(Base):
         self.core.screen[11] = ["building…", "all green", "$ ready"]
         self.page.select(11)
         body = "\n".join(self.draw())
-        self.assertIn("◔ waiting", body)
+        self.assertIn("◔ busy", body)
         self.assertIn("bash: npm test (42s)", body)
         self.assertIn("1m", body)  # since = 60 s before NOW
         self.assertIn("~/" if os.path.expanduser("~") == "/home/u" else "/home/u/work/proj1", body)
@@ -308,8 +313,20 @@ class Popover(Base):
         self.page.select(10)
         self.draw()
         x, y, w, h = self.page.pop_rect
-        c = self.cell(10)
-        self.assertTrue(x >= c["x"] + c["w"] or x + w <= c["x"], "does not cover the selected hex")
+        for c in self.page.cells:
+            self.assertTrue(x >= c["x"] + c["w"] or x + w <= c["x"], ("covers a cell", c["id"]))
+
+    def test_cells_show_the_dock_digit_tab_qualified_across_tabs(self):
+        a = Agent(pane=7, num=2, cwd="/w/alpha")
+        b = Agent(pane=9, num=1, cwd="/w/beta")
+        self.make(agents=[a, b], size=(100, 30))
+        self.assertEqual([self.page.number(x) for x in self.page.agents], ["2", "1"])
+        body = "\n".join(self.draw())
+        self.assertNotIn("7", body.split("\n", 2)[2].replace("alpha", ""))
+        c = Agent(pane=11, num=1, tab=5, tab_index=2, cwd="/w/gamma")
+        self.make(agents=[a, b, c], size=(100, 30))
+        self.assertEqual(self.page.number(self.page.by_pane[11]), "2·1")
+        self.assertEqual(self.page.number(self.page.by_pane[7]), "1·2")
 
     def test_attention_popover_shows_pending_and_disables_prompt(self):
         self.make(size=(100, 30))
@@ -332,8 +349,8 @@ class Popover(Base):
         self.page.select(2)
         body = "\n".join(self.draw())
         self.assertIn("Which db?", body)
-        self.assertIn("1. pg", body)
-        self.assertIn("press j to jump", body)
+        self.assertIn("· pg", body)
+        self.assertIn("j jumps there", body)
 
     def test_error_line_and_exited_disable(self):
         a = Agent(pane=1, state="exited", error="boom")
@@ -528,7 +545,7 @@ class Keyboard(Base):
             self.send(key("Tab"))
         self.assertEqual(self.page.sel, HV.ADD)
         self.send(key("Enter"))
-        self.assertEqual(self.core.actions(), [("spawn", None)])
+        self.assertEqual(self.core.actions(), [("spawn", 10)])  # the agent under the hive (origin)
 
     def test_delete_asks_when_busy_and_acts_after_yes(self):
         self.make()
@@ -630,7 +647,7 @@ class OtherTabs(Base):
     def tabs(self):
         agents = seven()
         for a in agents[4:]:
-            a.tab = 3
+            a.tab, a.tab_index = 3, 2
         return agents
 
     def test_legend_counts_agents_in_other_tabs(self):
@@ -643,7 +660,7 @@ class OtherTabs(Base):
     def test_popover_header_marks_the_tab_of_an_agent_elsewhere(self):
         self.make(self.tabs(), size=(100, 30))
         self.page.select(14)
-        self.assertIn("⇥ tab 3", "\n".join(self.draw()))
+        self.assertIn("⇥ tab 2", "\n".join(self.draw()))
         self.page.select(11)
         self.assertNotIn("⇥ tab", "\n".join(self.draw()))
 
@@ -705,7 +722,7 @@ class OtherTabs(Base):
         self.assertEqual(self.core.actions(), [])
         self.assertEqual(len(jobs), 1)
         jobs[0]()
-        self.assertEqual(self.core.actions(), [("spawn", None)])
+        self.assertEqual(self.core.actions(), [("spawn", 10)])
         self.assertEqual(self.page.want, 99)
 
 
@@ -739,7 +756,7 @@ class Mouse(Base):
     def test_click_on_add_cell_spawns(self):
         self.make()
         self.click_cell(HV.ADD)
-        self.assertEqual(self.core.actions(), [("spawn", None)])
+        self.assertEqual(self.core.actions(), [("spawn", 10)])
 
     def find_button(self, label):
         for x, y, w, h, fn in self.ui.cv.hits:

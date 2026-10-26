@@ -1,6 +1,5 @@
 """Shared logic of the Hivegrid settings panel: colour presets, key bindings and their conflict
 checks, omp/Claude account discovery and pairing, and the settings.json file. No UI here."""
-import base64
 import json
 import mmap
 import os
@@ -8,7 +7,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 VERSION = "1.1"
@@ -133,6 +131,8 @@ SPECIAL_KEYS = {"Space", "Tab", "Enter", "Escape", "Backspace", "Delete", "Inser
 
 def parse_combo(text):
     """'CTRL+SHIFT+|' -> (frozenset({'CTRL','SHIFT'}), '|'). Raises ValueError."""
+    if text is not None and not isinstance(text, str):
+        raise ValueError(f"not a binding: {text!r}")  # a hand-edited settings.json may hold anything
     text = (text or "").strip()
     if not text:
         raise ValueError("empty binding")
@@ -375,10 +375,11 @@ def quota_state(label):
         w = e.get(key)
         if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
             bits.append(f"{tag} {w['pct']:.0f}%")
-    state = e.get("state", "?")
+    state = str(e.get("state", "?"))
+    word = {"login": "login needed"}.get(state, state.replace("_", " "))
     if bits:
-        return " ".join(bits) + ("" if state == "ok" else f" ({state})")
-    return {"login": "login needed"}.get(state, state)
+        return " ".join(bits) + ("" if state == "ok" else f" · {word}")
+    return word
 
 
 # ---- settings file -----------------------------------------------------------------
@@ -461,6 +462,33 @@ class Settings:
                 pass
             raise
         self.data, self.exists, self.error = data, True, None
+
+
+class ThemeWatch:
+    """The saved palette, re-read when settings.json changes. Long-running views (the bar, the git
+    view) poll it, so a Save in the settings panel restyles them without a restart."""
+
+    def __init__(self, path=None):
+        self.path = settings_path(path)
+        self.stamp = False  # never a real stamp: the first poll always reads
+        self.palette = None
+
+    def poll(self):
+        """-> the palette when it differs from the last one returned (the first call always
+        returns it), else None. Costs one stat() while the file is unchanged."""
+        try:
+            st = self.path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self.stamp:
+            return None
+        self.stamp = stamp
+        palette = Settings(self.path).theme()["palette"]
+        if palette == self.palette:
+            return None
+        self.palette = palette
+        return palette
 
 
 # ---- about -------------------------------------------------------------------------

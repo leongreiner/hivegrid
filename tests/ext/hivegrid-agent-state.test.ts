@@ -155,6 +155,14 @@ describe("reduce", () => {
 		});
 	});
 
+	test("plan review without a choice list gets omp's fixed answers", () => {
+		const m = reduce(initialModel(0), { type: "plan_review_requested", review: { reviewId: "r2", title: "t" } }, 1);
+		const p = m.pending;
+		expect(p?.kind).toBe("plan_review");
+		if (p?.kind !== "plan_review") return;
+		expect(p.choices.map(c => c.id)).toEqual(["execute", "compact", "keep", "refine", "save"]);
+	});
+
 	test("malformed plan review is ignored", () => {
 		const m = reduce(initialModel(0), { type: "plan_review_requested", review: { title: "x" } }, 1);
 		expect(m.pending).toBeNull();
@@ -241,7 +249,7 @@ describe("handleCommand", () => {
 });
 
 describe("extension wiring (fake pi)", () => {
-	test("writes, consumes cmd files, deletes on shutdown; ignores subagents", async () => {
+	test("writes, consumes cmd files, marks exited on shutdown, publishes a new session; ignores subagents", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hg-ext-"));
 		const oldEnv = { x: process.env.XDG_RUNTIME_DIR, p: process.env.WEZTERM_PANE };
 		process.env.XDG_RUNTIME_DIR = dir;
@@ -285,7 +293,14 @@ describe("extension wiring (fake pi)", () => {
 			expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).error).toContain("rejected");
 
 			await handlers.session_shutdown({}, main);
-			expect(fs.existsSync(stateFile)).toBe(false);
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({
+				pane: 4242, state: "exited", pending: null, reason: null, error: null,
+			});
+			await handlers.agent_start({}, main);
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).state).toBe("exited");
+			await handlers.session_start({}, main);
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({ state: "idle", error: null });
+			await handlers.session_shutdown({}, main); // so the process "exit" hook has nothing left to write
 		} finally {
 			process.env.XDG_RUNTIME_DIR = oldEnv.x;
 			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;

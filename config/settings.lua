@@ -63,9 +63,12 @@ local function build(wezterm)
       if type(v) == 'string' and is_hex(v) then
         out[k] = v:lower()
       elseif type(v) == 'table' and (k == 'ansi' or k == 'brights') then
-        local list = {}
-        for i = 1, 8 do list[i] = is_hex(v[i]) and v[i]:lower() or nil end
-        if #list == 8 then out[k] = list end
+        -- All eight or none: `#list` cannot be trusted once an entry is nil.
+        local list, n = {}, 0
+        for i = 1, 8 do
+          if is_hex(v[i]) then list[i], n = v[i]:lower(), n + 1 end
+        end
+        if n == 8 then out[k] = list end
       end
     end
     return out

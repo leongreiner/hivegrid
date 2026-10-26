@@ -49,7 +49,7 @@ install_file() {
 for f in "$repo"/config/*.lua; do install_file "$f" "$cfg/$(basename "$f")"; done
 while IFS= read -r f; do install_file "$f" "$yazi_dst/${f#"$repo"/config/yazi/}"; done \
   < <(find "$repo/config/yazi" -type f | sort)
-for f in "$repo"/bin/*; do install_file "$f" "$bindir/$(basename "$f")" 755; done
+for f in "$repo"/bin/*; do [ -f "$f" ] && install_file "$f" "$bindir/$(basename "$f")" 755; done
 # omp extension publishing agent state for the hive panel (default agent dir + every profile)
 for agent_dir in "$HOME/.omp/agent" "$HOME"/.omp/profiles/*/agent; do
   [ "$agent_dir" = "$HOME/.omp/agent" ] || [ -d "$agent_dir" ] || continue
@@ -59,6 +59,23 @@ install_file "$repo/assets/icon.png" "$icon_dst"
 # Icon font of the sidebar bar (hivegrid-bar draws its buttons from it; text glyphs without it).
 font_src=$repo/wezterm/assets/fonts/SymbolsNerdFontMono-Regular.ttf
 [ -f "$font_src" ] && install_file "$font_src" "$HOME/.local/share/hivegrid/SymbolsNerdFontMono-Regular.ttf" 644
+# Terminal text font: DejaVu Sans Mono patched with Nerd Font icons (family "DejaVuSansM Nerd Font Mono").
+# Without it WezTerm falls back to plain DejaVu Sans Mono and Nerd Font icons show as boxes.
+nerd_dir=$HOME/.local/share/fonts/DejaVuSansMNerdFont
+install_nerd_font() {
+  [ -f "$nerd_dir/DejaVuSansMNerdFontMono-Regular.ttf" ] && return 0
+  local tmp
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/font.zip" https://github.com/ryanoasis/nerd-fonts/releases/latest/download/DejaVuSansMono.zip \
+    && unzip -q -o "$tmp/font.zip" 'DejaVuSansMNerdFontMono-*.ttf' LICENSE.txt -d "$tmp" \
+    && mkdir -p "$nerd_dir" \
+    && cp "$tmp"/DejaVuSansMNerdFontMono-*.ttf "$tmp/LICENSE.txt" "$nerd_dir/" \
+    && { ! command -v fc-cache >/dev/null 2>&1 || fc-cache -f "$nerd_dir"; }
+  local rc=$?
+  rm -rf "$tmp"
+  return $rc
+}
+install_nerd_font || echo "warning: could not install DejaVuSansM Nerd Font Mono; see README (Install)" >&2
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT

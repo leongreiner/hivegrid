@@ -119,9 +119,34 @@ class TestCollect(Base):
         a = self.collect([pane(5, "π > x")], now=NOW + 60)[5]
         self.assertEqual((a.state, a.since), ("idle", NOW + 60))
 
+    def test_shell_where_an_agent_ran_is_exited(self):
+        fg = {"pts/5": (10, "omp", 5, "omp")}
+        self.assertEqual(self.collect([pane(5, "π > x")], fg=fg)[5].state, "idle")
+        fg = {"pts/5": (10, "bash", 5, "-bash"), "pts/6": (11, "bash", 5, "-bash")}
+        rows = self.collect([pane(5, "u@h: ~"), pane(6, "u@h: ~")], fg=fg, now=NOW + 5)
+        self.assertEqual((rows[5].state, rows[5].source, rows[5].since), ("exited", "shell", NOW + 5))
+        self.assertNotIn(6, rows, "a shell where no agent ran is not an agent")
+
+    def test_numbers_follow_reading_order_per_tab(self):
+        def at(pid, left, top, tab=0):
+            p = pane(pid, "π > x", tab=tab)
+            p.update(left_col=left, top_row=top, size={"cols": 40, "rows": 10})
+            return p
+        fg = {f"pts/{i}": (i, "omp", 5, "omp") for i in (1, 2, 3, 4)}
+        fg["pts/9"] = (9, "python3", 5, "python3 /x/hivegrid-bar --surface #101010")
+        bar = at(9, 0, 0)
+        rows = self.collect([at(4, 50, 0), at(1, 50, 11), at(2, 8, 0), bar, at(3, 0, 0, tab=1)], fg=fg)
+        self.assertEqual({k: (a.num, a.tab_index) for k, a in rows.items()},
+                         {2: (1, 1), 4: (2, 1), 1: (3, 1), 3: (1, 2)})
+
+    def test_ack_matches_since_after_a_json_round_trip(self):
+        self.write_state(3, state="done", since=NOW - 30.123)
+        put(os.path.join(self.dir, "acks.json"), json.dumps({"3": NOW - 30.1229999}))
+        self.assertEqual(self.collect([pane(3, "π > x")])[3].state, "idle")
+
     def test_shell_and_dock_excluded(self):
         fg = {"pts/1": (10, "bash", 5, "-bash"),
-              "pts/2": (11, "bash", 5, "bash -c st=$XDG/wezterm-sidebar-2 ..."),
+              "pts/2": (11, "python3", 5, "python3 /x/hivegrid-bar --surface #101010"),
               "pts/3": (12, "python3", 5, "python3 /x/hivegrid-overview"),
               "pts/4": (13, "omp", 5, "omp --profile team"),
               "pts/5": (14, "claude", 5, "claude"),
@@ -247,7 +272,7 @@ def gpane(pid, left, top, cols, rows, tab=0, window=0, title="π > x", active=Fa
             "left_col": left, "top_row": top, "size": {"cols": cols, "rows": rows}}
 
 
-BAR_ARGS = "bash -c st=\"${XDG_RUNTIME_DIR:-/tmp}/wezterm-sidebar-$WEZTERM_PANE\" trap"
+BAR_ARGS = "python3 /home/u/.local/bin/hivegrid-bar --surface #0b1220 --raised #16213a"
 
 
 class Tiler:
@@ -271,7 +296,7 @@ class Tiler:
         self.fail_splits, self.client_focus = fail_splits, client_focus
 
     def fg(self):
-        return {f"pts/{i}": (1, "bash", 1, BAR_ARGS) for i in self.chrome}
+        return {f"pts/{i}": (1, "python3", 1, BAR_ARGS) for i in self.chrome}
 
     def ids(self, tab):
         return [i for i, p in self.panes.items() if p["tab_id"] == tab]
@@ -405,7 +430,7 @@ class EnvCase(Base):
 
 class TestChrome(unittest.TestCase):
     def test_detection(self):
-        self.assertTrue(A.is_chrome("bash", BAR_ARGS))
+        self.assertTrue(A.is_chrome("python3", BAR_ARGS))
         self.assertTrue(A.is_chrome("python3", "python3 /home/u/.local/bin/hivegrid-overview"))
         self.assertTrue(A.is_chrome("yazi", "/home/u/.local/bin/yazi"))
         self.assertTrue(A.is_chrome("python3", "env PWD=/x /home/u/.local/bin/hivegrid-git"))
@@ -416,7 +441,7 @@ class TestChrome(unittest.TestCase):
         self.assertFalse(A.is_chrome("", ""))
 
     def test_collect_skips_every_chrome_kind(self):
-        fg = {"pts/1": (1, "bash", 1, BAR_ARGS), "pts/2": (2, "yazi", 1, "yazi"), "pts/3": (3, "omp", 1, "omp")}
+        fg = {"pts/1": (1, "python3", 1, BAR_ARGS), "pts/2": (2, "yazi", 1, "yazi"), "pts/3": (3, "omp", 1, "omp")}
         panes = [pane(1), pane(2), pane(3, "π ⠋ work")]
         tmp = tempfile.TemporaryDirectory()
         old = os.environ.get("XDG_RUNTIME_DIR")

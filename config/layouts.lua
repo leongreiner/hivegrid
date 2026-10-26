@@ -3,8 +3,12 @@
 --   LEADER+e  equalize panes   LEADER+b  broadcast typed input (guarded)
 --   CTRL+SHIFT+A  arrange the panes into the grid that reads best (also automatic when a
 --   tidy layout gains or loses one pane)
+-- Everything here works on the grid panes only: the sidebar bar and view and the overview
+-- dock (sidebar.is_dock) are never counted, moved or resized.
 return function(config, wezterm)
   local act = wezterm.action
+  local panemap = require 'panemap'
+  local P = require('theme').P
   config.keys = config.keys or {}
   config.key_tables = config.key_tables or {}
 
@@ -14,6 +18,53 @@ return function(config, wezterm)
 
   local function toast(window, msg)
     window:toast_notification('WezTerm layouts', msg, nil, 3000)
+  end
+
+  local function is_dock(id)
+    return require('sidebar').is_dock(id)
+  end
+
+  -- The tab's grid panes (as panes_with_info rows) and the size of the area they fill.
+  local function grid_of(tab)
+    local grid, x0, x1, y0, y1 = {}, math.huge, 0, math.huge, 0
+    for _, i in ipairs(tab:panes_with_info()) do
+      if not is_dock(i.pane:pane_id()) then
+        grid[#grid + 1] = i
+        x0, x1 = math.min(x0, i.left), math.max(x1, i.left + i.width)
+        y0, y1 = math.min(y0, i.top), math.max(y1, i.top + i.height)
+      end
+    end
+    return grid, x1 - x0, y1 - y0
+  end
+
+  -- Grid panes in reading order (the numbers of the overview dock and the pane picker).
+  local function in_order(grid)
+    local num, order = panemap.numbering(grid), {}
+    for i, info in ipairs(grid) do
+      order[num[i]] = info
+    end
+    return order
+  end
+
+  -- Layout work runs `wezterm cli` from callbacks that yield between the calls, so a status
+  -- tick (or another key) can arrive half way: `busy` keeps them from interleaving. It is
+  -- published as wezterm.GLOBAL.layout_busy for the sidebar and dock, which resize panes too
+  -- (AdjustPaneSize acts on the active pane, so interleaved resizes hit the wrong pane).
+  local busy = false
+  local function exclusive(fn)
+    return function(...)
+      if busy then
+        return
+      end
+      busy = true
+      wezterm.GLOBAL.layout_busy = true
+      local ok, err = pcall(fn, ...)
+      busy = false
+      wezterm.GLOBAL.layout_busy = false
+      if not ok then
+        wezterm.log_error('layouts: ' .. tostring(err))
+      end
+    end
   end
 
   -- Resize mode ---------------------------------------------------------
@@ -40,12 +91,14 @@ return function(config, wezterm)
     name = 'resize', one_shot = false, prevent_fallback = true, timeout_milliseconds = 8000,
   })
 
-  -- Equalize ------------------------------------------------------------
+  -- Equalize --------------------------------------------------------------
   -- Lua cannot resize a pane to an absolute size (AdjustPaneSize is relative and
   -- queued asynchronously), so this drives `wezterm cli adjust-pane-size`, which is
-  -- synchronous, and re-reads geometry with `wezterm cli list`. Dividers are snapped
-  -- to even positions per axis. A divider can only be moved through a pane whose
-  -- nearest same-axis split it is; layouts built by split-pane/omp-grid all qualify.
+  -- synchronous, and re-reads geometry with `wezterm cli list`. Every divider between two
+  -- grid panes is snapped to the evenly spaced position nearest to it. A divider can only
+  -- be moved through a pane whose nearest same-axis split it is; layouts built by
+  -- split-pane/omp-grid all qualify. (Window resizes keep the proportions by themselves on
+  -- the Hivegrid build, which scales every split.)
   local AXES = {
     { pos = 'left', len = 'cols', cpos = 'top', clen = 'rows', dec = 'Left', inc = 'Right' },
     { pos = 'top', len = 'rows', cpos = 'left', clen = 'cols', dec = 'Up', inc = 'Down' },
@@ -84,6 +137,11 @@ return function(config, wezterm)
     end
   end
 
+  -- Pane rectangles keyed by pane id, in the shape `wezterm cli list` gives them.
+  local function rect(id, left, top, cols, rows, zoomed)
+    return { id = id, left = left, top = top, cols = cols, rows = rows, zoomed = zoomed }
+  end
+
   local function snapshot(cli, ids)
     local ok, out = cli('list', '--format', 'json')
     if not ok then
@@ -92,34 +150,50 @@ return function(config, wezterm)
     local panes = {}
     for _, e in ipairs(wezterm.json_parse(out)) do
       if ids[e.pane_id] then
-        panes[e.pane_id] = {
-          id = e.pane_id, left = e.left_col, top = e.top_row,
-          cols = e.size.cols, rows = e.size.rows, zoomed = e.is_zoomed,
-        }
+        panes[e.pane_id] = rect(e.pane_id, e.left_col, e.top_row, e.size.cols, e.size.rows, e.is_zoomed)
       end
     end
     return panes
   end
 
-  -- Actual divider positions along an axis, the evenly spaced positions they should snap
-  -- to, the end of the grid and its origin (not 0 when the sidebar bar sits left of it).
-  -- A pane at [pos, pos+len) is followed by a divider cell at pos+len. The number of
-  -- columns is the most panes side by side on any line across the axis, not the number of
-  -- distinct pane starts: independently split rows put their dividers a cell or two apart.
-  local function dividers(panes, a)
-    local starts, seen, total = {}, {}, 0
+  -- First and one-past-last cell the panes cover along axis a.
+  local function extent(panes, a)
+    local lo, hi = math.huge, 0
     for _, p in pairs(panes) do
-      if not seen[p[a.pos]] then
-        seen[p[a.pos]] = true
-        table.insert(starts, p[a.pos])
+      lo, hi = math.min(lo, p[a.pos]), math.max(hi, p[a.pos] + p[a.len])
+    end
+    return lo, hi
+  end
+
+  -- A pane at [pos, pos+len) is followed by a divider cell at pos+len. The dividers of p
+  -- along axis a that have another grid pane on their far side: not the window edge, the
+  -- sidebar view or the overview dock, which are none of our business.
+  local function pane_dividers(panes, p, a)
+    local xs = {}
+    local function beside(x, far)
+      for _, q in pairs(panes) do
+        if q ~= p and far(q) == x and q[a.cpos] < p[a.cpos] + p[a.clen]
+            and p[a.cpos] < q[a.cpos] + q[a.clen] then
+          return true
+        end
       end
-      total = math.max(total, p[a.pos] + p[a.len])
+      return false
     end
-    table.sort(starts)
-    local actual, ideal = {}, {}
-    for j = 2, #starts do
-      table.insert(actual, starts[j] - 1)
+    local e = p[a.pos] + p[a.len]
+    if beside(e, function(q) return q[a.pos] - 1 end) then
+      xs[#xs + 1] = e
     end
+    local s = p[a.pos] - 1
+    if beside(s, function(q) return q[a.pos] + q[a.len] end) then
+      xs[#xs + 1] = s
+    end
+    return xs
+  end
+
+  -- The evenly spaced divider position nearest to x. The number of columns is the most
+  -- panes side by side on any line across the axis, not the number of distinct pane
+  -- starts: independently split rows put their dividers a cell or two apart.
+  local function even_target(panes, a)
     local k = 1
     for _, p in pairs(panes) do
       local c, n = p[a.cpos], 0
@@ -130,47 +204,35 @@ return function(config, wezterm)
       end
       k = math.max(k, n)
     end
-    local origin = starts[1] or 0
+    local origin, total = extent(panes, a)
+    local ideal = {}
     for j = 1, k - 1 do
       ideal[j] = origin + math.floor(j * (total - origin + 1) / k) - 1
     end
-    return actual, ideal, total, origin
-  end
-
-  -- The evenly spaced position nearest to divider x.
-  local function ideal_for(x, ideal)
-    local best, target = math.huge, nil
-    for _, d in ipairs(ideal) do
-      if math.abs(d - x) < best then
-        best, target = math.abs(d - x), d
+    return function(x)
+      local best, target = math.huge, nil
+      for _, d in ipairs(ideal) do
+        if math.abs(d - x) < best then
+          best, target = math.abs(d - x), d
+        end
       end
+      return target
     end
-    return target
-  end
-
-  -- The dividers of a pane that lie inside the grid (not against its outer edge, where a
-  -- sidebar or the overview dock may sit).
-  local function pane_dividers(p, a, total, origin)
-    local xs = {}
-    if p[a.pos] + p[a.len] < total then
-      table.insert(xs, p[a.pos] + p[a.len])
-    end
-    if p[a.pos] > origin then
-      table.insert(xs, p[a.pos] - 1)
-    end
-    return xs
   end
 
   local function misaligned(panes, a)
-    local _, ideal, total, origin = dividers(panes, a)
+    local want = even_target(panes, a)
     local ids = {}
     for id, p in pairs(panes) do
-      for _, x in ipairs(pane_dividers(p, a, total, origin)) do
-        -- A cell off is rounding, not misalignment (and would never settle).
-        if math.abs((ideal_for(x, ideal) or x) - x) > 1 then
-          table.insert(ids, id)
-          break
-        end
+      local xs, off = pane_dividers(panes, p, a), {}
+      for i, x in ipairs(xs) do
+        off[i] = (want(x) or x) - x
+      end
+      -- A cell off is rounding, not misalignment (and would never settle); but two
+      -- dividers a cell off each way leave the pane between them two cells short.
+      if math.abs(off[1] or 0) > 1 or math.abs(off[2] or 0) > 1
+          or math.abs((off[1] or 0) - (off[2] or 0)) > 1 then
+        table.insert(ids, id)
       end
     end
     table.sort(ids)
@@ -193,19 +255,14 @@ return function(config, wezterm)
           return false
         end
         local p = cur[id]
-        local actual, ideal = dividers(cur, a)
-        local function is_inner(x)
-          for _, d in ipairs(actual) do
-            if d == x then
-              return true
-            end
-          end
-          return false
+        local inner = {}
+        for _, x in ipairs(pane_dividers(cur, p, a)) do
+          inner[x] = true
         end
         -- AdjustPaneSize acts on the active pane, whatever --pane-id says.
         cli('activate-pane', '--pane-id', id)
-        -- Probe by one cell to learn which divider this pane's resize actually moves. A
-        -- divider against a sidebar or the overview dock is none of our business: undo it.
+        -- Probe by one cell to learn which divider this pane's resize actually moves. One
+        -- against the sidebar or the overview dock: undo it.
         local moved
         for _, dir in ipairs { a.inc, a.dec } do
           cli('adjust-pane-size', '--pane-id', id, '--amount', 1, dir)
@@ -219,7 +276,7 @@ return function(config, wezterm)
           elseif q[a.pos] ~= p[a.pos] then
             moved = { old = p[a.pos] - 1, new = q[a.pos] - 1 }
           end
-          if moved and not is_inner(moved.old) then
+          if moved and not inner[moved.old] then
             cli('adjust-pane-size', '--pane-id', id, '--amount', 1, dir == a.inc and a.dec or a.inc)
             moved = nil
           end
@@ -227,9 +284,9 @@ return function(config, wezterm)
             break
           end
         end
-        local target = moved and ideal_for(moved.old, ideal)
-        if target and target ~= moved.new then
-          local delta = target - moved.new
+        local goal = moved and even_target(cur, a)(moved.old)
+        if goal and goal ~= moved.new then
+          local delta = goal - moved.new
           cli('adjust-pane-size', '--pane-id', id, '--amount', math.abs(delta),
             delta > 0 and a.inc or a.dec)
         end
@@ -238,11 +295,11 @@ return function(config, wezterm)
     return true
   end
 
-  local function equalize(window, pane)
+  local equalize = exclusive(function(window, pane)
     local tab = window:active_tab()
     local ids, n = {}, 0
     for _, p in ipairs(tab:panes()) do
-      if not require('sidebar').is_dock(p:pane_id()) then
+      if not is_dock(p:pane_id()) then
         ids[p:pane_id()] = true
         n = n + 1
       end
@@ -278,7 +335,7 @@ return function(config, wezterm)
     if final and (#misaligned(final, AXES[1]) > 0 or #misaligned(final, AXES[2]) > 0) then
       toast(window, 'equalize: layout is not a regular grid; got as close as possible')
     end
-  end
+  end)
 
   local equalize_action = wezterm.action_callback(equalize)
   bind('LEADER', 'e', equalize_action)
@@ -288,14 +345,131 @@ return function(config, wezterm)
   -- equalize(window, pane) is also called by the overview dock's button.
   local api = { equalize = equalize }
 
+  -- Rebuilding ------------------------------------------------------------
+  -- Arrange, rotate and swap rebuild the grid from a layout tree, keeping every process:
+  -- the panes are moved, never recreated. A tree is a pane id (leaf) or a split
+  -- { dir = 'right' | 'bottom', a = tree, b = tree, frac }: b goes right of / below a and
+  -- takes frac of the cells (each divider counted with the pane before it), so a tree fits
+  -- whatever area the grid has. Moving works in two steps: all panes but the first leaf go
+  -- to temporary tabs, so the first one fills the grid's area alone; that area is then cut
+  -- with split-pane --move-pane-id, b's first leaf moving into each cut.
+  local function first_leaf(t)
+    while type(t) == 'table' do
+      t = t.a
+    end
+    return t
+  end
+
+  -- items[1..n] in equal parts along dir.
+  local function chain(items, dir)
+    local function from(i)
+      if i == #items then
+        return items[i]
+      end
+      local rest = #items - i
+      return { dir = dir, a = items[i], b = from(i + 1), frac = rest / (rest + 1) }
+    end
+    return from(1)
+  end
+
+  -- The tree that reproduces the geometry of `slots` (rects with an id each). Every layout
+  -- made of splits can be cut in two by a straight line through dividers only; rows first.
+  local function carve(slots)
+    if #slots == 1 then
+      return slots[1].id
+    end
+    for _, ax in ipairs { { AXES[2], 'bottom' }, { AXES[1], 'right' } } do
+      local a, dir = ax[1], ax[2]
+      local lo, hi = extent(slots, a)
+      local ends = {}
+      for _, s in ipairs(slots) do
+        if s[a.pos] + s[a.len] < hi then
+          ends[#ends + 1] = s[a.pos] + s[a.len]
+        end
+      end
+      table.sort(ends)
+      for _, e in ipairs(ends) do
+        local first, second, clean = {}, {}, true
+        for _, s in ipairs(slots) do
+          if s[a.pos] + s[a.len] <= e then
+            first[#first + 1] = s
+          elseif s[a.pos] >= e then
+            second[#second + 1] = s
+          else
+            clean = false
+            break
+          end
+        end
+        if clean and #first > 0 and #second > 0 then
+          local ta, tb = carve(first), carve(second)
+          if ta == nil or tb == nil then
+            return nil
+          end
+          return { dir = dir, a = ta, b = tb, frac = (hi - e) / (hi - lo + 1) }
+        end
+      end
+    end
+    return nil
+  end
+
+  -- Puts the grid panes of the active tab into `tree`; `focus` gets the keyboard after.
+  local function rebuild(window, pane, tree, focus)
+    local tab = window:active_tab()
+    local grid = grid_of(tab)
+    local cli = make_cli(pane)
+    for _, info in ipairs(grid) do
+      if info.is_zoomed then
+        cli('zoom-pane', '--pane-id', info.pane:pane_id(), '--unzoom')
+      end
+    end
+    local anchor = first_leaf(tree)
+    for _, info in ipairs(grid) do
+      local id = info.pane:pane_id()
+      if id ~= anchor then
+        cli('move-pane-to-new-tab', '--pane-id', id)
+      end
+    end
+    local placed, failed = { [anchor] = true }, false
+    local function size(id, dir)
+      local p = wezterm.mux.get_pane(id)
+      local d = p and p:get_dimensions()
+      return d and (dir == 'right' and d.cols or d.viewport_rows)
+    end
+    local function build(t, occupant)
+      if type(t) ~= 'table' then
+        return
+      end
+      local id = first_leaf(t.b)
+      local s = not failed and size(occupant, t.dir)
+      if s and s >= 3 then
+        local cells = math.max(1, math.min(s - 2, math.floor(t.frac * (s + 1) + 0.5) - 1))
+        if cli('split-pane', '--pane-id', occupant, '--' .. t.dir, '--cells', cells, '--move-pane-id', id) then
+          placed[id] = true
+        end
+      end
+      failed = failed or not placed[id]
+      build(t.a, occupant)
+      if placed[id] then
+        build(t.b, id)
+      end
+    end
+    build(tree, anchor)
+    -- Anything not placed (a split failed) goes back beside the first pane, never lost.
+    for _, info in ipairs(grid) do
+      local id = info.pane:pane_id()
+      if not placed[id] then
+        cli('split-pane', '--pane-id', anchor, '--right', '--move-pane-id', id)
+      end
+    end
+    cli('activate-pane', '--pane-id', focus)
+    cli('activate-tab', '--tab-id', tab:tab_id())
+    return not failed
+  end
+
   -- Arrange ---------------------------------------------------------------
   -- Re-tiles the grid panes into the grid that reads best for their number and the window's
-  -- shape (5 panes in a row become 3 + 2 in two rows), keeping every process: the panes are
-  -- moved, never recreated. They keep their reading order, so the numbers stay.
-  -- Moving works in two steps: all panes but the first go to temporary tabs, so each one
-  -- is then split into a big, empty area; the first pane's area is cut into the rows, and
-  -- each row into its panes, with percentages that give equal sizes.
-  local panemap = require 'panemap'
+  -- shape (5 panes in a row become 3 + 2 in two rows). They keep their reading order, so
+  -- the numbers stay.
   local CELL_ASPECT = 2.1 -- cell height / cell width on screen
   local MIN_PANE_COLS, MIN_PANE_ROWS = 60, 8
 
@@ -387,103 +561,174 @@ return function(config, wezterm)
     return true
   end
 
-  -- The tab's grid panes (as panes_with_info rows) and the size of the area they fill.
-  local function grid_of(tab)
-    local grid, x0, x1, y0, y1 = {}, math.huge, 0, math.huge, 0
-    for _, i in ipairs(tab:panes_with_info()) do
-      if not require('sidebar').is_dock(i.pane:pane_id()) then
-        grid[#grid + 1] = i
-        x0, x1 = math.min(x0, i.left), math.max(x1, i.left + i.width)
-        y0, y1 = math.min(y0, i.top), math.max(y1, i.top + i.height)
-      end
-    end
-    return grid, x1 - x0, y1 - y0
-  end
-
-  local function arrange(window, pane)
-    local tab = window:active_tab()
-    local grid, cols, rows = grid_of(tab)
+  local function arrange_now(window, pane)
+    local grid, cols, rows = grid_of(window:active_tab())
     local n = #grid
     if n < 2 then
       return
     end
-    local num = panemap.numbering(grid)
-    local order = {}
-    for i, info in ipairs(grid) do
-      order[num[i]] = info.pane:pane_id()
-    end
-    local counts = ideal_counts(n, cols, rows)
-    local cli = make_cli(pane)
-    for _, info in ipairs(grid) do
-      if info.is_zoomed then
-        cli('zoom-pane', '--pane-id', info.pane:pane_id(), '--unzoom')
+    local order = in_order(grid)
+    local rows_t, k = {}, 1
+    for r, c in ipairs(ideal_counts(n, cols, rows)) do
+      local ids = {}
+      for j = 1, c do
+        ids[j] = order[k].pane:pane_id()
+        k = k + 1
       end
+      rows_t[r] = chain(ids, 'right')
     end
-
-    local function pct(x)
-      return math.floor(100 * x + 0.5)
-    end
-    local anchor = order[1]
-    local start, s = {}, 1
-    for r, c in ipairs(counts) do
-      start[r] = s
-      s = s + c
-    end
-    for k = 2, n do
-      cli('move-pane-to-new-tab', '--pane-id', order[k])
-    end
-    local placed, failed = { [anchor] = true }, false
-    local function put(target, dir, percent, id)
-      local ok = false
-      if not failed then
-        ok = cli('split-pane', '--pane-id', target, dir, '--percent', percent, '--move-pane-id', id)
-      end
-      if ok then
-        placed[id] = true
-      else
-        failed = true
-      end
-      return ok
-    end
-    local R, first = #counts, { anchor }
-    for r = 2, R do
-      local id = order[start[r]]
-      if put(first[r - 1], '--bottom', pct((R - r + 1) / (R - r + 2)), id) then
-        first[r] = id
-      end
-    end
-    for r = 1, R do
-      local prev, c = first[r], counts[r]
-      for j = 2, c do
-        local id = order[start[r] + j - 1]
-        if prev and put(prev, '--right', pct((c - j + 1) / (c - j + 2)), id) then
-          prev = id
-        end
-      end
-    end
-    -- Anything not placed (a split failed) goes back beside the first pane, never lost.
-    for k = 2, n do
-      if not placed[order[k]] then
-        cli('split-pane', '--pane-id', anchor, '--right', '--move-pane-id', order[k])
-      end
-    end
-    cli('activate-pane', '--pane-id', pane:pane_id())
-    cli('activate-tab', '--tab-id', tab:tab_id())
-    if failed then
+    if not rebuild(window, pane, chain(rows_t, 'bottom'), pane:pane_id()) then
       toast(window, 'arrange: could not build the grid; panes were put back side by side')
     end
   end
+  local arrange = exclusive(arrange_now)
   api.arrange = arrange
   local arrange_action = wezterm.action_callback(arrange)
   local ar_key = require('settings')(config, wezterm).key('arrange', 'CTRL+SHIFT+a')
   bind(ar_key.mods, ar_key.key, arrange_action)
 
+  -- Rotate and swap -------------------------------------------------------
+  -- WezTerm's RotatePanes and PaneSelect work on every pane of the tab, so they would move
+  -- the sidebar and the dock into the grid. These rebuild the grid with the same geometry
+  -- and the panes in other slots instead. `assign(order)` gets the grid panes in reading
+  -- order and returns the pane for each slot, or nil to leave things as they are.
+  local function permute(window, pane, assign, focus)
+    local order = in_order(grid_of(window:active_tab()))
+    if #order < 2 then
+      return
+    end
+    local ids = assign(order)
+    if not ids then
+      return
+    end
+    local slots = {}
+    for i, info in ipairs(order) do
+      slots[i] = rect(ids[i], info.left, info.top, info.width, info.height)
+    end
+    local tree = carve(slots)
+    if not tree then
+      toast(window, 'This layout cannot be rebuilt; nothing was moved')
+      return
+    end
+    if not rebuild(window, pane, tree, focus or pane:pane_id()) then
+      toast(window, 'Could not rebuild the layout; panes were put back side by side')
+    end
+  end
+
+  -- Clockwise moves every pane to the next slot in reading order, the last to the first.
+  local function rotate(step)
+    return wezterm.action_callback(exclusive(function(window, pane)
+      permute(window, pane, function(order)
+        local n, ids = #order, {}
+        for i = 1, n do
+          ids[i] = order[(i - 1 - step) % n + 1].pane:pane_id()
+        end
+        return ids
+      end)
+    end))
+  end
+
+  local function home(path)
+    local h = wezterm.home_dir
+    if path:sub(1, #h) == h then
+      return '~' .. path:sub(#h + 1)
+    end
+    return path
+  end
+
+  local function cwd_of(p)
+    local ok, u = pcall(function() return p:get_current_working_dir() end)
+    if not ok or not u then
+      return ''
+    end
+    local path = type(u) == 'string' and u:gsub('^file://[^/]*', '') or u.file_path or ''
+    return home((path:gsub('(.)/$', '%1')))
+  end
+
+  -- Chooser over the tab's grid panes; InputSelector numbers the rows itself, which in
+  -- reading order are the pane numbers. `then_do(window, pane, id)`.
+  local function choose(title, description, then_do)
+    return wezterm.action_callback(function(window, pane)
+      local order = in_order(grid_of(window:active_tab()))
+      if #order < 2 then
+        toast(window, 'Only one pane in this tab')
+        return
+      end
+      local choices = {}
+      for n, info in ipairs(order) do
+        local p = info.pane
+        local here = p:pane_id() == pane:pane_id()
+        choices[n] = {
+          id = tostring(p:pane_id()),
+          label = wezterm.format {
+            { Foreground = { Color = P.text } }, { Text = cwd_of(p) },
+            { Foreground = { Color = P.muted } }, { Text = '  ' .. p:get_title() .. (here and '  (here)' or '') },
+          },
+        }
+      end
+      window:perform_action(act.InputSelector {
+        title = title,
+        description = description,
+        fuzzy_description = 'Pane: ',
+        alphabet = '123456789',
+        choices = choices,
+        action = wezterm.action_callback(function(win, _, id)
+          if id then
+            then_do(win, pane, tonumber(id))
+          end
+        end),
+      }, pane)
+    end)
+  end
+
+  local select_pane = choose('Go to pane', 'Type a number or / to filter, Enter = go, Esc = cancel',
+    function(_, _, id)
+      local target = wezterm.mux.get_pane(id)
+      if target then
+        target:activate()
+      end
+    end)
+
+  -- 's' keeps the keyboard on the moved pane, 'S' on the slot (the pane that came in).
+  local function swap(keep_slot)
+    return choose('Swap with pane', 'Type a number or / to filter, Enter = swap, Esc = cancel',
+      exclusive(function(window, pane, id)
+        if id == pane:pane_id() then
+          return
+        end
+        permute(window, pane, function(order)
+          local ids = {}
+          for i, info in ipairs(order) do
+            local cur = info.pane:pane_id()
+            ids[i] = cur == id and pane:pane_id() or cur == pane:pane_id() and id or cur
+          end
+          return ids
+        end, keep_slot and id or pane:pane_id())
+      end))
+  end
+
+  -- Even grid, aligned to the evenly spaced dividers on both axes.
+  local function is_even(grid)
+    local panes = {}
+    for _, i in ipairs(grid) do
+      local id = i.pane:pane_id()
+      panes[id] = rect(id, i.left, i.top, i.width, i.height)
+    end
+    return #misaligned(panes, AXES[1]) == 0 and #misaligned(panes, AXES[2]) == 0
+  end
+
   -- Auto arrange: when the number of grid panes changes and then holds for two status ticks
   -- (omp-grid is still splitting before that), a tab whose layout was a tidy one, the
   -- ideal grid for the old count or a single row or column, is re-tiled for the new count.
   -- A layout the user built by hand (panes not in aligned rows) is left alone.
-  local seen = {} -- tab id -> { n = settled pane count, shape = its rows, pend, ticks }
+  -- Re-even: when the grid's area changes with the same panes (the sidebar view or the dock
+  -- opened or closed beside it; a window resize on stock WezTerm), WezTerm gives or takes
+  -- the cells at one end of the tree; a grid that was even is evened out again.
+  local seen = {} -- tab id -> { n = settled pane count, shape = its rows, area, even, pend, ticks }
   wezterm.on('update-status', function(window)
+    if busy then
+      return
+    end
     local tab = window:active_tab()
     local active = window:active_pane()
     if not tab or not active then
@@ -498,13 +743,30 @@ return function(config, wezterm)
       return -- an overlay (panel) is showing
     end
     local id, n = tab:tab_id(), #grid
+    local zoomed = false
+    for _, i in ipairs(grid) do
+      zoomed = zoomed or i.is_zoomed
+    end
     local st = seen[id]
+    local function settle()
+      st.shape, st.area, st.even = shape_of(grid), cols .. 'x' .. rows, is_even(grid)
+    end
     if not st then
-      seen[id] = { n = n, shape = shape_of(grid) }
+      st = { n = n }
+      seen[id] = st
+      settle()
       return
     end
     if n == st.n then
-      st.pend, st.shape = nil, shape_of(grid)
+      st.pend = nil
+      if zoomed then
+        return
+      end
+      if n > 1 and st.even and st.area ~= cols .. 'x' .. rows then
+        equalize(window, active)
+        grid, cols, rows = grid_of(tab)
+      end
+      settle()
       return
     end
     if st.pend ~= n then
@@ -517,25 +779,17 @@ return function(config, wezterm)
     end
     local prev_n, prev_shape = st.n, st.shape
     st.n, st.pend = n, nil
-    local zoomed = false
-    for _, i in ipairs(grid) do
-      zoomed = zoomed or i.is_zoomed
-    end
-    if n < 2 or zoomed then
-      st.shape = shape_of(grid)
-      return
-    end
     -- One pane more or fewer is somebody splitting or closing; a jump (omp-grid building its
     -- layout) is a layout chosen on purpose and stays as it is. A tidy layout is re-tiled
     -- even when its shape is already right: the split left one pane half as big, and rows
     -- with fewer panes would not even out with equalize (it aligns them to the other rows).
     local now = shape_of(grid)
     local tidy = same_counts(prev_shape, ideal_counts(prev_n, cols, rows)) or is_strip(prev_shape)
-    if tidy and now and math.abs(n - prev_n) == 1 then
+    if n >= 2 and not zoomed and tidy and now and math.abs(n - prev_n) == 1 then
       arrange(window, active)
-      grid = grid_of(tab)
+      grid, cols, rows = grid_of(tab)
     end
-    st.shape = shape_of(grid)
+    settle()
   end)
 
   -- Pane mode -----------------------------------------------------------
@@ -543,20 +797,24 @@ return function(config, wezterm)
     return act.Multiple { act.PopKeyTable, ... }
   end
   config.key_tables.pane = {
-    { key = 'r', action = act.RotatePanes 'Clockwise' },
-    { key = 'R', mods = 'SHIFT', action = act.RotatePanes 'CounterClockwise' },
-    { key = 'g', action = once(act.PaneSelect { mode = 'Activate' }) },
-    { key = 's', action = once(act.PaneSelect { mode = 'SwapWithActive' }) },
-    { key = 'S', mods = 'SHIFT', action = once(act.PaneSelect { mode = 'SwapWithActiveKeepFocus' }) },
+    { key = 'r', action = rotate(1) },
+    { key = 'R', mods = 'SHIFT', action = rotate(-1) },
+    { key = 'g', action = once(select_pane) },
+    { key = 's', action = once(swap(false)) },
+    { key = 'S', mods = 'SHIFT', action = once(swap(true)) },
     { key = 'x', action = once(act.CloseCurrentPane { confirm = true }) },
     {
       key = 't',
       action = once(wezterm.action_callback(function(window, pane)
-        if #window:active_tab():panes() < 2 then
+        if is_dock(pane:pane_id()) or #grid_of(window:active_tab()) < 2 then
           toast(window, 'Only one pane in this tab')
           return
         end
-        pane:move_to_new_tab()
+        -- The pane is followed to its new tab, like tmux's break-pane.
+        local tab = pane:move_to_new_tab()
+        if tab then
+          tab:activate()
+        end
       end)),
     },
     { key = 'z', action = once(act.TogglePaneZoomState) },
@@ -594,7 +852,7 @@ return function(config, wezterm)
         return
       end
       for _, p in ipairs(tab:panes()) do
-        if not require('sidebar').is_dock(p:pane_id()) then send(window, p) end
+        if not is_dock(p:pane_id()) then send(window, p) end
       end
     end)
   end
@@ -648,14 +906,20 @@ return function(config, wezterm)
     end
     window:perform_action(act.PromptInputLine {
       description = 'Type "broadcast" to send all typing to every pane of this tab (Enter to confirm, Esc to cancel)',
-      action = wezterm.action_callback(function(win, p, line)
+      -- The callback's own pane is the prompt's overlay, which is gone by then: the key
+      -- table goes to the pane LEADER+b was pressed in.
+      action = wezterm.action_callback(function(win, _, line)
+        if line == nil then
+          return
+        end
         if line ~= 'broadcast' then
+          toast(win, 'Broadcast not started: type the word broadcast')
           return
         end
         wezterm.GLOBAL.broadcast = { tab_id = win:active_tab():tab_id(), window_id = win:window_id() }
         win:perform_action(act.ActivateKeyTable {
           name = 'broadcast', one_shot = false,
-        }, p)
+        }, pane)
       end),
     }, pane)
   end))

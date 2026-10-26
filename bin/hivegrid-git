@@ -5,22 +5,30 @@ Usage: hivegrid-git [DIR]
 
 Scans DIR (default: the current directory) the way VS Code's Source Control view does: the
 repository around it plus the repositories below it, up to HIVEGRID_GIT_DEPTH levels (default 3).
-With one repository (or none) it starts lazygit there at once. With several it shows an overview
-(branch, commits ahead/behind, staged/changed/untracked files, CI result, refreshed every few
-seconds); Enter or a click opens lazygit in the selected repository and quitting lazygit returns
-to the overview. A repository with GitHub Actions workflows shows ✓/✗ right after the status dot for the
-latest runs on its checked-out branch (read through the gh CLI every minute, every 10 s while a run is
-unfinished, shown as a spinning ⠋ until it ends; ? when gh cannot tell).
+With one repository it starts lazygit there at once; with none it says so. With several it shows an
+overview (branch, commits ahead/behind, staged/changed/untracked files, a merge or rebase in
+progress, CI result); Enter or a click opens lazygit in the selected repository and quitting
+lazygit returns to the overview. The rows in view are re-read every 5 s, the others every 30 s.
+A repository with GitHub Actions workflows shows ✓/✗ right after the status dot for the latest
+runs on its checked-out branch (read through the gh CLI every 2 minutes for the rows in view and
+every 10 minutes for the others, every 15 s while a run is unfinished, which keeps a workspace of
+a hundred repositories at about a fifth of GitHub's hourly API limit; shown as a spinner until
+the run ends; ? when gh cannot tell).
+lazygit gets the Hivegrid colours from a generated config file that the user's own lazygit
+config overrides.
 
-Keys: Up/Down or k/j move, Enter/Right/l or a click open, r rescans, q/Esc closes.
+Keys: Up/Down or k/j move, PageUp/PageDown, Home/g, End/G, Enter/Right/l or a click open,
+r rescans, q/Esc closes.
 Environment: HIVEGRID_GIT_DEPTH scan depth; HIVEGRID_LAZYGIT path of the lazygit binary.
 """
+import json
 import os
 import select
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -31,9 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import hivegrid_repos as R  # noqa: E402
 
-REFRESH_EVERY = 5.0
-CI_REFRESH_EVERY = 60.0  # CI results come over the network
-CI_RUNNING_EVERY = 10.0  # while a run is unfinished, look again sooner
+# Seconds between reads of one repository: git status of the rows in view / out of view, and the CI
+# result, which costs a GitHub API call (out-of-view rows rarely, so a workspace with a hundred
+# repositories stays well inside the hourly API limit that the user's other gh use shares).
+STATUS_EVERY, STATUS_HIDDEN_EVERY = 5.0, 30.0
+CI_EVERY, CI_HIDDEN_EVERY = 120.0, 600.0
+CI_RUNNING_EVERY = 15.0  # while a run is unfinished, look again sooner
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # shown instead of ◔ for a running CI, animated
 WORKERS = 4
 ROW_H = 2
@@ -41,6 +52,12 @@ TEXT_X = 5  # text column of a row: dot at 1, CI mark at 3 (a blank column betwe
 # CI state -> (glyph, palette key). Repositories without workflows have no state and show nothing.
 CI_MARKS = {"pass": ("✓", "green"), "fail": ("✗", "red"), "running": ("◔", "amber"),
             "other": ("–", "muted"), "none": ("–", "muted"), "unknown": ("?", "muted")}
+# Hover fade, the same treatment as the overview dock's rows.
+STEPS = 8  # shades between rest and full hover: the fade is drawn in this many steps
+HOVER_BLEND = 0.45  # share of the way to the hover colour that full hover reaches
+FADE_IN, FADE_OUT = 0.15, 0.20  # seconds from rest to full hover and back
+FRAME = 1 / 30  # seconds between frames while a fade runs
+NOTE_FOR = 2.0  # seconds a footer note (after a rescan) stays
 
 
 def lazygit_path():
@@ -50,34 +67,97 @@ def lazygit_path():
     return shutil.which("lazygit")
 
 
-def exec_lazygit(lazygit, path):
+def lazygit_theme(pal):
+    """lazygit config (YAML; JSON flow lists are valid YAML) giving it the Hivegrid palette."""
+    theme = {
+        "activeBorderColor": [pal["accent"], "bold"],
+        "inactiveBorderColor": [pal["edge_hi"]],
+        "searchingActiveBorderColor": [pal["amber"], "bold"],
+        "optionsTextColor": [pal["muted"]],
+        "selectedLineBgColor": [pal["raised"]],
+        "unstagedChangesColor": [pal["red"]],
+        "defaultFgColor": [pal["text"]],
+    }
+    lines = ["# Written by hivegrid-git on every start of lazygit; edits are lost.", "gui:",
+             "  showRandomTip: false", "  theme:"]
+    lines += [f"    {k}: {json.dumps(v)}" for k, v in theme.items()]
+    return "\n".join(lines) + "\n"
+
+
+_user_config_dir = None
+
+
+def lazygit_env(lazygit, pal):
+    """Environment for lazygit: LG_CONFIG_FILE lists the generated Hivegrid theme first and the
+    user's own config after it, so a theme the user set still wins. Setting LG_CONFIG_FILE replaces
+    lazygit's default config file, hence that file (or the user's LG_CONFIG_FILE) is listed
+    explicitly; a missing file would be an error, so only an existing one is."""
+    global _user_config_dir
+    env = dict(os.environ)
+    if not pal:
+        return env
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(tempfile.gettempdir(), f"hivegrid-{os.getuid()}")
+    path = os.path.join(base, "hivegrid", "lazygit-theme.yml")
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(lazygit_theme(pal))
+        os.replace(tmp, path)
+    except OSError:
+        return env
+    user = [f for f in os.environ.get("LG_CONFIG_FILE", "").split(",") if f]
+    if not user:
+        if _user_config_dir is None:
+            try:
+                out = subprocess.run([lazygit, "--print-config-dir"], capture_output=True, text=True,
+                                     timeout=5, stdin=subprocess.DEVNULL).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            _user_config_dir = out or os.path.expanduser("~/.config/lazygit")
+        cfg = os.path.join(_user_config_dir, "config.yml")
+        user = [cfg] if os.path.isfile(cfg) else []
+    env["LG_CONFIG_FILE"] = ",".join([path] + user)
+    return env
+
+
+def exec_lazygit(lazygit, path, pal):
+    env = lazygit_env(lazygit, pal)
+    env["PWD"] = path
     os.chdir(path)
-    os.environ["PWD"] = path
-    os.execv(lazygit, [lazygit])
+    os.execve(lazygit, [lazygit], env)
 
 
 class Refresher:
-    """Runs `fn` over all repositories on a background thread every `every` seconds; the UI polls
-    `take()` and `due()`."""
+    """Runs `fn` on a background thread over the repositories that are due: each one is due
+    `interval(repo, in_view)` seconds after its last read. The UI polls `take()`."""
 
-    def __init__(self, fn, every):
-        self.fn, self.every = fn, every
+    def __init__(self, fn, interval):
+        self.fn, self.interval = fn, interval
+        self.at = {}  # path -> monotonic time of the last read
         self.busy = False
-        self.done_at = 0.0
         self.fresh = False
 
-    def kick(self, repos):
+    def kick(self, repos, in_view, now):
         if self.busy:
             return
+        due = [r for r in repos if r.path not in self.at or now - self.at[r.path] >= self.interval(r, r.path in in_view)]
+        if not due:
+            return
+        due.sort(key=lambda r: r.path not in in_view)  # rows in view first
         self.busy = True
-        threading.Thread(target=self._run, args=(list(repos),), daemon=True).start()
+        threading.Thread(target=self._run, args=(due,), daemon=True).start()
+
+    def _one(self, repo):
+        self.fn(repo)
+        self.at[repo.path] = time.monotonic()
+        self.fresh = True  # each result shows as soon as it is in, not when the batch ends
 
     def _run(self, repos):
         try:
             with ThreadPoolExecutor(WORKERS) as ex:
-                list(ex.map(self.fn, repos))
+                list(ex.map(self._one, repos))
         finally:
-            self.done_at = time.monotonic()
             self.fresh = True
             self.busy = False
 
@@ -85,13 +165,31 @@ class Refresher:
         fresh, self.fresh = self.fresh, False
         return fresh
 
-    def due(self):
-        return not self.busy and time.monotonic() - self.done_at >= self.every
+    def forget(self, paths=None):
+        """Makes the given repositories (default all) due now."""
+        if paths is None:
+            self.at.clear()
+        for p in paths or ():
+            self.at.pop(p, None)
+
+
+def status_interval(repo, in_view):
+    return STATUS_EVERY if in_view else STATUS_HIDDEN_EVERY
+
+
+def ci_interval(repo, in_view):
+    if repo.ci == "running":
+        return CI_RUNNING_EVERY
+    return CI_EVERY if in_view else CI_HIDDEN_EVERY
 
 
 class View:
     def __init__(self, root, depth, lazygit):
-        self.root, self.depth, self.lazygit, self.pal = root, depth, lazygit, None
+        from hivegrid_settings_core import ThemeWatch
+
+        self.root, self.depth, self.lazygit = root, depth, lazygit
+        self.theme = ThemeWatch()
+        self.pal = self.theme.poll()
         self.fd = sys.stdin.fileno()
         self.out = sys.stdout
         self.repos, self.truncated = [], False
@@ -100,8 +198,12 @@ class View:
         self.dirty = True
         self.running = True
         self.size = (0, 0)
-        self.refresher = Refresher(R.status, REFRESH_EVERY)
-        self.ci_refresher = Refresher(R.ci, CI_REFRESH_EVERY)
+        self.status = Refresher(R.status, status_interval)
+        self.ci = Refresher(R.ci, ci_interval)
+        self.hover = None  # path of the row under the pointer, or None
+        self.levels = {}  # fade level 0..1 of every row that is hovered or still fading out
+        self.clock = None  # time of the last fade step; None while no fade runs
+        self.note = None  # (text, until): a footer note after a rescan
         self.old_tty = None
 
     # data -------------------------------------------------------------------
@@ -119,16 +221,33 @@ class View:
             self.sel = max(around, key=lambda i: len(paths[i])) if around else 0
         self.dirty = True
 
+    def page(self):
+        """Rows of repositories that fit: everything between the header (title, rule) and the
+        footer, less the line of the scan note when there is one."""
+        return max(1, (self.size[1] - 3 - (1 if self.truncated else 0)) // ROW_H)
+
+    def in_view(self):
+        return {r.path for r in self.repos[self.top:self.top + self.page()]}
+
     # terminal ---------------------------------------------------------------
     def enter(self):
         self.old_tty = termios.tcgetattr(self.fd)
         tty.setraw(self.fd)
-        self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
-        self.out.flush()
+        # 1003: pointer motion for the hover; 8800 (Hivegrid build): a report when the pointer
+        # leaves the pane, which ends the hover.
+        self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
+        self.paint_padding()
         self.dirty = True
 
+    def paint_padding(self):
+        """Makes the surface the pane's default background (OSC 11): WezTerm fills the window
+        padding and the strips beside the cell grid with it, which cell colours never reach."""
+        if self.pal:
+            self.out.write(f"\x1b]11;{self.pal['surface']}\x07")
+        self.out.flush()
+
     def leave(self):
-        self.out.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+        self.out.write("\x1b]22;\x07\x1b]111\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
         self.out.flush()
         if self.old_tty:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_tty)
@@ -139,55 +258,101 @@ class View:
         # resets handlers, so lazygit and its children still see the default action.
         signal.signal(signal.SIGINT, lambda *_: None)
         try:
-            subprocess.run([self.lazygit], cwd=repo.path, env=dict(os.environ, PWD=repo.path))
+            env = lazygit_env(self.lazygit, self.pal)
+            env["PWD"] = repo.path
+            subprocess.run([self.lazygit], cwd=repo.path, env=env)
         finally:
             signal.signal(signal.SIGINT, signal.default_int_handler)
             self.enter()
-        self.refresher.done_at = self.ci_refresher.done_at = 0.0  # refresh now: lazygit probably changed things
+        # Read again now: lazygit probably changed things (a push may also have started a CI run).
+        self.status.forget()
+        self.ci.forget([repo.path])
+        self.hover, self.levels, self.clock = None, {}, None
 
     # drawing ----------------------------------------------------------------
-    def draw(self):
+    def draw(self, now):
         import hivegrid_ui as U
 
         cols, rows = self.size
         p = self.pal
-        cv = U.Canvas(cols, rows, p["text"], p["base"])
-        cv.fill(0, 0, cols, 1, bg=p["deep"])
-        title = f"⬡ Git · {len(self.repos)} repositories"
-        cv.put(1, 0, title[:cols - 2], p["accent"], p["deep"], U.BOLD)
-        cv.fill(0, 1, cols, 1, bg=p["base"], fg=p["border"], ch="─")
-        visible = max(1, (rows - 3) // ROW_H)
-        self.top = min(max(self.top, self.sel - visible + 1), self.sel)
-        self.top = max(0, min(self.top, len(self.repos) - visible))
-        for slot, i in enumerate(range(self.top, min(len(self.repos), self.top + visible))):
-            self.draw_row(cv, U, 2 + slot * ROW_H, cols, i)
+        cv = U.Canvas(cols, rows, p["text"], p["surface"])
+        self.draw_header(cv, U, cols)
+        cv.fill(0, 1, cols, 1, bg=p["surface"], fg=p["border"], ch="─")
+        page = self.page()
+        self.top = min(max(self.top, self.sel - page + 1), self.sel)
+        self.top = max(0, min(self.top, len(self.repos) - page))
+        hover = {k: round(v * STEPS) / STEPS for k, v in self.levels.items()}
+        for slot, i in enumerate(range(self.top, min(len(self.repos), self.top + page))):
+            self.draw_row(cv, U, 2 + slot * ROW_H, cols, i, hover.get(self.repos[i].path, 0.0), now)
+        if not self.repos:
+            self.draw_empty(cv, cols)
         if self.truncated:
-            cv.put(1, rows - 2, "scan stopped early; lower depth or cd deeper"[:cols - 2], p["amber"], p["base"])
-        hints = "↵ open  r rescan  q close"
-        cv.put(1, rows - 1, hints[:cols - 2], p["muted"], p["base"], U.DIM)
+            cv.put(1, rows - 2, fit("scan stopped early; lower depth or cd deeper", cols - 2), p["amber"], p["surface"])
+        self.draw_footer(cv, cols, rows, page, now)
         self.cv = cv
         self.out.write("\x1b[?25l" + cv.render())
         self.out.flush()
         self.dirty = False
 
-    def draw_row(self, cv, U, y, w, i):
+    def draw_header(self, cv, U, w):
+        """Title, the scanned directory, and on the right the number of repositories per state in
+        the colour of their dot (conflicts, changes, clean)."""
+        p = self.pal
+        x = 1 + cv.put(1, 0, "⬡ Git", p["accent"], p["surface"], U.BOLD)
+        x += cv.put(x, 0, " · ", p["muted"], p["surface"])  # "⬡ Files · <path>" in the explorer
+        tally = {"red": 0, "amber": 0, "green": 0}
+        for r in self.repos:
+            color = dot(r.status)[1]
+            if color in tally and r.status and not r.status.get("error"):
+                tally[color] += 1
+        counts = [(f"●{n}", p[c]) for c, n in tally.items() if n]
+        right = sum(len(t) + 1 for t, _ in counts)
+        if right and w - 1 - right - x < 8:  # the directory comes first
+            counts, right = [], 0
+        cv.put(x, 0, fit_path(home_short(self.root), w - 1 - right - x), p["muted"], p["surface"])
+        rx = w - right
+        for t, c in counts:
+            rx += cv.put(rx, 0, t, c, p["surface"]) + 1
+
+    def draw_empty(self, cv, w):
+        p = self.pal
+        cv.put(1, 3, fit("No git repositories", w - 2), p["text"], p["surface"])
+        cv.put(1, 4, fit(f"in {home_short(self.root)}", w - 2), p["muted"], p["surface"])
+        levels = "level" if self.depth == 1 else "levels"
+        cv.put(1, 5, fit(f"or up to {self.depth} {levels} below it", w - 2), p["muted"], p["surface"])
+
+    def draw_footer(self, cv, w, rows, page, now):
+        """Key hints (key in text colour, label muted) and on the right the position in a list
+        longer than the view, or the note of a rescan."""
+        p = self.pal
+        y = rows - 1
+        right, right_color = "", p["muted"]
+        if self.note and now < self.note[1]:
+            right, right_color = self.note[0], p["green"]
+        elif len(self.repos) > page:
+            right = f"{self.sel + 1}/{len(self.repos)}"
+        limit = w - 1 - (len(right) + 2 if right else 0)
+        hints = [("↵", "open"), ("r", "rescan"), ("q", "close")] if self.repos else [("r", "rescan"), ("q", "close")]
+        x = 1
+        for key, label in hints:
+            if x + len(key) + 1 + len(label) > limit:
+                break
+            x += cv.put(x, y, key, p["text"], p["surface"]) + 1
+            x += cv.put(x, y, label, p["muted"], p["surface"]) + 2
+        if right and len(right) <= w - 2:
+            cv.put(w - 1 - len(right), y, right, right_color, p["surface"])
+
+    def draw_row(self, cv, U, y, w, i, lit, now):
         p, repo = self.pal, self.repos[i]
         st = repo.status
         sel = i == self.sel
-        bg = p["raised"] if sel else p["base"]
+        bg = p["raised"] if sel else U.mix(p["surface"], p["raised"], HOVER_BLEND * lit) if lit else p["surface"]
         cv.fill(0, y, w, ROW_H, bg=bg)
-        cv.hit(0, y, w, ROW_H, lambda b, i=i: self.click(i, b))
-        if st is None:
-            dot, dot_color = "…", p["muted"]
-        elif st.get("error"):
-            dot, dot_color = "✕", p["red"]
-        elif st["conflicts"]:
-            dot, dot_color = "●", p["red"]
-        elif st["staged"] or st["changed"] or st["untracked"]:
-            dot, dot_color = "●", p["amber"]
-        else:
-            dot, dot_color = "●", p["green"]
-        cv.put(1, y, dot, dot_color, bg)
+        if sel:
+            cv.fill(0, y, 1, ROW_H, fg=p["accent"], ch="▎")
+        cv.hit(0, y, w, ROW_H, lambda b, i=i: self.click(i, b), key=repo.path)
+        glyph, color = dot(st)
+        cv.put(1, y, glyph, p[color], bg)
 
         sync = ""
         if st and not st.get("error") and st["ahead"] is not None:
@@ -197,28 +362,37 @@ class View:
         # line start after both.
         mark = CI_MARKS.get(repo.ci)
         if mark:
-            glyph = SPINNER[int(time.monotonic() * 8) % len(SPINNER)] if repo.ci == "running" else mark[0]
+            glyph = SPINNER[int(now * 8) % len(SPINNER)] if repo.ci == "running" else mark[0]
             cv.put(3, y, glyph, p[mark[1]], bg)
         left = w - 1
         if sync:
             left -= len(sync)
             cv.put(left, y, sync, p["cyan"], bg)
-        cv.put(TEXT_X, y, fit(repo.name, (left if sync else w) - TEXT_X - 1), p["bright"] if sel else p["text"], bg, U.BOLD)
+        cv.put(TEXT_X, y, fit_path(repo.name, (left - 1 if sync else w - 1) - TEXT_X), p["bright"] if sel else p["text"], bg, U.BOLD)
 
         if st is None:
-            cv.put(TEXT_X, y + 1, "reading…", p["muted"], bg)
+            cv.put(TEXT_X, y + 1, fit("reading…", w - 1 - TEXT_X), p["muted"], bg)
         elif st.get("error"):
-            cv.put(TEXT_X, y + 1, "unreadable", p["red"], bg)
+            cv.put(TEXT_X, y + 1, fit("unreadable", w - 1 - TEXT_X), p["red"], bg)
         else:
-            counts = [(f"+{st['staged']}", p["green"], st["staged"]), (f"~{st['changed']}", p["amber"], st["changed"]),
-                      (f"?{st['untracked']}", p["muted"], st["untracked"]), (f"!{st['conflicts']}", p["red"], st["conflicts"])]
-            counts = [(t, c) for t, c, n in counts if n]
-            tail = " ".join(t for t, _ in counts)
-            branch_w = max(4, w - TEXT_X - 1 - (len(tail) + 1 if tail else 0))
-            x = TEXT_X + cv.put(TEXT_X, y + 1, fit(st["branch"], branch_w), p["cyan"] if not sel else p["bright"], bg)
-            x += 1
-            for t, c in counts:
-                x += cv.put(x, y + 1, t, c, bg) + 1
+            # Conflicts first: they matter most and the tail is cut from the right when narrow.
+            counts = [(t, c) for t, c, n in ((f"!{st['conflicts']}", p["red"], st["conflicts"]),
+                                             (f"+{st['staged']}", p["green"], st["staged"]),
+                                             (f"~{st['changed']}", p["amber"], st["changed"]),
+                                             (f"?{st['untracked']}", p["muted"], st["untracked"])) if n]
+            room = w - 1 - TEXT_X
+            counts_w = sum(len(t) + 1 for t, _ in counts)
+            op = st.get("op")
+            # The operation word goes when it would leave the branch less than 4 columns.
+            tail = ([(op, p["red"] if st["conflicts"] else p["amber"])]
+                    if op and room - counts_w - len(op) - 1 >= 4 else []) + counts
+            tail_w = sum(len(t) + 1 for t, _ in tail)
+            branch_w = max(4, room - tail_w)
+            x = TEXT_X + cv.put(TEXT_X, y + 1, fit(st["branch"], branch_w), p["bright"] if sel else p["cyan"], bg)
+            for t, c in tail:
+                if x + 1 + len(t) > w - 1:
+                    break
+                x += 1 + cv.put(x + 1, y + 1, t, c, bg)
 
     # input ------------------------------------------------------------------
     def click(self, i, button):
@@ -227,51 +401,89 @@ class View:
             self.open_repo(self.repos[i])
 
     def move(self, step):
-        self.sel = max(0, min(len(self.repos) - 1, self.sel + step))
+        if self.repos:
+            self.sel = max(0, min(len(self.repos) - 1, self.sel + step))
+
+    def set_hover(self, key):
+        if key != self.hover:
+            if (key is None) != (self.hover is None):
+                # Hand pointer over a row (OSC 22), like the bar and the dock.
+                self.out.write("\x1b]22;" + ("pointer" if key else "") + "\x07")
+                self.out.flush()
+            self.hover = key
+            if self.clock is None:
+                self.clock = time.monotonic()
+
+    def advance(self, now):
+        """Moves every fade on by the time since the last step; True while one is still running."""
+        dt = 0.0 if self.clock is None else max(now - self.clock, 0.0)
+        busy = False
+        for key in set(self.levels) | ({self.hover} - {None}):
+            target = 1.0 if key == self.hover else 0.0
+            level = self.levels.get(key, 0.0)
+            if level < target:
+                level = min(target, level + dt / FADE_IN)
+            elif level > target:
+                level = max(target, level - dt / FADE_OUT)
+            if level:
+                self.levels[key] = level
+            else:
+                self.levels.pop(key, None)
+            busy = busy or level != target
+        self.clock = now if busy else None
+        return busy
 
     def handle(self, ev):
-        self.dirty = True
         if ev[0] == "mouse":
             _, action, button, x, y = ev
-            if action == "wheel":
-                visible = max(1, (self.size[1] - 3) // ROW_H)
-                self.top = max(0, min(len(self.repos) - visible, self.top + (-1 if button == "up" else 1)))
-                self.sel = max(self.top, min(self.sel, self.top + visible - 1))
+            if action in ("drag", "press", "release"):  # motion without a button counts as a drag
+                # A report at column 0, row 0 (x, y < 0 here) says the pointer left the pane.
+                self.set_hover(self.cv.key_at(x, y) if self.cv and x >= 0 and y >= 0 else None)
+            if action == "wheel" and self.repos:
+                page = self.page()
+                self.top = max(0, min(len(self.repos) - page, self.top + (-1 if button == "up" else 1)))
+                self.sel = max(self.top, min(self.sel, self.top + page - 1))
+                self.dirty = True
             elif action == "press" and self.cv:
                 fn = self.cv.hit_at(x, y)
                 if fn:
                     fn(button)
+                    self.dirty = True
             return
+        self.dirty = True
         _, mods, key = ev
-        page = max(1, (self.size[1] - 3) // ROW_H)
+        page = self.page()
         if key == "c" and mods == {"CTRL"} or key in ("q", "Escape") and not mods:
             self.running = False
-        elif key in ("UpArrow", "k"):
+        elif key in ("UpArrow", "k") and not mods:
             self.move(-1)
-        elif key in ("DownArrow", "j"):
+        elif key in ("DownArrow", "j") and not mods:
             self.move(1)
         elif key == "PageUp":
             self.move(-page)
         elif key == "PageDown":
             self.move(page)
         elif key == "End" or key == "g" and mods == {"SHIFT"}:
-            self.sel = len(self.repos) - 1
-        elif key in ("Home", "g"):
+            self.sel = max(0, len(self.repos) - 1)
+        elif key == "Home" or key == "g" and not mods:
             self.sel = 0
-        elif key in ("Enter", "RightArrow", "l") and not mods:
+        elif key in ("Enter", "RightArrow", "l") and not mods and self.repos:
             self.open_repo(self.repos[self.sel])
         elif key == "r" and not mods:
             self.scan()
-            self.refresher.done_at = self.ci_refresher.done_at = 0.0
+            self.status.forget()
+            self.ci.forget(self.in_view())
+            self.note = (f"rescanned · {len(self.repos)}", time.monotonic() + NOTE_FOR)
 
     def run(self):
         import hivegrid_ui as U
 
-        self.pal = palette()
         self.enter()
         signal.signal(signal.SIGWINCH, lambda *_: None)
+        pending = b""  # the start of an escape sequence the last read cut off
         try:
             while self.running:
+                now = time.monotonic()
                 try:
                     size = os.get_terminal_size(self.out.fileno())
                     size = (size.columns, size.lines)
@@ -280,28 +492,52 @@ class View:
                 if size != self.size:
                     self.size = size
                     self.dirty = True
-                if self.refresher.take() | self.ci_refresher.take():
+                pal = self.theme.poll()
+                if pal:
+                    self.pal, self.dirty = pal, True
+                    self.paint_padding()
+                if self.status.take() | self.ci.take():
                     self.dirty = True
-                spinning = any(r.ci == "running" for r in self.repos)
-                self.ci_refresher.every = CI_RUNNING_EVERY if spinning else CI_REFRESH_EVERY
-                if spinning:
-                    self.dirty = True  # the spinner moves
-                for rf in (self.refresher, self.ci_refresher):
-                    if rf.due():
-                        rf.kick(self.repos)
-                if self.dirty:
-                    self.draw()
-                r, _, _ = select.select([self.fd], [], [], 0.12 if spinning else 0.2)
-                if r:
+                if self.note and now >= self.note[1]:
+                    self.note, self.dirty = None, True
+                in_view = self.in_view()
+                for rf in (self.status, self.ci):
+                    rf.kick(self.repos, in_view, now)
+                spinning = any(r.ci == "running" and r.path in in_view for r in self.repos)
+                stepped = self.clock is not None  # a fade moved since the last frame
+                fading = self.advance(now)
+                if self.dirty or spinning or stepped:
+                    self.draw(now)
+                timeout = FRAME if fading else 0.12 if spinning else 0.2
+                r, _, _ = select.select([self.fd], [], [], 0.05 if pending else timeout)
+                if not r:
+                    events, pending = U.decode(pending), b""
+                else:
                     data = os.read(self.fd, 4096)
                     if not data:
                         break
-                    for ev in U.decode(data):
-                        self.handle(ev)
+                    # A report cut by the read boundary waits for the rest (else it decodes as keys).
+                    data, pending = U.split_complete(pending + data)
+                    events = U.decode(data)
+                for ev in events:
+                    self.handle(ev)
         except KeyboardInterrupt:
             pass
         finally:
             self.leave()
+
+
+def dot(st):
+    """(glyph, palette key) of the status dot: reading, unreadable, conflicts, changes, clean."""
+    if st is None:
+        return "…", "muted"
+    if st.get("error"):
+        return "✕", "red"
+    if st["conflicts"]:
+        return "●", "red"
+    if st["staged"] or st["changed"] or st["untracked"]:
+        return "●", "amber"
+    return "●", "green"
 
 
 def fit(text, width):
@@ -310,10 +546,24 @@ def fit(text, width):
     return text if len(text) <= width else text[:max(0, width - 1)] + "…"
 
 
-def palette():
-    from hivegrid_settings_core import Settings, settings_path
+def fit_path(text, width):
+    """Shortens a relative path from the left, whole components first, so its last part (the
+    repository's own name) stays visible: g1-workspace/reference/unitree_ros2 -> …/reference/unitree_ros2."""
+    if len(text) <= width:
+        return text
+    parts = text.split("/")
+    for k in range(1, len(parts)):
+        short = "…/" + "/".join(parts[k:])
+        if len(short) <= width:
+            return short
+    return fit(parts[-1], width)
 
-    return Settings(settings_path()).theme()["palette"]
+
+def home_short(path):
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
 
 
 def main(argv=None):
@@ -338,8 +588,8 @@ def main(argv=None):
         return 127
     view = View(root, max(0, depth), lazygit)
     view.scan()
-    if len(view.repos) <= 1:
-        exec_lazygit(lazygit, view.repos[0].path if view.repos else root)
+    if len(view.repos) == 1:
+        exec_lazygit(lazygit, view.repos[0].path, view.pal)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         for r in view.repos:
             print(r.path)

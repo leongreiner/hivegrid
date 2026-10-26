@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Runs the checks of CI (.github/workflows/ci.yml) locally; each CI job calls this script too.
+#
+#   dev/check                all steps
+#   dev/check STEP...        only these steps
+#
+# Steps: py (compile every Python file of bin/, dev/ and tests/, then the unittest suite),
+# lua (luac -p of config/ and tests/lua/, then the Lua tests), luacheck (.luacheckrc),
+# bun (tests/ext), shell (shellcheck, warnings and errors), actions (actionlint).
+# A tool that is not installed skips its step with a note; under CI (CI=true) it fails instead.
+# LUA, LUAC, LUACHECK, BUN, SHELLCHECK and ACTIONLINT override the tool lookup.
+# Exit status 1 when any step failed.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 2
+export PYTHONDONTWRITEBYTECODE=1 # bin/ is copied wholesale by install.sh: no __pycache__ there
+
+ALL=(py lua luacheck bun shell actions)
+failed=() skipped=()
+
+say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+
+# The first of the given commands that exists, or nothing.
+tool() {
+  local c
+  for c in "$@"; do
+    [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && { command -v "$c"; return 0; }
+  done
+  return 1
+}
+
+missing() {
+  if [ -n "${CI:-}" ]; then
+    echo "FAIL: $1 is not installed"
+    return 1
+  fi
+  echo "SKIP: $1 is not installed"
+  skipped+=("$STEP ($1 missing)")
+}
+
+# Files whose first line names the interpreter $1 (bash, python3, ...), under the given paths.
+by_shebang() {
+  local want=$1 f line
+  shift
+  while IFS= read -r -d '' f; do
+    IFS= read -r line <"$f" || true
+    case $line in
+      "#!"*"/$want" | "#!"*"/env $want" | "#!"*"/env $want "*) printf '%s\n' "$f" ;;
+    esac
+  done < <(find "$@" -type f ! -path '*/__pycache__/*' ! -name '*.bak.*' -print0 2>/dev/null | sort -z)
+}
+
+step_py() {
+  local py cache
+  py=$(tool python3) || { missing python3; return; }
+  mapfile -t files < <({ ls bin/*.py tests/*.py; by_shebang python3 bin dev; } | sort -u)
+  echo "compile: ${#files[@]} files"
+  cache=$(mktemp -d)
+  PYTHONPYCACHEPREFIX=$cache "$py" -m py_compile "${files[@]}" || { rm -rf "$cache"; return 1; }
+  rm -rf "$cache"
+  "$py" -m unittest discover -s tests -p 'test_*.py'
+}
+
+step_lua() {
+  local lua luac
+  lua=$(tool "${LUA:-}" lua5.4 lua) || { missing lua5.4; return; }
+  luac=$(tool "${LUAC:-}" luac5.4 luac) || { missing luac5.4; return; }
+  "$lua" -v
+  mapfile -t files < <(find config tests/lua -name '*.lua' -type f 2>/dev/null | sort)
+  echo "syntax: ${#files[@]} files"
+  "$luac" -p "${files[@]}" || return 1
+  "$lua" tests/lua/run.lua
+}
+
+step_luacheck() {
+  local lc
+  lc=$(tool "${LUACHECK:-}" luacheck) || { missing luacheck; return; }
+  "$lc" --no-cache config tests/lua
+}
+
+step_bun() {
+  local bun
+  bun=$(tool "${BUN:-}" bun) || { missing bun; return; }
+  "$bun" test tests/ext
+}
+
+step_shell() {
+  local sc
+  sc=$(tool "${SHELLCHECK:-}" shellcheck) || { missing shellcheck; return; }
+  mapfile -t files < <({ ls ./*.sh; by_shebang bash bin dev; by_shebang sh bin dev; } | sort -u)
+  echo "shellcheck: ${files[*]}"
+  "$sc" --severity=warning "${files[@]}"
+}
+
+step_actions() {
+  local al
+  al=$(tool "${ACTIONLINT:-}" actionlint) || { missing actionlint; return; }
+  "$al" -color
+}
+
+steps=("$@")
+[ ${#steps[@]} -eq 0 ] && steps=("${ALL[@]}")
+for STEP in "${steps[@]}"; do
+  if ! declare -F "step_$STEP" >/dev/null; then
+    echo "unknown step: $STEP (steps: ${ALL[*]})" >&2
+    exit 2
+  fi
+done
+
+for STEP in "${steps[@]}"; do
+  say "$STEP"
+  start=$SECONDS n=${#skipped[@]}
+  if ! "step_$STEP"; then
+    echo "-- $STEP FAILED"
+    failed+=("$STEP")
+  elif [ ${#skipped[@]} -gt "$n" ]; then
+    echo "-- $STEP skipped"
+  else
+    echo "-- $STEP ok ($((SECONDS - start)) s)"
+  fi
+done
+
+say summary
+[ ${#skipped[@]} -gt 0 ] && printf 'skipped: %s\n' "${skipped[@]}"
+if [ ${#failed[@]} -gt 0 ]; then
+  echo "failed: ${failed[*]}"
+  exit 1
+fi
+echo "all passed: ${steps[*]}"

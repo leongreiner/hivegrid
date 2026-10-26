@@ -12,7 +12,7 @@ from hivegrid_ui import BOLD, DIM
 
 STATES = ("working", "busy", "attention", "done", "idle", "exited")
 GLYPH = {"working": "↻", "busy": "◔", "attention": "?", "done": "✓", "idle": "·", "exited": "○"}
-WORD = {"working": "working", "busy": "waiting", "attention": "needs you", "done": "done", "idle": "idle",
+WORD = {"working": "working", "busy": "busy", "attention": "needs you", "done": "done", "idle": "idle",
         "exited": "exited"}
 BUSY_STATES = ("working", "busy", "attention")
 ADD = "add"
@@ -46,15 +46,27 @@ def human_age(seconds):
 
 
 def short(text, w):
-    text = " ".join(str(text).split())
-    if w <= 0:
-        return ""
-    return text if len(text) <= w else text[: max(w - 1, 0)] + "…"
+    """One line of at most w terminal cells (whitespace collapsed), with an ellipsis when cut."""
+    return U.fit_cells(" ".join(str(text).split()), max(w, 0))
 
 
 def clip(text, w):
-    """Truncates with an ellipsis, keeping the text as it is."""
-    return text if len(text) <= w else text[: max(w - 1, 0)] + "…" if w > 0 else ""
+    """Truncates to w terminal cells with an ellipsis, keeping the text as it is."""
+    return U.fit_cells(text, max(w, 0))
+
+
+RULES = set("─━═-_ ")
+
+
+def screen_line(text, w):
+    """A peeked screen line cut to w cells: rules (omp's ──── separators) are cut clean; text keeps
+    its indent, inner runs of blanks shrink to one (omp pads its boxes to the pane width) and it
+    gets an ellipsis when cut."""
+    text = text.rstrip()
+    if text and set(text) <= RULES:
+        return text[:w]
+    indent = text[: len(text) - len(text.lstrip())]
+    return clip(indent + " ".join(text.split()), w)
 
 
 def folder(cwd):
@@ -296,7 +308,8 @@ class HivePage(U.Page):
         return self.origin is not None and agent.tab != self.origin[1]
 
     def spawn(self, ui):
-        near = self.selected_agent()
+        # the new agent starts where the selected agent (else the one under the hive) works
+        near = self.selected_agent() or (self.by_pane.get(self.origin[0]) if self.origin else None)
 
         def work():
             try:
@@ -348,11 +361,11 @@ class HivePage(U.Page):
         self.core().ack(agent)
         self._force = True
         self.refresh()
-        ui.say(f"agent {agent.pane} acknowledged")
+        ui.say(f"agent {self.number(agent)} acknowledged")
 
     def delete(self, ui, agent):
         if agent.state in BUSY_STATES:
-            ui.open_modal(U.ConfirmModal(f"Agent {agent.pane} is {WORD[agent.state]}. Close its pane anyway?",
+            ui.open_modal(U.ConfirmModal(f"Agent {self.number(agent)} is {WORD[agent.state]}. Close its pane anyway?",
                                          lambda: self._delete(ui, agent), "Delete agent"))
         else:
             self._delete(ui, agent)
@@ -363,9 +376,11 @@ class HivePage(U.Page):
                 ok, msg = self.core().delete_agent(agent)
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, str(e)
-            ui.say(msg or ("closed" if ok else "could not close the pane"), not ok)
+            if ok:  # the core says how ("closed" / "killed"); the user wants to know which agent
+                msg = f"agent {self.number(agent)} closed" + (msg[msg.index(" ("):] if " (" in (msg or "") else "")
+            ui.say(msg or "could not close the pane", not ok)
             self._force = True
-        ui.say(f"closing agent {agent.pane}…")
+        ui.say(f"closing agent {self.number(agent)}…")
         self.background(work)
 
     def send(self, ui, agent):
@@ -378,7 +393,7 @@ class HivePage(U.Page):
             ok, msg = False, str(e)
         if ok:
             self.drafts[agent.pane] = ""
-            ui.say(msg or f"sent to agent {agent.pane}")
+            ui.say(msg or f"sent to agent {self.number(agent)}")
             self._force = True
             self._peeked_at = -1e9
         else:
@@ -417,8 +432,10 @@ class HivePage(U.Page):
         pend = agent.pending or {}
         if pend.get("kind") != "plan_review":
             return []
-        return [(str(c.get("label") or c.get("id")), str(c.get("id"))) for c in pend.get("choices") or []
-                if isinstance(c, dict) and c.get("id")]
+        choices = [(str(c.get("label") or c.get("id")), str(c.get("id"))) for c in pend.get("choices") or []
+                   if isinstance(c, dict) and c.get("id")]
+        # omp 18's plan_review_requested carries no choices: its answers are fixed
+        return choices or [(c.capitalize(), c) for c in self.core().PLAN_CHOICES]
 
     # events -----------------------------------------------------------------
     def captures(self, mods, key):
@@ -572,14 +589,17 @@ class HivePage(U.Page):
             self.tile = (tw, th)
             if tw:
                 px_, py_ = X.tile_pitch(tw, th)
-                scroll = 0
-                if not fits:
+                scroll = oy = 0
+                if fits:  # centred like the hexes
+                    used = (total - 1) // cols + 1
+                    oy = max((h - (used * py_ - (py_ - th))) // 2, 0)
+                else:
                     sel_slot = self.slots.get(self.sel, add if self.sel == ADD else 0)
                     scroll = max(0, min(sel_slot // cols - nrows + 1, (total - 1) // cols - nrows + 1))
                 for slot, tx, ty in pos:
                     row = ty // py_ - scroll
                     if 0 <= row < nrows:
-                        entry(slot, x + tx, y + row * py_, tw, th)
+                        entry(slot, x + tx, y + oy + row * py_, tw, th)
                     elif slot in by_slot:
                         self.hidden += 1
         self.cells = cells
@@ -601,9 +621,45 @@ class HivePage(U.Page):
             self.draw_cell(ui, cv, c)
         agent = self.selected_agent()
         if self.open and agent is not None:
-            c = next((c for c in cells if c["id"] == agent.pane), None)
-            anchor = (c["x"], c["y"], c["w"], c["h"]) if c else (x + w // 2, ay + ah // 2, 1, 1)
-            self.popover(ui, cv, agent, anchor)
+            self.popover(ui, cv, agent, next((c for c in cells if c["id"] == agent.pane), None))
+
+    def popover_height(self, agent, W):
+        """(H, fixed rows) of the popover at width W: borders, state+cwd, pending dialog, error,
+        separator, note+input+buttons, plus up to PEEK_LINES screen lines."""
+        fixed = 2 + 2 + len(self.pending_block(agent, W - 4)) + (1 if agent.error else 0) + 1 + 3
+        return min(fixed + PEEK_LINES, self.area[3]), fixed
+
+    def place(self, agent, cell):
+        """(x, y, W, H) of the popover. It covers no cell when it can: beside the whole band of
+        cells at full width, else below or above it (a row of tiles); otherwise it sits beside the
+        selected cell, covering neighbours but never that cell."""
+        ax, ay, aw, ah = self.area
+        wide = aw if aw < 44 else min(max(44, aw * 42 // 100), 64)
+        if cell is None:
+            return place_popover(self.area, (ax + aw // 2, ay + ah // 2, 1, 1), [wide], self.popover_height(agent, wide)[0])
+        left = min(d["x"] for d in self.cells)
+        right = max(d["x"] + d["w"] for d in self.cells)
+        top = min(d["y"] for d in self.cells)
+        bottom = max(d["y"] + d["h"] for d in self.cells)
+        widths = sorted({wide, min(wide, 40), min(wide, 36)}, reverse=True)
+        band = (left, cell["y"], right - left, cell["h"])
+
+        def beside(W):
+            return right + 1 + W <= ax + aw or left - 1 - W >= ax
+        H = self.popover_height(agent, wide)[0]
+        if beside(wide):
+            return place_popover(self.area, band, [wide], H)
+        x = max(ax, min(cell["x"] + cell["w"] // 2 - wide // 2, ax + aw - wide))
+        if bottom + 1 + H <= ay + ah:
+            return x, bottom + 1, wide, H
+        if top - 1 - H >= ay:
+            return x, top - 1 - H, wide, H
+        for W in widths[1:]:
+            if beside(W):
+                return place_popover(self.area, band, [W], self.popover_height(agent, W)[0])
+        rect = (cell["x"], cell["y"], cell["w"], cell["h"])
+        W = place_popover(self.area, rect, widths, 1)[2]
+        return place_popover(self.area, rect, [W], self.popover_height(agent, W)[0])
 
     def legend(self, ui, cv, x, y, w):
         p = ui.pal
@@ -624,13 +680,19 @@ class HivePage(U.Page):
         if cx + len(right) < x + w:
             cv.put(x + w - len(right) - 1, y, right, p["muted"])
 
+    def number(self, agent):
+        """The agent's digit as the overview dock and the pane picker show it; prefixed with its
+        tab ("2·3") while the agents sit in several tabs."""
+        n = str(agent.num or agent.pane)
+        return f"{agent.tab_index}·{n}" if len({a.tab for a in self.agents}) > 1 else n
+
     def draw_cell(self, ui, cv, c):
         p = ui.pal
         selected = c["id"] == self.sel
         agent = self.by_pane.get(c["pane"]) if c["kind"] == "agent" else None
         if agent is not None:
             fill, fg = state_fill(p, agent.state)
-            glyph, number, label = GLYPH.get(agent.state, "·"), str(agent.pane), folder(agent.cwd)
+            glyph, number, label = GLYPH.get(agent.state, "·"), self.number(agent), folder(agent.cwd)
             lines = [f"{glyph} {number}", label]
         else:
             fill, fg = p["pill"], p["accent"]
@@ -648,8 +710,22 @@ class HivePage(U.Page):
             for i, span in enumerate(rows):
                 if span:
                     cv.fill(c["x"] + span[0], c["y"] + i, span[1] - span[0], 1, bg=fill)
+            if selected:
+                # The halo columns give the sides; the top and bottom edges (and the stair steps)
+                # are half blocks inside the hex, so the outline is closed without touching the
+                # neighbouring cells.
+                for i, span in enumerate(rows):
+                    if not span:
+                        continue
+                    above = rows[i - 1] if i > 0 else None
+                    below = rows[i + 1] if i + 1 < len(rows) else None
+                    for xx in range(*span):
+                        if not above or not above[0] <= xx < above[1]:
+                            cv.put(c["x"] + xx, c["y"] + i, "▀", halo, fill)
+                        elif not below or not below[0] <= xx < below[1]:
+                            cv.put(c["x"] + xx, c["y"] + i, "▄", halo, fill)
             if agent is not None and c["h"] >= 8:
-                lines = [GLYPH.get(agent.state, "·"), str(agent.pane), folder(agent.cwd)]
+                lines = [glyph, number, label]
             elif agent is None and c["h"] >= 8:
                 lines = ["+", "new", ""]
             start = (c["h"] - len(lines)) // 2
@@ -660,21 +736,26 @@ class HivePage(U.Page):
                     continue
                 width = span[1] - span[0]
                 text = short(text, width)
-                cv.put(c["x"] + span[0] + (width - len(text)) // 2, c["y"] + i, text, fg, fill,
+                cv.put(c["x"] + span[0] + (width - U.text_width(text)) // 2, c["y"] + i, text, fg, fill,
                        BOLD if k == 0 or (c["h"] >= 8 and k == 1) else 0)
         else:
             if selected:
-                cv.fill(c["x"] - 1, c["y"] - (1 if c["h"] > 2 else 0), c["w"] + 2, c["h"] + (2 if c["h"] > 2 else 0), bg=halo)
+                # sides in the 1-column gaps, top and bottom as half blocks in the gap rows, so the
+                # outline is as thin as the hexes' one
+                cv.fill(c["x"] - 1, c["y"], c["w"] + 2, c["h"], bg=halo)
+                if c["h"] > 2:
+                    cv.put(c["x"] - 1, c["y"] - 1, "▄" * (c["w"] + 2), halo)
+                    cv.put(c["x"] - 1, c["y"] + c["h"], "▀" * (c["w"] + 2), halo)
             cv.fill(c["x"], c["y"], c["w"], c["h"], bg=fill)
             cv.hit(c["x"] - 1, c["y"], c["w"] + 2, c["h"], click)
             if c["h"] == 1:
                 lines = [short(f"{lines[0].replace(' ', '')} {lines[1] if agent else ''}".strip(), c["w"] - 1)]
             elif c["h"] >= 5 and agent is not None:
-                lines = [GLYPH.get(agent.state, "·"), str(agent.pane), folder(agent.cwd)]
+                lines = [glyph, number, label]
             start = (c["h"] - len(lines)) // 2
             for k, text in enumerate(lines):
                 text = short(text, c["w"] - 2)
-                cv.put(c["x"] + (c["w"] - len(text)) // 2, c["y"] + start + k, text, fg, fill, BOLD if k == 0 else 0)
+                cv.put(c["x"] + (c["w"] - U.text_width(text)) // 2, c["y"] + start + k, text, fg, fill, BOLD if k == 0 else 0)
 
     def click(self, ui, c):
         if c["kind"] == "add":
@@ -700,29 +781,21 @@ class HivePage(U.Page):
             out.append(("text", short(f"Approval needed: {pend.get('tool') or 'tool'}", inner), "violet"))
             for line in textwrap.wrap(str(pend.get("summary") or ""), inner)[:2]:
                 out.append(("text", line, "text"))
-            out.append(("text", short("Answer it in the pane: press j to jump there", inner), "muted"))
         elif kind == "ask":
             out.append(("text", short("The agent asks:", inner), "violet"))
             for line in textwrap.wrap(str(pend.get("question") or ""), inner)[:3]:
                 out.append(("text", line, "text"))
-            for i, opt in enumerate((pend.get("options") or [])[:3]):
-                out.append(("text", short(f"  {i + 1}. {opt}", inner), "muted"))
-            out.append(("text", short("Answer it in the pane: press j to jump there", inner), "muted"))
+            # bullets, not digits: 1-9 answer plan reviews only, a question is answered in the pane
+            for opt in (pend.get("options") or [])[:3]:
+                out.append(("text", short(f"  · {opt}", inner), "muted"))
         return out
 
-    def popover(self, ui, cv, agent, anchor):
+    def popover(self, ui, cv, agent, cell):
         p = ui.pal
-        ax, ay, aw, ah = self.area
-        wide = aw if aw < 44 else min(max(44, aw * 42 // 100), 64)
-        widths = sorted({wide, min(wide, 40), min(wide, 36)}, reverse=True)
-        W = place_popover(self.area, anchor, widths, 1)[2]
+        x, y, W, H = self.place(agent, cell)
         inner = W - 4
         pend = self.pending_block(agent, inner)
-        err = 1 if agent.error else 0
-        fixed = 2 + 2 + len(pend) + err + 1 + 3  # borders, state+cwd, pending, error, separator, note+input+buttons
-        H = min(fixed + PEEK_LINES, ah)
-        S = max(H - fixed, 0)
-        x, y, W, H = place_popover(self.area, anchor, [W], H)
+        S = max(H - self.popover_height(agent, W)[1], 0)
         self.pop_rect = (x, y, W, H)
         bg, edge = p["surface"], state_color(p, agent.state)
         cv.hit(x, y, W, H, lambda b: None)
@@ -733,8 +806,8 @@ class HivePage(U.Page):
             cv.put(x + W - 1, yy, "│", edge, bg)
         cv.put(x, y + H - 1, "└" + "─" * (W - 2) + "┘", edge, bg)
         name = agent.title or folder(agent.cwd) or "agent"
-        mark = f" ⇥ tab {agent.tab} " if self.elsewhere(agent) else ""
-        head = clip(f" {GLYPH.get(agent.state, '·')} {agent.pane} · {' '.join(name.split())} ", W - 8 - len(mark))
+        mark = f" ⇥ tab {agent.tab_index} " if self.elsewhere(agent) else ""
+        head = clip(f" {GLYPH.get(agent.state, '·')} {self.number(agent)} · {' '.join(name.split())} ", W - 8 - len(mark))
         cv.put(x + 2, y, head, p["bright"], bg, BOLD)
         close = " ✕ "
         if mark:
@@ -771,12 +844,14 @@ class HivePage(U.Page):
         row += 1
         lines = self.peeked[1] if self.peeked[0] == agent.pane else []
         for k, line in enumerate(lines[-S:] if S else []):
-            cv.put(ix, row + k, short(line.rstrip(), iw), p["text"], bg)
+            cv.put(ix, row + k, screen_line(line, iw), p["text"], bg)
         # bottom block: note, prompt, buttons (anchored to the bottom edge)
         note_y, input_y, btn_y = y + H - 4, y + H - 3, y + H - 2
         enabled = self.prompt_enabled(agent)
-        if agent.state == "attention":
-            note = "Prompt off: waiting for your answer (jump to the pane)"
+        if agent.state == "attention" and (agent.pending or {}).get("kind") == "plan_review":
+            note = "Prompt off: answer the plan review above"
+        elif agent.state == "attention":
+            note = "Answer it in the pane (j jumps there)"
         elif agent.state == "exited":
             note = "Prompt off: the agent has exited"
         elif agent.state in ("working", "busy"):

@@ -2,9 +2,9 @@
 
 find_repos() lists the repositories of a workspace directory the way VS Code's Source Control
 view does: the repository around the directory plus every repository below it. status() reads one
-repository's branch, upstream distance and change counts with a single `git status` call. ci()
-reads the GitHub Actions result of the checked-out branch through the `gh` CLI, for repositories
-that have workflows.
+repository's branch, upstream distance and change counts with a single `git status` call, plus the
+operation in progress (merge, rebase, ...) from marker files. ci() reads the GitHub Actions result
+of the checked-out branch through the `gh` CLI, for repositories that have workflows.
 """
 import json
 import os
@@ -21,7 +21,7 @@ DEFAULT_BUDGET = 2.0  # seconds the directory walk may take before it gives up
 
 
 class Repo:
-    """One repository: its work tree, the name shown for it and its latest status."""
+    """One repository: its work tree, the name shown for it and its latest status and CI state."""
 
     __slots__ = ("path", "name", "status", "ci")
 
@@ -29,8 +29,13 @@ class Repo:
         self.path, self.name, self.status, self.ci = path, name, None, None
 
 
-def _git(path, *args, timeout=20):
+def _git(path, *args, timeout=20, here=False):
+    """Output of `git -C path ARGS`, None on failure. here=True confines git to the repository at
+    `path` itself: without it, a broken `.git` there (an interrupted clone) makes git walk up and
+    answer for an outer repository."""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+    if here:
+        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.abspath(path))
     try:
         r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=timeout,
                            env=env, stdin=subprocess.DEVNULL)
@@ -114,12 +119,51 @@ def parse_status(text):
     return s
 
 
+def git_dir(path):
+    """The repository's git directory: `.git` itself, or where a `.git` file (submodule,
+    worktree) points. None when neither is readable."""
+    dot = os.path.join(path, ".git")
+    if os.path.isdir(dot):
+        return dot
+    try:
+        with open(dot, encoding="utf-8") as f:
+            line = f.readline().strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    return os.path.normpath(os.path.join(path, line[7:].strip()))
+
+
+# Marker in the git directory -> the operation it means, checked in this order (a rebase stops on
+# conflicts the same way a merge does, so the rebase markers come first).
+OPERATIONS = (("rebase-merge", "rebasing"), ("rebase-apply", "rebasing"), ("MERGE_HEAD", "merging"),
+              ("CHERRY_PICK_HEAD", "cherry-picking"), ("REVERT_HEAD", "reverting"),
+              ("BISECT_LOG", "bisecting"))
+
+
+def operation(path):
+    """The unfinished operation of the repository at `path` ("merging", "rebasing",
+    "cherry-picking", "reverting", "bisecting") or None."""
+    gd = git_dir(path)
+    if gd:
+        for marker, name in OPERATIONS:
+            if os.path.exists(os.path.join(gd, marker)):
+                return name
+    return None
+
+
 def status(repo):
-    """Reads the repository's status into repo.status: the parse_status dict, or {"error": True}
-    when git failed (e.g. the directory vanished). Safe to call from threads; it takes no index
-    lock, so it never blocks a running lazygit."""
-    out = _git(repo.path, "status", "--porcelain=v2", "--branch")
-    repo.status = parse_status(out) if out is not None else {"error": True}
+    """Reads the repository's status into repo.status: the parse_status dict plus "op" (see
+    operation()), or {"error": True} when git failed (e.g. the directory vanished). Safe to call
+    from threads; it takes no index lock, so it never blocks a running lazygit."""
+    out = _git(repo.path, "status", "--porcelain=v2", "--branch", here=True)
+    if out is None:
+        repo.status = {"error": True}
+    else:
+        s = parse_status(out)
+        s["op"] = operation(repo.path)
+        repo.status = s
     return repo.status
 
 
@@ -179,8 +223,8 @@ def ci(repo):
     if not has_ci(repo.path):
         repo.ci = None
         return None
-    branch = (_git(repo.path, "symbolic-ref", "--short", "-q", "HEAD") or "").strip()
-    sha = "" if branch else (_git(repo.path, "rev-parse", "HEAD") or "").strip()
+    branch = (_git(repo.path, "symbolic-ref", "--short", "-q", "HEAD", here=True) or "").strip()
+    sha = "" if branch else (_git(repo.path, "rev-parse", "HEAD", here=True) or "").strip()
     state = None
     if branch or sha:
         out = _gh(repo.path, "run", "list", "--branch" if branch else "--commit", branch or sha,

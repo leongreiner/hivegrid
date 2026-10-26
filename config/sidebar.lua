@@ -218,32 +218,43 @@ local function build(config, wezterm)
     return pane and pane_dir(pane) or wezterm.home_dir
   end
 
-  -- Window rescales ---------------------------------------------------------------------
+  -- Window rescales and layout changes ------------------------------------------------
   -- WezTerm redistributes columns across the pane tree when the window changes size (a
-  -- move to another monitor), which rescales the handle and the content. A rescale is
-  -- told from a divider drag by the tab's total width: it changes only with the window.
-  -- `seen` is the state after the last settle; a width saved from a rescale would stick.
+  -- move to another monitor), which rescales the handle and the content; a split or a
+  -- closed pane elsewhere (the overview dock's top-level split above all) squeezes them
+  -- too. Only a divider drag may set the saved width: it is the one change that keeps the
+  -- tab's total width and its set of panes. `seen` is the state after the last settle; a
+  -- width saved from any other change would stick.
   local function seen_all() return wezterm.GLOBAL.sidebar_seen or {} end
+  local function pane_set(rs)
+    local ids = {}
+    for _, r in ipairs(rs) do ids[#ids + 1] = r.id end
+    table.sort(ids)
+    return table.concat(ids, ',')
+  end
   local function rescale_pending(tab_id, rs)
     local s = seen_all()[tostring(tab_id)]
-    return s ~= nil and s.total ~= total_width(rs)
+    return s ~= nil and (s.total ~= total_width(rs) or s.panes ~= pane_set(rs))
   end
 
   local settling = false
 
   -- Brings handle and content back to their intended widths and records what was seen.
   -- Idempotent: runs `wezterm cli` only when a width is off. AdjustPaneSize acts on the
-  -- tab's active pane, so the pane to resize is activated first and the user's restored.
+  -- tab's active pane in WezTerm releases whatever --pane-id says (the Hivegrid build
+  -- resizes the given pane), so the pane to resize is activated first and the user's restored.
   local function settle(window, tab, rs, rec)
     if settling or not rec.handle or not find(rs, rec.handle) then return end
+    -- layouts.lua rebuilds or resizes the grid through `wezterm cli` as well; the two must
+    -- not interleave their activate/adjust pairs. The next status tick settles.
+    if wezterm.GLOBAL.layout_busy then return end
     local key = tostring(tab:tab_id())
     local seen = seen_all()[key]
-    local total = total_width(rs)
-    local rescaled = seen ~= nil and seen.total ~= total
     local c = rec.content and find(rs, rec.content)
     local saved = wezterm.GLOBAL.sidebar_width
-    if c and not rescaled
-        and (saved == nil or (seen and seen.content_id == c.id and seen.content_w ~= c.width)) then
+    local dragged = seen and not rescale_pending(tab:tab_id(), rs)
+      and c and seen.content_id == c.id and seen.content_w ~= c.width
+    if c and (saved == nil or dragged) then
       saved = c.width
       wezterm.GLOBAL.sidebar_width = saved
     end
@@ -274,7 +285,8 @@ local function build(config, wezterm)
 
     local all = seen_all()
     all[key] = {
-      total = total_width(rs), content_id = c and c.id or nil, content_w = c and c.width or nil,
+      total = total_width(rs), panes = pane_set(rs),
+      content_id = c and c.id or nil, content_w = c and c.width or nil,
     }
     wezterm.GLOBAL.sidebar_seen = all
   end
@@ -292,16 +304,12 @@ local function build(config, wezterm)
   end)
 
   -- Actions ---------------------------------------------------------------------------
-  local function hide(cli, rec, rs, tab_id)
-    local c = find(rs, rec.content)
+  -- The width is not saved here: settle learns a divider drag on the status tick the drag
+  -- itself triggers, and a width squeezed by a layout change must not be kept.
+  local function hide(cli, rec)
     cli('kill-pane', '--pane-id', rec.content)
     rec.content = nil
-    if c and not rescale_pending(tab_id, rs) then wezterm.GLOBAL.sidebar_width = c.width end
   end
-
-  -- The explorer's own config home keeps the sidebar's keys and click handling out of a
-  -- global ~/.config/yazi.
-  local YAZI_CONFIG_HOME = wezterm.home_dir .. '/.config/hivegrid/yazi'
 
   -- The bar is a top-level split on the Hivegrid build, so it spans the full window height
   -- beside the whole grid; stock WezTerm 20240203 mis-sizes top-level splits of a
@@ -347,7 +355,11 @@ local function build(config, wezterm)
     rec.dir = dir
     -- PWD is set explicitly because tools such as yazi prefer the inherited $PWD over the cwd.
     local cmd = { 'env', 'PWD=' .. dir }
-    if rec.view == 'files' then cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. YAZI_CONFIG_HOME end
+    -- The explorer's own config home (explorer.lua: the static config plus a theme from the
+    -- palette) keeps the sidebar's keys and click handling out of a global ~/.config/yazi.
+    if rec.view == 'files' then
+      cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. require('explorer').config_home()
+    end
     cmd[#cmd + 1] = VIEWS[rec.view].bin
     local ok, out = cli('split-pane', '--left', '--cells', w, '--cwd', dir,
       '--pane-id', anchor.id, '--', table.unpack(cmd))
@@ -372,12 +384,12 @@ local function build(config, wezterm)
     if not skip(src:pane_id()) then rec.last = src:pane_id() end
 
     if rec.content and (want == nil or want == rec.view) then
-      hide(cli, rec, rs, tab:tab_id())
+      hide(cli, rec)
       local back = find(rs, rec.last) or leftmost(rs, skip)
       if back then cli('activate-pane', '--pane-id', back.id) end
     else
       if rec.content then
-        hide(cli, rec, rs, tab:tab_id())
+        hide(cli, rec)
         rs = rows(tab:panes_with_info())
       end
       rec.view = want or rec.view or 'files'
@@ -449,7 +461,7 @@ local function build(config, wezterm)
     last_follow[tab_id] = now
     local cli = make_cli(pane)
     local function skip(i) return i == rec.handle or i == rec.content end
-    hide(cli, rec, rs, tab_id)
+    hide(cli, rec)
     rs = rows(tab:panes_with_info())
     show(cli, rec, rs, pane, anchor_for(rs, rec, skip), window)
     cli('activate-pane', '--pane-id', id)
@@ -463,12 +475,26 @@ local function build(config, wezterm)
     local rs = rows(tab:panes_with_info())
     local old = load(tab:tab_id())
     local rec = reconcile(old, rs)
+    -- The last grid pane is gone (its shell exited, it was closed): the bar, a view and the
+    -- dock alone are no tab worth keeping, so the tab closes as WezTerm's last pane would.
+    if rec.handle and find(rs, rec.handle) and not leftmost(rs, M.is_dock) then
+      window:perform_action(wezterm.action.CloseCurrentTab { confirm = false }, find(rs, rec.handle).pane)
+      return
+    end
     if not rec.handle then
       ensure_handle(window, tab, rs, rec)
       if rec.handle then rs = rows(tab:panes_with_info()) end
     end
     for _, r in ipairs(rs) do
       if r.active and r.id ~= rec.handle and r.id ~= rec.content then rec.last = r.id end
+    end
+    -- The bar never keeps the keyboard: a pane closed beside it, a pane move to the left
+    -- or a click on it (stock WezTerm; the Hivegrid build leaves the focus alone, see
+    -- hivegrid_no_focus) hands the focus back to the pane that last had it.
+    local bar = rec.handle and find(rs, rec.handle)
+    if bar and bar.active then
+      local back = find(rs, rec.last) or leftmost(rs, M.is_dock) or find(rs, rec.content)
+      if back then back.pane:activate() end
     end
     rs = follow_git(window, tab, rs, rec)
     settle(window, tab, rs, rec)

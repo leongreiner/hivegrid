@@ -5,11 +5,14 @@ Runs in a narrow pane at the right edge of the tab (LEADER+o opens and closes it
 config/overview.lua). The WezTerm config writes the state of every grid pane to
 $XDG_RUNTIME_DIR/hivegrid-overview-$WEZTERM_PANE.json about once a second; this program only
 draws it. Per pane: number (the minimap digit), state glyph, directory, how long it has been in
-that state, and omp's session title. A click on a row, or its digit on the keyboard, jumps to
-that pane (user var hivegrid_overview_goto, handled by the config). q or Esc closes the dock.
+that state, and omp's session title. A click on a row, or its number on the keyboard, jumps to
+that pane (user var hivegrid_overview_goto, handled by the config; past pane 9 a digit that may
+start a longer number waits a moment for the next one). q or Esc closes the dock.
 The row and the ⊞ / ▦ button under the pointer fade to a lighter shade (about 150 ms in, 200 ms
-out; frames only while a fade runs). The Hivegrid build reports the pointer leaving the dock
-(DEC private mode 8800, a motion report at column 0, row 0), which ends the hover.
+out; frames only while a fade runs) and the pointer turns into a hand (OSC 22). The Hivegrid
+build reports the pointer leaving the dock (DEC private mode 8800, a motion report at column 0,
+row 0), which ends the hover. The dock sets its pane's default background (OSC 11) to its own
+colour, so the window padding beside it is painted the same and it runs edge to edge.
 
 Usage: hivegrid-overview [--file PATH] [--dump COLSxROWS]
   --file PATH        read the state from PATH instead of the pane's own file
@@ -28,10 +31,10 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from hivegrid_ui import BOLD, DIM, Canvas, decode, mix  # noqa: E402
+from hivegrid_ui import BOLD, Canvas, decode, mix, split_complete  # noqa: E402
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-ORDER = ("ask", "bell", "finished", "waiting", "working", "exited", "idle")
+ORDER = ("attention", "bell", "done", "idle", "busy", "working", "other", "exited", "shell")
 DEFAULT_PAL = {
     "deep": "#070d19", "base": "#0b1220", "surface": "#111b30", "text": "#c9d6ee", "bright": "#eaf1ff",
     "muted": "#8a9cc2", "dim": "#7487ad", "accent": "#4f9dff", "raised": "#1d3a70", "border": "#1e2a45",
@@ -40,6 +43,7 @@ STEPS = 8  # shades between rest and full hover: the fade is drawn in this many 
 HOVER_BLEND = 0.45  # share of the way to the hover colour that full hover reaches
 FADE_IN, FADE_OUT = 0.15, 0.20  # seconds from rest to full hover and back
 FRAME = 1 / 30  # seconds between frames while a fade runs
+DIGIT_WAIT = 0.8  # seconds a typed digit waits for a second one when it may start a longer number
 
 
 def state_path():
@@ -85,10 +89,22 @@ def human(secs):
     return f"{secs // 86400}d{secs % 86400 // 3600:02d}h"
 
 
-def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None):
+def hints(n, w, digits=""):
+    """The key-hint footer, as long as the width allows. `digits` is a pane number being typed."""
+    if digits:
+        return f"go to {digits}…"
+    jump = "1 jump" if n == 1 else f"1-{n} jump"
+    for text in (f"{jump}  e equalize  a arrange  q close", f"{jump}  e ▦  a ⊞  q close", f"{jump}  q close"):
+        if len(text) <= w:
+            return text
+    return ""
+
+
+def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, digits="", scroll=None):
     """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
     equalize() by a click on ▦, arrange() by a click on ⊞. hover maps what the pointer is over
-    (a pane id for a row, 'equalize' or 'arrange' for a header button) to its fade level 0..1."""
+    (a pane id for a row, 'equalize' or 'arrange' for a header button) to its fade level 0..1.
+    digits is a pane number the user is typing (shown in the footer)."""
     hover = hover or {}
     pal = dict(DEFAULT_PAL)
     pal.update((doc or {}).get("pal") or {})
@@ -131,14 +147,22 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None):
             break
     two_lines = rows_per > 1
     shown = max(avail // rows_per, 1) if panes else 0
-    hidden = max(len(panes) - shown, 0)
-    if hidden:  # keep the last line for the "+n more" note
+    start = 0
+    if len(panes) > shown:  # keep the last line for the note on the rows out of view
         shown = max((avail - 1) // rows_per, 1)
-        hidden = len(panes) - shown
+        last = len(panes) - shown
+        if scroll is None:  # follow the active pane
+            act = next((i for i, p in enumerate(panes) if p.get("active")), 0)
+            start = min(max(act - shown + 1, 0), last)
+        else:
+            start = min(max(scroll, 0), last)
+    cv.start, cv.last = start, max(len(panes) - shown, 0)
 
     frame = int(now * 8) % len(SPINNER)
+    # Numbers take as many columns as the widest one, so names line up past pane 9.
+    nx = 4 + max((len(str(p["num"])) for p in panes), default=1) + 1
     y = 2
-    for p in panes[:shown]:
+    for p in panes[start:start + shown]:
         active = bool(p.get("active"))
         lit = hover.get(p["id"], 0.0)
         bg = pal["raised"] if active else mix(pal["surface"], pal["raised"], HOVER_BLEND * lit)
@@ -152,24 +176,51 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None):
         age = human(now - p["since"]) if p.get("since") else ""
         right = f"{p['text']} {age}".strip()
         name = clean(p.get("name") or "") or clean(p.get("proc") or "") or "?"
-        zoom = " ⤢" if p.get("zoomed") else ""
-        room = w - 7 - 1
-        if len(right) + 1 + len(name) + len(zoom) > room:
+        room = w - nx - 2
+        if len(right) + 1 + len(name) > room:
             right = age  # the state word goes first when the dock is narrow
-        name = fit(name, max(room - len(right) - 1 - len(zoom), 3))
-        cv.put(6, y, name + zoom, pal["bright"] if active else pal["text"], bg, BOLD if active else 0)
+        name = fit(name, max(room - len(right) - 1, 3))
+        cv.put(nx, y, name, pal["bright"] if active else pal["text"], bg, BOLD if active else 0)
         cv.put(w - 1 - len(right), y, right, p["color"], bg)
         if two_lines:
+            # A shell titles its pane "user@host: dir"; the directory is the useful part, and its
+            # end says more than its start when it has to be cut.
             title = clean(p.get("title") or "")
+            host, _, path = title.partition(": ")
+            is_path = bool(path) and "@" in host and " " not in host
+            title = path if is_path else title
             proc = clean(p.get("proc") or "")
-            detail = title if title and title != name else proc
-            cv.put(6, y + 1, fit(detail, w - 7), pal["muted"], bg)
+            # While the agent runs, what it is doing (a tool, a background job) says more than
+            # its session title; otherwise the title does.
+            reason = clean(p.get("reason") or "")
+            named = title if title and title != name else ""
+            if p.get("kind") in ("working", "busy"):
+                detail = reason or named or proc
+            else:
+                detail = named or reason or proc
+            room = w - nx - 1
+            if is_path and detail == title and len(detail) > room:
+                detail = "…" + detail[len(detail) - room + 1:] if room > 1 else ""
+            cv.put(nx, y + 1, fit(detail, room), pal["muted"], bg)
         if goto:
             cv.hit(0, y, w, lines, lambda button, pid=p["id"]: goto(pid), key=p["id"])
         y += rows_per
-    if hidden:
-        cv.put(2, h - 2, f"+{hidden} more", pal["dim"])
-    cv.put(1, h - 1, fit("1-9 jump · e ▦ · a ⊞ · q", w - 2), pal["dim"], pal["surface"], DIM)
+    if cv.last:  # rows out of view, above and below
+        above, below = start, cv.last - start
+        note = "  ".join(t for t in (f"↑{above} more" if above else "", f"↓{below} more" if below else "") if t)
+        cv.put(2, h - 2, fit(note + " · scroll", w - 3), pal["dim"])
+    # Key hints as in the panels: the key in text colour, its label muted. A number being typed
+    # replaces them, in the accent colour.
+    x = 1
+    if digits:
+        cv.put(x, h - 1, hints(len(panes), w - 2, digits), pal["accent"], pal["surface"], BOLD)
+        return cv
+    for k, pair in enumerate(hints(len(panes), w - 2, digits).split("  ")):
+        key, _, label = pair.partition(" ")
+        x += 2 if k else 0
+        x += cv.put(x, h - 1, key, pal["text"], pal["surface"])
+        if label:
+            x += cv.put(x, h - 1, " " + label, pal["muted"], pal["surface"])
     return cv
 
 
@@ -187,10 +238,15 @@ class Dock:
         self.running = True
         self.last = None
         self.cv = None
+        self.scroll = None  # first row shown when the user scrolled with the wheel; None follows the active pane
+        self.active = None  # the active pane id the list last followed
         self.serial = 0
         self.hover = None  # what the pointer is over: a pane id, 'equalize', 'arrange' or None
         self.levels = {}  # fade level 0..1 of every key that is hovered or still fading out
         self.clock = None  # time of the last fade step; None while no fade runs
+        self.digits = ""  # a pane number being typed (past pane 9 a digit may start a longer one)
+        self.digits_at = 0.0  # monotonic time of the last typed digit
+        self.bg = None  # the background colour last announced with OSC 11
 
     def reload(self):
         try:
@@ -217,17 +273,45 @@ class Dock:
     def arrange(self, *_):
         self.request("hivegrid_overview_arrange", "")
 
-    def number(self, n):
+    def number(self, key):
+        """A typed digit: jumps as soon as the number is unambiguous, else waits DIGIT_WAIT for
+        the next digit (with 12 panes, 1 may still become 10, 11 or 12)."""
+        nums = {str(p.get("num")): p["id"] for p in (self.doc or {}).get("panes", [])}
+        typed = self.digits + key
+        if not any(n.startswith(typed) for n in nums):
+            typed = key
+        if not any(n.startswith(typed) for n in nums):
+            self.digits = ""
+            return
+        if typed in nums and not any(n != typed and n.startswith(typed) for n in nums):
+            self.digits = ""
+            self.goto(nums[typed])
+            return
+        self.digits, self.digits_at = typed, time.monotonic()
+
+    def settle(self, now):
+        """Jumps to a typed number once no further digit came; returns the seconds left to wait."""
+        if not self.digits:
+            return None
+        left = self.digits_at + DIGIT_WAIT - now
+        if left > 0:
+            return left
         for p in (self.doc or {}).get("panes", []):
-            if p.get("num") == n:
+            if str(p.get("num")) == self.digits:
                 self.goto(p["id"])
-                return
+        self.digits = ""
+        return None
 
     def set_hover(self, key):
+        """Starts the fade of what the pointer is now over, and asks for a hand pointer over a
+        row or button, the default elsewhere (OSC 22, Hivegrid build)."""
         if key != self.hover:
-            self.hover = key
+            prior, self.hover = self.hover, key
             if self.clock is None:
                 self.clock = time.monotonic()
+            if (prior is None) != (key is None):
+                self.out.write("\x1b]22;" + ("pointer" if key is not None else "") + "\x07")
+                self.out.flush()
 
     def advance(self, now):
         """Moves every fade on by the time since the last step; True while one is still running."""
@@ -254,6 +338,11 @@ class Dock:
             if action in ("drag", "press", "release"):  # motion without a button counts as a drag
                 # A report at column 0, row 0 (x, y < 0 here) says the pointer left the dock.
                 self.set_hover(self.cv.key_at(x, y) if self.cv and x >= 0 and y >= 0 else None)
+            if action == "wheel" and self.cv and getattr(self.cv, "last", 0):
+                # Rows past the dock's height: the wheel scrolls them; focusing another pane
+                # makes the list follow the active pane again.
+                base = self.cv.start if self.scroll is None else self.scroll
+                self.scroll = min(max(base + (-1 if button == "up" else 1), 0), self.cv.last)
             if action == "press" and button == "left" and self.cv:
                 fn = self.cv.hit_at(x, y)
                 if fn:
@@ -266,15 +355,24 @@ class Dock:
             self.equalize()
         elif not mods and key == "a":
             self.arrange()
-        elif not mods and len(key) == 1 and key in "123456789":
-            self.number(int(key))
+        elif not mods and len(key) == 1 and key in "0123456789":
+            self.number(key)
 
     def draw(self, size):
         cols, rows = size
         now = time.time()
         hover = {k: round(v * STEPS) / STEPS for k, v in self.levels.items()}
-        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize, self.arrange, hover)
+        active = next((p["id"] for p in (self.doc or {}).get("panes", []) if p.get("active")), None)
+        if active != self.active:
+            self.active, self.scroll = active, None
+        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize, self.arrange, hover, self.digits,
+                         self.scroll)
         frame = "\x1b[?25l" + self.cv.render()
+        # The pane's default background takes the dock's colour, so WezTerm paints the window
+        # padding beside the dock with it and the dock runs from the header to the bottom edge.
+        if self.cv.bg != self.bg:
+            self.bg = self.cv.bg
+            frame = f"\x1b]11;{self.bg}\x07" + frame
         if frame != self.last:
             self.out.write(frame)
             self.out.flush()
@@ -284,9 +382,15 @@ class Dock:
         old = termios.tcgetattr(self.fd)
         try:
             tty.setraw(self.fd)
-            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
+            # Hivegrid build user vars: hivegrid_no_dim, the dock is chrome like the bar, so it is
+            # drawn in its true colours rather than dimmed as an inactive pane; hivegrid_fixed_width,
+            # a window resize or a new top-level split resizes the grid and leaves the dock's width.
+            on = base64.b64encode(b"1").decode()
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h"
+                           f"\x1b]1337;SetUserVar=hivegrid_no_dim={on}\x07\x1b]1337;SetUserVar=hivegrid_fixed_width={on}\x07")
             self.out.flush()
             signal.signal(signal.SIGWINCH, lambda *_: None)
+            tail = b""  # the start of an input sequence the last read cut off
             while self.running:
                 self.reload()
                 try:
@@ -295,18 +399,27 @@ class Dock:
                 except OSError:
                     size = (30, 24)
                 fading = self.advance(time.monotonic())
+                pending = self.settle(time.monotonic())
                 self.draw(size)
                 busy = any(p.get("kind") == "working" for p in (self.doc or {}).get("panes", []))
-                r, _, _ = select.select([self.fd], [], [], FRAME if fading else 0.125 if busy else 0.5)
+                wait = FRAME if fading else 0.125 if busy else 0.5
+                r, _, _ = select.select([self.fd], [], [], min(wait, pending) if pending else wait)
                 if r:
                     data = os.read(self.fd, 4096)
                     if not data:
                         break
-                    for ev in decode(data):
-                        self.handle(ev)
+                    # A motion report cut by the read boundary waits for its rest instead of
+                    # turning into keystrokes; a lone ESC with nothing after it is the Escape key.
+                    data, tail = split_complete(tail + data)
+                elif tail:
+                    data, tail = tail, b""
+                else:
+                    continue
+                for ev in decode(data):
+                    self.handle(ev)
         finally:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
-            self.out.write("\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+            self.out.write("\x1b]22;\x07\x1b]111\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
             self.out.flush()
 
 

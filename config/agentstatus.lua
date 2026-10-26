@@ -1,6 +1,8 @@
--- Per-pane agent state for grids of omp panes: asking, bell, working, finished, waiting,
--- exited. Shown in the overview dock (overview.lua), the pane picker (LEADER+g) and the
--- bell toasts; the header carries no agent state.
+-- Per-pane agent state for grids of omp panes, in the hive panel's vocabulary
+-- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), done, idle, exited, plus
+-- bell, shell (a shell prompt in a pane where no agent ran) and other (any other program).
+-- Shown in the overview dock (overview.lua) and the pane picker (LEADER+g), used by Alt+n;
+-- the header carries no agent state.
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
 -- `as` is { tab_parts, bell, pane_kind, pane_label, agent_number, overview, picker }.
@@ -10,25 +12,31 @@
 -- This module registers only a cache-refreshing update-status handler (no
 -- set_right_status, so it cannot clobber the parent's status).
 --
--- State detection, strongest signal first (see `step`):
---  exited   foreground process is a shell (exact: procfs).
---  ask      the bottom screen lines hold an omp question/permission prompt or a
---           y/n prompt (text markers; a transcript quoting one stays "ask" until
---           it scrolls out of the last LINES rows).
---  bell     the pane rang the bell since you last focused it (exact).
---  working  omp loader markers once learned (see `calibrated`), else the screen
---           changed within QUIET_SECS (heuristic: reflow after a resize, or a
---           ticking footer, looks like work for 3 s).
---  finished was working while you were elsewhere and stopped; cleared on focus.
---           Works for any agent, since it only needs the working->quiet edge.
---  waiting  an agent process is alive and idle at its prompt.
+-- State sources, exact first (see `step`):
+--  shell    the foreground process is a shell (exact: procfs): `exited` when an agent ran
+--           in the pane before, else `shell`.
+--  ext      omp with the hivegrid-agent-state extension writes its exact state to
+--           $XDG_RUNTIME_DIR/hivegrid-agents/<pane>.json, the file the hive reads; trusted
+--           while its heartbeat is fresh. `done` reads as `idle` once acknowledged
+--           (acks.json, shared with the hive); looking at the pane acknowledges it.
+--  title    omp without the extension: the run state omp puts in the terminal title
+--           (working / your turn / waiting on you, see `omp_title`); done = it worked
+--           while you were elsewhere and stopped.
+--  screen   other agents and programs:
+--   attention the bottom screen lines hold a question/permission prompt or a y/n prompt
+--           (text markers; a transcript quoting one stays so until it scrolls out of the
+--           last LINES rows).
+--   bell    the pane rang the bell since you last focused it (exact).
+--   working omp loader markers once learned (see `calibrated`), else the screen changed
+--           within QUIET_SECS (heuristic: reflow after a resize, or a ticking footer,
+--           looks like work for 3 s).
+--   done    was working while you were elsewhere and stopped; cleared on focus.
+--   idle    an agent process is alive and quiet.
 -- Why markers are "learned": the omp loader text could not be observed here, so
 -- negative authority (no marker => not working) is granted to omp panes only
 -- after a marker was seen on a pane whose screen was changing. If the markers
 -- never match, behaviour stays the timing heuristic. A pane whose screen changes
 -- for RUN_SECS straight is working even without a marker.
--- omp panes: the terminal title carries omp's own run state (working / your turn / waiting
--- on you, see `omp_title`); when present it replaces the screen heuristics above.
 -- Rejected: tinting panes with pane:inject_output(OSC 11/111). The sequence is
 -- parsed by a separate parser, so it cannot split the app's own escape
 -- sequences, but it rewrites the pane's palette: omp's terminal-theme detection
@@ -49,15 +57,24 @@ local LINES = 16 -- bottom screen rows inspected per pane
 local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
 local AGENTS = { omp = true, claude = true, codex = true, gemini = true, aider = true, opencode = true }
 
+-- Glyphs and colours match the hive (bin/hivegrid_hive.py GLYPH / WORD / state_color).
 local STATES = {
-  ask = { color = P.violet, glyph = '?', text = 'asking', rank = 1 },
+  attention = { color = P.violet, glyph = '?', text = 'needs you', rank = 1 },
   bell = { color = P.red, glyph = '!', text = 'bell', rank = 2 },
-  finished = { color = P.green, glyph = '✓', text = 'finished', rank = 3 },
-  waiting = { color = P.amber, glyph = '●', text = 'waiting', rank = 4 },
+  done = { color = P.green, glyph = '✓', text = 'done', rank = 3 },
+  busy = { color = P.amber, glyph = '◔', text = 'busy', rank = 4 },
   working = { color = P.accent, glyph = '↻', text = 'working', rank = 5 },
-  exited = { color = P.grey, glyph = '○', text = 'exited', rank = 6 },
-  idle = { color = P.dim, glyph = '▫', text = 'idle', rank = 7 },
+  idle = { color = P.grey, glyph = '·', text = 'idle', rank = 6 },
+  exited = { color = P.muted, glyph = '○', text = 'exited', rank = 7 },
+  other = { color = P.dim, glyph = '›', text = 'running', rank = 8 },
+  shell = { color = P.dim, glyph = '›', text = 'shell', rank = 9 },
 }
+
+-- The omp extension's state files (ext/hivegrid-agent-state.ts; bin/hivegrid_agents.py reads
+-- the same ones).
+local STATE_DIR = (os.getenv('XDG_RUNTIME_DIR') or '/tmp') .. '/hivegrid-agents'
+local STALE_SECS = 20 -- mirrors hivegrid_agents.STALE_SECS: older heartbeat => use the title
+local EXT_STATES = { working = true, busy = true, done = true, idle = true, attention = true }
 
 -- Keyed by pane_id; pruned per window on every scan.
 local panes = {}
@@ -112,6 +129,12 @@ local function omp_title(title)
   return nil, rest
 end
 
+-- omp starts its session titles with an emoji (📂, 🙋, ⏱️); the lists show the words only.
+local function calm_title(s)
+  s = s:gsub('^[\226\240-\244][\128-\191]+\239\184\143', ''):gsub('^[\240-\244][\128-\191]+', '')
+  return (s:gsub('^%s+', ''))
+end
+
 local function contains_any(line, needles)
   for _, n in ipairs(needles) do
     if line:find(n, 1, true) then return true end
@@ -136,18 +159,24 @@ local function calibrated()
   return wezterm.GLOBAL.agentstatus_markers_seen == true
 end
 
--- One state transition. st is the pane's persistent record (bell, finished,
--- was_working, changed_at, run_start); c = { now, focused, proc, hit, unseen }.
--- Returns the pane's state key, or nil for "nothing to report".
+-- One state transition. st is the pane's persistent record (bell, finished, was_working,
+-- agent, changed_at, run_start); c = { now, focused, proc, hit, title_state, ext } with ext
+-- the extension's state ('working', 'busy', 'attention', 'done', 'idle') when it is fresh.
+-- Returns the pane's state key.
 local function step(st, c)
   local quiet = c.now - st.changed_at >= QUIET_SECS
   local omp = c.proc == 'omp'
-  local ts = (omp or not c.proc or c.proc == '') and c.title_state or nil
+  local ts = (omp or c.proc == '') and c.title_state or nil
   if omp and c.hit.working and not quiet then
     wezterm.GLOBAL.agentstatus_markers_seen = true
   end
+  -- Only a known agent process (or its exact state file) proves an agent ran here; a title
+  -- seen before the process is known proves nothing (a fresh shell's first frames).
+  if AGENTS[c.proc] or c.ext then st.agent = true end
   local working
-  if ts then
+  if c.ext then
+    working = c.ext == 'working' or c.ext == 'busy'
+  elseif ts then
     working = ts == 'working'
   elseif omp and calibrated() then
     working = (c.hit.working and c.now - st.changed_at < MARKER_SECS)
@@ -164,27 +193,106 @@ local function step(st, c)
     st.finished, st.was_working = true, false
   end
 
-  if SHELLS[c.proc] then return 'exited' end
-  if (ts and ts == 'attention') or (not ts and c.hit.ask) then return 'ask' end
+  if SHELLS[c.proc] then return st.agent and 'exited' or 'shell' end
+  -- The extension is exact (done vs idle included): no bell or screen guesses on top.
+  if c.ext then return c.ext end
+  if ts == 'attention' or (not ts and c.hit.ask) then return 'attention' end
   if st.bell then return 'bell' end
   if working then return 'working' end
-  if st.finished then return 'finished' end
-  if AGENTS[c.proc] then return 'waiting' end
-  if c.unseen and quiet then return 'waiting' end
-  return nil
+  if st.finished then return 'done' end
+  if AGENTS[c.proc] or ts then return 'idle' end
+  return 'other'
 end
 
+-- Fields kept in wezterm.GLOBAL so a config reload (a settings save, a theme switch) keeps
+-- each pane's state, its age and its flags.
+local KEEP = { 'wid', 'kind', 'since', 'agent', 'bell', 'finished', 'was_working' }
+
+-- A fresh record (new pane, config reload) starts quiet: its first screen is a baseline, not
+-- a change, so nothing reads as working (then done) that never ran.
 local function new_state(now, id)
-  return { changed_at = now, run_start = now, since = now, text = '', slow_at = now - (id * 0.7) % SLOW_SECS }
+  local st = { changed_at = now - QUIET_SECS, run_start = now, since = now, born = now, slow_at = now - (id * 0.7) % SLOW_SECS }
+  local kept = (wezterm.GLOBAL.agentstatus_panes or {})[tostring(id)]
+  if kept then
+    for _, k in ipairs(KEEP) do st[k] = kept[k] end
+    st.last_kind = st.kind
+  end
+  return st
 end
 
+-- Publishes the records of window wid's panes; other windows' records stay until their scan.
+local kept_sig
+local function keep_states(wid)
+  local out, sig = {}, {}
+  for key, rec in pairs(wezterm.GLOBAL.agentstatus_panes or {}) do
+    if rec.wid ~= wid then out[key] = rec end
+  end
+  for id, st in pairs(panes) do
+    if st.wid == wid then
+      local rec = {}
+      for _, k in ipairs(KEEP) do rec[k] = st[k] end
+      out[tostring(id)] = rec
+      sig[#sig + 1] = string.format('%d:%s:%s:%s:%s:%s:%s', id, tostring(st.kind), tostring(st.since),
+        tostring(st.agent), tostring(st.bell), tostring(st.finished), tostring(st.was_working))
+    end
+  end
+  table.sort(sig)
+  local s = wid .. '|' .. table.concat(sig, ',')
+  if s ~= kept_sig then
+    kept_sig = s
+    wezterm.GLOBAL.agentstatus_panes = out
+  end
+end
+
+local function read_json(path)
+  local f = io.open(path, 'r')
+  if not f then return nil end
+  local text = f:read('*a')
+  f:close()
+  local ok, v = pcall(wezterm.json_parse, text or '')
+  return ok and type(v) == 'table' and v or nil
+end
+
+-- The extension's record of pane id when its heartbeat is fresh, else nil.
+local function ext_record(id, now)
+  local doc = read_json(STATE_DIR .. '/' .. id .. '.json')
+  if not doc or not EXT_STATES[doc.state] or type(doc.updated) ~= 'number' then return nil end
+  if now - doc.updated > STALE_SECS then return nil end
+  return doc
+end
+
+-- Marks a done as seen, the same record the hive's `a` writes (hivegrid_agents.ack).
+local function write_ack(id, since)
+  local path = STATE_DIR .. '/acks.json'
+  local acks = read_json(path) or {}
+  acks[tostring(id)] = since
+  local tmp = path .. '.tmp.lua'
+  local f = io.open(tmp, 'w')
+  if not f then return end
+  f:write(wezterm.json_encode(acks))
+  f:close()
+  os.rename(tmp, path)
+end
+
+-- The first lookup runs at once (a fresh pane needs its process to be classified); later
+-- ones are staggered per pane.
 local function refresh_slow(pane, st, now)
-  if now - st.slow_at < SLOW_SECS then return end
-  st.slow_at = now
+  if st.proc and now - st.slow_at < SLOW_SECS then return end
+  if st.proc then st.slow_at = now end
   local ok, name = pcall(pane.get_foreground_process_name, pane)
   st.proc = ok and basename(name) or ''
-  local okc, cwd = pcall(pane.get_current_working_dir, pane)
-  st.cwd = short_path(okc and url_path(cwd) or '')
+  -- The shell reports its directory (OSC 7) only at a prompt, so for a program started
+  -- after a `cd` on the same line (`cd x && omp`) its own directory is the truth.
+  local path
+  if st.proc ~= '' and not SHELLS[st.proc] then
+    local okp, info = pcall(pane.get_foreground_process_info, pane)
+    path = okp and info and info.cwd or nil
+  end
+  if not path or path == '' then
+    local okc, cwd = pcall(pane.get_current_working_dir, pane)
+    path = okc and url_path(cwd) or ''
+  end
+  st.cwd = short_path(path)
   st.label = basename(st.cwd) .. (st.proc ~= '' and (':' .. st.proc) or '')
 end
 
@@ -199,6 +307,7 @@ local function scan(window, force)
   local win_focused = window:is_focused()
   local active_tab_id = window:active_tab():tab_id()
   local seen, list = {}, {}
+  local acks -- acks.json, read once per scan when a done needs it
 
   for _, mtab in ipairs(window:mux_window():tabs()) do
     local tid = mtab:tab_id()
@@ -221,7 +330,9 @@ local function scan(window, force)
 
       local ok, text = pcall(pane.get_lines_as_text, pane, LINES)
       text = ok and text or ''
-      if text ~= st.text then
+      if st.text == nil then
+        st.text = text
+      elseif text ~= st.text then
         if now - st.changed_at >= QUIET_SECS then st.run_start = now end
         st.text, st.changed_at = text, now
       end
@@ -234,19 +345,49 @@ local function scan(window, force)
       local title_state, heading
       -- The process name is looked up only every few seconds, so a fresh pane has none yet.
       if (st.proc or '') == 'omp' or (st.proc or '') == '' then title_state, heading = omp_title(title) end
-      st.heading = heading or title
+      st.heading = calm_title(heading or title)
 
       local focused = win_focused and tid == active_tab_id and info.is_active
+      local ext = ((st.proc or '') == 'omp' or (st.proc or '') == '') and ext_record(id, now) or nil
+      -- omp marks its file `exited` when it quits: the shell left behind is an exited agent,
+      -- even when the agent ran before this config was loaded.
+      if not st.agent and SHELLS[st.proc or ''] then
+        local doc = read_json(STATE_DIR .. '/' .. id .. '.json')
+        -- a file older than this record is left over from an earlier mux that reused the id
+        if doc and doc.state == 'exited' and type(doc.updated) == 'number' and doc.updated >= st.born - 5 then
+          st.agent = true
+        end
+      end
+      local ext_state = ext and ext.state
+      if ext then
+        if type(ext.title) == 'string' and ext.title ~= '' then st.heading = calm_title(ext.title) end
+        if type(ext.cwd) == 'string' and ext.cwd ~= '' then st.cwd = short_path(ext.cwd) end
+      end
+      if ext_state == 'done' then
+        acks = acks or read_json(STATE_DIR .. '/acks.json') or {}
+        if acks[tostring(id)] == ext.since then
+          ext_state = 'idle'
+        elseif focused then
+          write_ack(id, ext.since)
+          acks[tostring(id)] = ext.since
+          ext_state = 'idle'
+        end
+      end
+      st.reason = ext and type(ext.reason) == 'string' and ext.reason or nil
       st.unseen = pane:has_unseen_output()
       st.kind = step(st, {
         now = now,
         focused = focused,
         proc = st.proc or '',
         hit = markers(text),
-        unseen = st.unseen,
         title_state = title_state,
+        ext = ext_state,
       })
-      if st.kind ~= st.last_kind then st.last_kind, st.since = st.kind, now end
+      if st.kind ~= st.last_kind then
+        st.last_kind = st.kind
+        -- The extension knows when its state began; elsewhere it is the first scan that saw it.
+        st.since = ext and st.kind == ext_state and type(ext.since) == 'number' and ext.since or now
+      end
       st.state = (not focused) and st.kind or nil
 
       entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
@@ -262,6 +403,7 @@ local function scan(window, force)
   for id, st in pairs(panes) do
     if st.wid == wid and not seen[id] then panes[id] = nil end
   end
+  keep_states(wid)
   wins[wid] = { at = now, list = list }
   return list
 end
@@ -280,7 +422,10 @@ function api.tab_parts(tab)
       if name == '' then name = st.cwd end
       if st.proc and st.proc ~= '' and not SHELLS[st.proc] then proc = st.proc end
     else
-      name = tab.active_pane.title
+      -- Not scanned yet (fresh pane, config reload): the shell's directory beats its title.
+      local ok, cwd = pcall(function() return tab.active_pane.current_working_dir end)
+      local path = short_path(ok and url_path(cwd) or '')
+      name = path ~= '' and (basename(path) ~= '' and basename(path) or path) or tab.active_pane.title
     end
   end
   return { name = name, proc = proc }
@@ -300,7 +445,8 @@ function api.bell(window, pane)
   end
 end
 
--- State kind of a pane ('working', 'ask', 'waiting', ...) as of the last scan, nil if unknown.
+-- State kind of a pane ('working', 'attention', 'idle', ... see STATES) as of the last scan,
+-- nil if unknown.
 function api.pane_kind(pane_id)
   return panes[pane_id] and panes[pane_id].kind or nil
 end
@@ -314,11 +460,18 @@ function api.agent_number(pane_id)
   return panes[pane_id] and panes[pane_id].num or nil
 end
 
+-- What a row says for state s of pane record st: a program's own name for 'other'.
+local function state_text(s, st)
+  if s == STATES.other and st.proc and st.proc ~= '' then return st.proc end
+  return s.text
+end
+
 -- Rows for the overview dock, one per grid pane of tab `tab_id` in reading order:
--- { id, num, kind, glyph, text, color, name, title, proc, since, active, zoomed }. `kind` is the
--- state key ('working', 'waiting', ...; 'idle' when nothing is known), `since` the epoch
--- second it last changed, `name` the pane's directory, `title` omp's session title (or
--- the pane title of another program).
+-- { id, num, kind, glyph, text, color, name, title, reason, proc, since, active, zoomed }.
+-- `kind` is the state key (see STATES; 'idle' when nothing is known), `since` the epoch
+-- second it last changed, `name` the pane's directory, `title` omp's session title (or the
+-- pane title of another program), `reason` the extension's detail ('bash: npm test (12s)',
+-- '1 background job', 'plan review', ...) or nil.
 function api.overview(window, tab_id)
   for _, t in ipairs(scan(window)) do
     if t.id == tab_id then
@@ -330,8 +483,8 @@ function api.overview(window, tab_id)
         local name = basename(st.cwd or '')
         if name == '' then name = st.cwd or '' end
         rows[#rows + 1] = {
-          id = e.pane:pane_id(), num = e.num, kind = kind, glyph = s.glyph, text = s.text,
-          color = s.color, name = name, title = st.heading or '', proc = st.proc or '',
+          id = e.pane:pane_id(), num = e.num, kind = kind, glyph = s.glyph, text = state_text(s, st),
+          color = s.color, name = name, title = st.heading or '', reason = st.reason, proc = st.proc or '',
           since = st.since, active = e.info.is_active, zoomed = e.info.is_zoomed,
         }
       end
@@ -342,7 +495,9 @@ function api.overview(window, tab_id)
   return {}
 end
 
--- InputSelector over every pane in the window: "agent N [state] cwd".
+-- InputSelector over every pane in the window: "<glyph> state  cwd  title". In one tab the
+-- selector's own keys 1-9 are the dock's digits; across tabs a row names its tab only, so the
+-- key in front of it stays the one handle.
 local function pick(window, pane)
   local list = scan(window, true)
   local multi = #list > 1
@@ -353,16 +508,20 @@ local function pick(window, pane)
     table.sort(entries, function(a, b) return a.num < b.num end)
     for _, e in ipairs(entries) do
       local s = STATES[e.st.kind or 'idle']
+      local text = state_text(s, e.st)
       local here = e.pane:pane_id() == pane:pane_id()
+      local title = e.st.heading or ''
       choices[#choices + 1] = {
         id = tostring(e.pane:pane_id()),
         label = wezterm.format {
           { Foreground = { Color = P.muted } },
-          { Text = (multi and ('tab ' .. ti .. ' ') or '') .. 'agent ' .. e.num .. ' ' },
+          { Text = multi and ('tab ' .. ti .. ' · ') or '' },
           { Foreground = { Color = s.color } },
-          { Text = string.format('[%s]', s.text) .. string.rep(' ', 9 - #s.text) },
+          { Text = s.glyph .. ' ' .. text .. string.rep(' ', math.max(10 - utf8.len(text), 1)) },
           { Foreground = { Color = P.text } },
-          { Text = (e.st.cwd ~= '' and e.st.cwd or e.st.label or '') .. (here and '  (here)' or '') },
+          { Text = (e.st.cwd ~= '' and e.st.cwd or e.st.label or '') },
+          { Foreground = { Color = P.muted } },
+          { Text = (title ~= '' and ('  ' .. title) or '') .. (here and '  (here)' or '') },
         },
       }
     end
@@ -370,9 +529,10 @@ local function pick(window, pane)
   window:perform_action(
     wezterm.action.InputSelector {
       title = 'Agents',
-      description = 'Type a number or / to filter, Enter = go, Esc = cancel',
+      description = 'Type its key or / to filter, Enter = go, Esc = cancel',
       fuzzy_description = 'Agent: ',
-      alphabet = '123456789',
+      -- WezTerm's default alphabet: one key per row up to 34 rows; in a single tab the
+      -- keys 1-9 are the agents' own digits.
       choices = choices,
       action = wezterm.action_callback(function(_, _, id)
         if not id then return end
@@ -386,7 +546,7 @@ end
 api.picker = wezterm.action_callback(pick)
 
 -- Next pane (after the active one, wrapping across tabs) needing attention:
--- ask/bell/finished first, then idle agents, else any unseen output.
+-- needs you / bell / done first, then idle agents, else any unseen output.
 local function jump_next(window, pane)
   local list = scan(window, true)
   local flat, start = {}, 1
@@ -404,15 +564,16 @@ local function jump_next(window, pane)
     end
   end
   local target = pickfirst(function(st)
-    return st.state == 'ask' or st.state == 'bell' or st.state == 'finished'
+    return st.state == 'attention' or st.state == 'bell' or st.state == 'done'
   end) or pickfirst(function(st)
-    return st.state == 'waiting'
+    return st.state == 'idle'
   end) or pickfirst(function(st)
     return st.unseen
   end)
   if target then target:activate() end
 end
 
+-- Next / previous grid pane of the tab in reading order (the dock's digits).
 local function cycle(delta)
   return function(window, pane)
     local tab = window:active_tab()
@@ -421,12 +582,15 @@ local function cycle(delta)
       if not require('sidebar').is_dock(info.pane:pane_id()) then infos[#infos + 1] = info end
     end
     if #infos < 2 then return end
+    local numbers = panemap.numbering(infos)
+    local ordered = {}
+    for i, info in ipairs(infos) do ordered[numbers[i]] = info end
     local cur
-    for i, info in ipairs(infos) do
-      if info.is_active then cur = i end
+    for n, info in ipairs(ordered) do
+      if info.is_active then cur = n end
     end
-    local nxt = ((cur or 1) - 1 + delta) % #infos
-    window:perform_action(wezterm.action.ActivatePaneByIndex(infos[nxt + 1].index), pane)
+    local nxt = ((cur or 1) - 1 + delta) % #ordered
+    window:perform_action(wezterm.action.ActivatePaneByIndex(ordered[nxt + 1].index), pane)
   end
 end
 

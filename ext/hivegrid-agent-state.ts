@@ -1,8 +1,12 @@
 /**
  * hivegrid-agent-state: omp extension that publishes the main session's state to
  *   ${XDG_RUNTIME_DIR:-/tmp}/hivegrid-agents/<WEZTERM_PANE>.json
- * for the hivegrid hive panel, and executes plan-review answers the hive drops into
+ * for the hivegrid hive panel and the overview dock, and executes plan-review answers the
+ * hive drops into
  *   <dir>/<pane>.cmd.<unique>.json
+ * When the session ends the file says `exited`, so the pane reads as an agent that quit
+ * (not as a plain shell) until another agent starts there or the hive drops the file with
+ * the pane.
  *
  * The state machine is the pure, exported `reduce`; everything else is thin I/O that
  * never writes to stdout/stderr (omp's TUI owns the terminal) and never throws into omp.
@@ -113,6 +117,15 @@ export function extractAsk(args: unknown): { question: string; options: string[]
 	return { question: typeof q === "string" ? clip(q, 300) : "", options };
 }
 
+/** omp's fixed plan-review answers (resolvePlanReview choices); its event carries no list (18.12). */
+export const PLAN_CHOICES = [
+	{ id: "execute", label: "Execute" },
+	{ id: "compact", label: "Compact" },
+	{ id: "keep", label: "Keep" },
+	{ id: "refine", label: "Refine" },
+	{ id: "save", label: "Save" },
+];
+
 /** Normalise omp's plan_review_requested payload (or ctx.getPendingPlanReview()) into a Pending. */
 export function planReviewPending(review: unknown): Pending | null {
 	const r = asRecord(review);
@@ -133,7 +146,7 @@ export function planReviewPending(review: unknown): Pending | null {
 		kind: "plan_review",
 		reviewId,
 		title: typeof r.title === "string" ? clip(r.title, 200) : "",
-		choices,
+		choices: choices.length ? choices : PLAN_CHOICES.map(c => ({ ...c })),
 	};
 }
 
@@ -284,6 +297,11 @@ export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<str
 	};
 }
 
+/** The document of an agent that has quit: state `exited` since `now`, nothing pending. */
+export function exitedDoc(m: AgentModel, meta: DocMeta, now: number): Record<string, unknown> {
+	return { ...toDoc(m, meta, now), state: "exited", reason: null, since: now, pending: null, error: null };
+}
+
 /** profile = path component after `profiles/` in the agent dir, else $OMP_PROFILE/$PI_PROFILE, else null. */
 export function profileFromAgentDir(agentDir: string | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
 	if (agentDir) {
@@ -386,6 +404,13 @@ export default function hivegridAgentState(pi: any): void {
 			};
 		};
 
+		const put = (doc: Record<string, unknown>) => {
+			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			const tmp = `${file}.tmp.${process.pid}`;
+			fs.writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
+			fs.renameSync(tmp, file);
+		};
+
 		const write = (force: boolean) => {
 			if (dead) return;
 			try {
@@ -393,10 +418,7 @@ export default function hivegridAgentState(pi: any): void {
 				const doc = toDoc(model, meta(), t);
 				const sig = JSON.stringify({ ...doc, updated: 0 });
 				if (!force && sig === lastSig && t - lastWrite < HEARTBEAT_S) return;
-				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-				const tmp = `${file}.tmp.${process.pid}`;
-				fs.writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
-				fs.renameSync(tmp, file);
+				put(doc);
 				lastSig = sig;
 				lastWrite = t;
 			} catch {}
@@ -419,10 +441,12 @@ export default function hivegridAgentState(pi: any): void {
 			} catch {}
 		};
 
-		const remove = () => {
+		// Sync only: it also runs from process.on("exit").
+		const markExited = () => {
+			if (dead) return;
 			dead = true;
 			try {
-				fs.rmSync(file, { force: true });
+				put(exitedDoc(model, meta(), nowS()));
 			} catch {}
 		};
 
@@ -485,6 +509,11 @@ export default function hivegridAgentState(pi: any): void {
 		pi.on(
 			"session_start",
 			guard((_e, ctx) => {
+				// a new session in the same process (after /new, a resume) publishes afresh
+				if (dead) {
+					dead = false;
+					model = initialModel(nowS());
+				}
 				write(true);
 				const pr = ctx?.getPendingPlanReview?.();
 				if (pr) apply({ type: "plan_review_requested", review: pr });
@@ -546,14 +575,14 @@ export default function hivegridAgentState(pi: any): void {
 					if (timer) ctx.clearTimer(timer);
 				} catch {}
 				timer = null;
-				remove();
+				markExited();
 			} catch {}
 		});
 
-		// best-effort cleanup if the process ends without session_shutdown (sync-only in 'exit')
+		// best-effort mark if the process ends without session_shutdown (sync-only in 'exit')
 		process.on("exit", () => {
 			try {
-				if (ctxRef) remove();
+				if (ctxRef) markExited();
 			} catch {}
 		});
 	} catch {

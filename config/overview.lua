@@ -132,7 +132,8 @@ return function(config, wezterm, as, sb, layouts)
     if dock then wezterm.GLOBAL.overview_width = dock.width end
     local was_even = TOP_LEVEL and even(grid_panes(infos))
     cli('kill-pane', '--pane-id', rec.pane)
-    if from:pane_id() == rec.pane and rec.last then cli('activate-pane', '--pane-id', rec.last) end
+    local back = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last)
+    if back then back:activate() end -- the Lua API: a cli call from here can wait on the GUI
     written[rec.pane] = nil
     drop(tab_id, rec)
     sb.restore(window, window:active_tab())
@@ -159,8 +160,10 @@ return function(config, wezterm, as, sb, layouts)
       if not anchor or right > a_right or (right == a_right and i.top < anchor.top) then anchor = i end
     end
     if TOP_LEVEL then anchor = active or grid[1] end
-    local width = math.min(wezterm.GLOBAL.overview_width or math.max(MIN_COLS, math.floor(total * FRACTION)),
-      math.floor(total / 2))
+    -- A remembered width can be tiny (the window was narrow when the dock closed): never
+    -- narrower than MIN_COLS, and no more than a third of the window unless that is less.
+    local width = math.min(math.max(MIN_COLS, wezterm.GLOBAL.overview_width or math.floor(total * FRACTION)),
+      math.max(MIN_COLS, math.floor(total / 3)))
     local was_even = TOP_LEVEL and even(grid)
     local args = { 'split-pane', '--right', '--cells', width, '--pane-id', anchor.pane:pane_id() }
     if TOP_LEVEL then args[#args + 1] = '--top-level' end
@@ -176,7 +179,7 @@ return function(config, wezterm, as, sb, layouts)
     save(mtab:tab_id(), rec)
     publish(window, mtab, rec)
     -- The split focuses the new pane; the keyboard stays where it was.
-    cli('activate-pane', '--pane-id', from:pane_id())
+    from:activate()
     sb.restore(window, mtab) -- the top-level split squeezed the bar; no waiting for the tick
     if was_even then layouts.equalize(window, from) end
   end

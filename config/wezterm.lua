@@ -75,7 +75,19 @@ config.tab_bar_at_bottom = false
 config.hide_tab_bar_if_only_one_tab = false
 config.tab_max_width = 60
 
-config.font = wezterm.font_with_fallback { 'DejaVu Sans Mono', 'Noto Sans Mono' }
+-- DejaVuSansM Nerd Font Mono when it is installed; WezTerm turns a missing family into a
+-- Configuration Error window, and its built-in Symbols Nerd Font Mono fallback already
+-- draws the nerd glyphs over plain DejaVu Sans Mono.
+local NERD = 'DejaVuSansM Nerd Font Mono'
+local has_nerd = (function()
+  local ok, success, out = pcall(wezterm.run_child_process, { 'fc-list', NERD, 'family' })
+  return ok and success and out ~= ''
+end)()
+local function families(list)
+  if has_nerd then table.insert(list, 1, { family = NERD, weight = 'Regular' }) end
+  return list
+end
+config.font = wezterm.font_with_fallback(families { 'DejaVu Sans Mono', 'Noto Sans Mono' })
 config.font_size = 10.5
 config.colors = {
   foreground = P.text,
@@ -97,7 +109,9 @@ config.window_frame = {
   border_top_height = '2px',
   border_left_color = P.border, border_right_color = P.border, border_bottom_color = P.border,
   border_top_color = P.edge_hi,
-  font = wezterm.font { family = 'DejaVu Sans Mono', weight = 'Regular' },
+  font = wezterm.font_with_fallback(families {
+    { family = 'DejaVu Sans Mono', weight = 'Regular' },
+  }),
   font_size = 9.5,
   active_titlebar_bg = P.deep,
   inactive_titlebar_bg = P.deep,
@@ -158,13 +172,15 @@ config.status_update_interval = 1000
 -- window's dpi. The fancy bar caps every tab at window width / (tabs + 1) - 1.5 cells
 -- and never shrinks tabs for the right status, so titles are fitted to that cap here
 -- and the status is fitted to what the tabs leave over.
-local LEFT_PX, NEW_TAB_PX, BUTTONS_PX = 14, 21, 146
+local LEFT_PX, NEW_TAB_PX, BUTTONS_PX = 14, 23, 146
 local BRAND_CELLS = BRAND_DRAWN and 0 or theme.width(theme.brand())
 if BRAND_DRAWN then
   local m = theme.BRAND_MARK
   LEFT_PX = m.margin_left + m.size + m.margin_right + 4 -- 4: the tab row's half-cell padding
 end
-local TAB_PAD_CELLS = 4 -- element padding, border and the close button
+-- Cells a tab spends besides its text: the floating chip's half-cell paddings and the
+-- close button with its margin (measured 3 to 3.25 cells; the larger is kept).
+local TAB_PAD_CELLS = 3.25
 local TAB_CELLS = 34 -- widest title text
 
 -- The bar font's cell is its 0.602 em advance rounded up to whole pixels.
@@ -177,33 +193,45 @@ local function tab_cap(pixel_width, ntabs, cell)
 end
 
 -- Fits a tab's pieces into `cap` cells (the cap is read from wezterm.GLOBAL by the
--- format-tab-title handler, which has no window). Priority: name, agent.
--- Returns name, proc, width in cells (padding included).
+-- format-tab-title handler, which has no window). Priority: name, agent; a cut name
+-- ends in an ellipsis. Returns name, proc, width in cells (padding included).
 local function tab_layout(parts, tab_index, cap)
   cap = math.min(cap or TAB_CELLS + TAB_PAD_CELLS, TAB_CELLS + TAB_PAD_CELLS)
-  local fixed = 2 + #tostring(tab_index + 1) + 2 -- end cells, " N "
-  local room = cap - TAB_PAD_CELLS - fixed
+  local fixed = #tostring(tab_index + 1) + 3 -- ' N ' before the name, ' ' after it
+  local room = math.floor(cap - TAB_PAD_CELLS - fixed)
   local nlen = utf8.len(parts.name) or #parts.name
   local pneed = parts.proc and (#parts.proc + 1) or 0
   local name, proc = parts.name, parts.proc
   if nlen + pneed > room then proc, pneed = nil, 0 end
-  if nlen > room then name = wezterm.truncate_right(parts.name, math.max(3, room)) end
+  -- A cut keeps at least one character plus the ellipsis, and only when that is shorter.
+  local keep = math.max(1, room - 1)
+  if nlen > room and keep + 1 < nlen then
+    name = wezterm.truncate_right(parts.name, keep) .. '…'
+  end
   return name, proc, fixed + (utf8.len(name) or #name) + pneed + TAB_PAD_CELLS
 end
 
 -- How the right status gives up width: { 'tier', group, tier } takes a group to a
 -- narrower tier (a tier that is not narrower than the current one is skipped), { 'drop',
--- group } removes it (S = the sidebar toggle). The system group keeps its amounts
--- (tier 2) until the quota group is down to its compact tiers.
+-- group } removes it. The system group keeps its amounts (tier 2) until the quota group
+-- is down to its compact tiers. The mode pill is never dropped.
 local PLAN = {
-  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'drop', 'S' }, { 'tier', 'B', 4 },
+  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'tier', 'B', 4 },
   { 'tier', 'C', 3 }, { 'tier', 'C', 4 }, { 'tier', 'B', 5 }, { 'tier', 'C', 5 },
   { 'drop', 'C' }, { 'drop', 'B' },
 }
 
--- Right side of the header, in the cells the tabs leave over: [BROADCAST] [sidebar
--- toggle] B (Claude quota), C (system stats). Every group has tiers; PLAN says which one
--- narrows first.
+-- The pill shown while a key table is active, so a modal key never acts unseen.
+-- Broadcast types into every pane and is the one in red.
+local MODES = {
+  broadcast = { 'BROADCAST', theme.lerp(P.red, P.deep, 0.3) },
+  resize = { 'RESIZE', P.raised },
+  pane = { 'PANE', P.raised },
+  omp_account = { 'ACCOUNT 1-9', P.raised },
+}
+
+-- Right side of the header, in the cells the tabs leave over: [mode] B (Claude quota),
+-- C (system stats). Every group has tiers; PLAN says which one narrows first.
 wezterm.on('update-status', function(window)
   local dims = window:get_dimensions()
   local pixel_width = dims.pixel_width
@@ -219,7 +247,10 @@ wezterm.on('update-status', function(window)
     local parts = as.tab_parts {
       tab_title = t:get_title(),
       tab_id = t:tab_id(),
-      active_pane = { pane_id = ap:pane_id(), title = ap:get_title() },
+      active_pane = {
+        pane_id = ap:pane_id(), title = ap:get_title(),
+        current_working_dir = ap:get_current_working_dir(),
+      },
     }
     local _, _, w = tab_layout(parts, i - 1, cap)
     used = used + w
@@ -237,18 +268,19 @@ wezterm.on('update-status', function(window)
     C = { tiers = ss.visible() and ss.tiers() or {} },
   }
   local lead = {}
-  if window:active_key_table() == 'broadcast' then
+  local mode = MODES[window:active_key_table() or '']
+  if mode then
     lead[#lead + 1] = theme.pill({
       { Foreground = { Color = P.bright } }, { Attribute = { Intensity = 'Bold' } },
-      { Text = 'BROADCAST' },
-    }, '#c23b4a')
+      { Text = mode[1] },
+    }, mode[2])
   end
   sb.sync(window)
   local lead_w = 0
   for _, it in ipairs(lead) do lead_w = lead_w + theme.width(it) + 1 end
 
   for _, g in pairs(groups) do g.tier = 1 end
-  local function total()
+  local function needed()
     local w = lead_w
     for _, g in pairs(groups) do
       local t = g.tiers[g.tier]
@@ -257,13 +289,13 @@ wezterm.on('update-status', function(window)
     return w
   end
   for _, step in ipairs(PLAN) do
-    if total() <= avail then break end
+    if needed() <= avail then break end
     local g = groups[step[2]]
     if step[1] == 'tier' then
       local cur, to = g.tiers[g.tier], g.tiers[step[3]]
       if to and (not cur or to.w < cur.w) then g.tier = step[3] end
     elseif step[1] == 'drop' then
-      if step[2] == 'S' then lead_w, lead = 0, {} else g.tier = math.huge end
+      g.tier = math.huge
     end
   end
 
@@ -283,25 +315,27 @@ wezterm.on('update-status', function(window)
   window:set_right_status(wezterm.format(items))
 end)
 
--- The panels (bin/hivegrid-panel settings|usage|agents|monitor): an overlay over the tab
+-- The panels (bin/hivegrid-panel settings|usage|agents|monitor|hive): an overlay over the tab
 -- where this WezTerm has ShowOverlayCommand (the Hivegrid fork), a new tab on stock WezTerm.
+-- Every panel gets the pane it covers (--origin): inside the overlay WezTerm reports the
+-- overlay's own pane, and the hive (also reached from another panel's tab strip) needs the
+-- tab it was opened over.
 local panel_bin = os.getenv('HOME') .. '/.local/bin/hivegrid-panel'
 local function panel_action(name, extra)
-  local args = { panel_bin, name }
-  for _, a in ipairs(extra or {}) do args[#args + 1] = a end
-  local ok, action = pcall(function()
-    return act.ShowOverlayCommand { args = args, cwd = os.getenv('HOME') }
+  return wezterm.action_callback(function(window, pane)
+    local args = { panel_bin, name, '--origin', tostring(pane:pane_id()) }
+    for _, a in ipairs(extra or {}) do args[#args + 1] = a end
+    local ok, action = pcall(function()
+      return act.ShowOverlayCommand { args = args, cwd = os.getenv('HOME') }
+    end)
+    window:perform_action(ok and action or act.SpawnCommandInNewTab { args = args }, pane)
   end)
-  if ok then return action end
-  return act.SpawnCommandInNewTab { args = args }
 end
 local function settings_action() return panel_action('settings') end
--- The hive needs to know which pane it covers: inside the overlay WezTerm reports the
--- overlay's own pane, so the origin is passed on the command line (--origin).
 local function open_hive(window, pane)
-  window:perform_action(panel_action('hive', { '--origin', tostring(pane:pane_id()) }), pane)
+  window:perform_action(panel_action('hive'), pane)
 end
-local function hive_action() return wezterm.action_callback(open_hive) end
+local function hive_action() return panel_action('hive') end
 
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
@@ -323,24 +357,19 @@ wezterm.on('status-click', function(window, pane, id, button)
   end
 end)
 
--- Right-click on the "+" button opens this menu.
+-- New tabs with agents: LEADER (Ctrl+Space) then 1/2/3, and the first rows of the "+" menu.
 local grid = os.getenv('HOME') .. '/.local/bin/omp-grid'
-local function grid_entry(label, rows, cols)
-  return {
-    label = label,
-    args = { 'bash', '-ic', string.format('%s %d %d "$PWD"; exec bash', grid, rows, cols) },
-  }
+local function grid_args(rows, cols)
+  return { 'bash', '-ic', string.format('%s %d %d "$PWD"; exec bash', grid, rows, cols) }
 end
-config.launch_menu = {
-  { label = 'omp (single)', args = { 'bash', '-ic', 'omp; exec bash' } },
-  grid_entry('omp grid 2x2', 2, 2),
-  grid_entry('omp grid 3x3', 3, 3),
+local new_tabs = {
+  { label = 'New tab with omp', args = { 'bash', '-ic', 'omp; exec bash' } },
+  { label = 'New tab with an omp grid 2x2', args = grid_args(2, 2) },
+  { label = 'New tab with an omp grid 3x3', args = grid_args(3, 3) },
 }
-
--- Leader (Ctrl+Space) then 1/2/3 opens a new tab with the matching menu entry.
 local leader = S.key('leader', 'CTRL+Space')
 config.leader = { key = leader.key, mods = leader.mods, timeout_milliseconds = 1000 }
-for i, entry in ipairs(config.launch_menu) do
+for i, entry in ipairs(new_tabs) do
   table.insert(config.keys, {
     key = tostring(i),
     mods = 'LEADER',
@@ -348,13 +377,56 @@ for i, entry in ipairs(config.launch_menu) do
   })
 end
 
--- The "+" menu entry comes after the leader loop above so it gets no LEADER+<n> binding.
-for _, entry in ipairs {
-  { 'Hivegrid settings', 'settings' }, { 'Usage history', 'usage' },
-  { 'Agent overview', 'agents' }, { 'System monitor', 'monitor' },
-} do
-  table.insert(config.launch_menu, { label = entry[1], args = { panel_bin, entry[2] } })
+-- How a binding reads in a menu: "LEADER+,", "CTRL+SHIFT+E".
+local function key_hint(name, default)
+  local k = S.key(name, default)
+  return (k.mods and (k.mods:gsub('|', '+') .. '+') or '') .. k.key
 end
+
+-- Right-click on "+": the Hivegrid menu instead of WezTerm's launcher, which lists every
+-- domain and key assignment. Panels open as overlays here too, as from their keys.
+local function plus_menu(window, pane)
+  local rows = {}
+  for i, entry in ipairs(new_tabs) do
+    rows[#rows + 1] = { entry.label, 'LEADER+' .. i, function(w, p)
+      w:perform_action(act.SpawnCommandInNewTab { args = entry.args }, p)
+    end }
+  end
+  for _, entry in ipairs {
+    { 'Agent hive', 'hive', 'hive_panel', 'LEADER+a' },
+    { 'Hivegrid settings', 'settings', 'settings', 'LEADER+,' },
+    { 'Usage history', 'usage', 'usage_panel', 'LEADER+h' },
+    { 'Agent overview', 'agents' },
+    { 'System monitor', 'monitor' },
+  } do
+    rows[#rows + 1] = { entry[1], entry[3] and key_hint(entry[3], entry[4]) or '', function(w, p)
+      if entry[2] == 'hive' then return open_hive(w, p) end
+      w:perform_action(panel_action(entry[2]), p)
+    end }
+  end
+  local choices = {}
+  for i, row in ipairs(rows) do
+    choices[i] = { id = tostring(i), label = wezterm.format {
+      { Text = string.format('%-30s', row[1]) },
+      { Attribute = { Intensity = 'Half' } }, { Text = row[2] },
+    } }
+  end
+  window:perform_action(act.InputSelector {
+    title = 'Hivegrid',
+    description = 'Enter, click or the row number opens it. Esc closes.',
+    choices = choices,
+    action = wezterm.action_callback(function(w, p, id)
+      local row = id and rows[tonumber(id)]
+      if row then row[3](w, p) end
+    end),
+  }, pane)
+end
+
+wezterm.on('new-tab-button-click', function(window, pane, button)
+  if button ~= 'Right' then return end
+  plus_menu(window, pane)
+  return false
+end)
 
 -- Tab shape: the fancy bar draws a tab as a rounded-top box in the background colour of
 -- the title's first cell, so every cell of a title shares one background. The active
@@ -396,7 +468,7 @@ config.visual_bell = {
 wezterm.on('bell', function(window, pane)
   as.bell(window, pane)
   if not window:is_focused() or pane:pane_id() ~= window:active_pane():pane_id() then
-    window:toast_notification('WezTerm', 'Pane ' .. pane:pane_id() .. ': ' .. pane:get_title(), nil, 4000)
+    window:toast_notification('Hivegrid', 'Pane ' .. pane:pane_id() .. ': ' .. pane:get_title(), nil, 4000)
   end
 end)
 

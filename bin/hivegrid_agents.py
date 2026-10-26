@@ -6,8 +6,9 @@ Pure stdlib, no terminal I/O and no UI imports. Every mux call goes through an i
 
 State files: <state_dir()>/<pane>.json (written by the omp extension, see collect()).
 Command files: <state_dir()>/<pane>.cmd.<unique>.json (written here, consumed by the extension).
-Own bookkeeping (survives the short-lived overlay): acks.json {pane: done-since}, seen.json
-{pane: {state, since}} for title-derived states.
+Own bookkeeping (survives the short-lived overlay): acks.json {pane: done-since} (also written by
+config/agentstatus.lua when you look at a done pane), seen.json {pane: {state, since, agent}} for
+title-derived states and for remembering that an agent ran in a pane (a shell there is `exited`).
 """
 import base64
 import json
@@ -29,10 +30,10 @@ EQUALIZE_VAR = "hivegrid_hive_equalize"
 PLAN_CHOICES = ("execute", "compact", "keep", "refine", "save")
 SHELLS = {"bash", "zsh", "fish", "sh", "dash"}
 AGENT_PROCS = {"omp", "claude", "codex", "gemini", "aider", "opencode"}
-# Chrome = panes that are never part of the agent grid: the sidebar bar (bash running the
-# wezterm-sidebar script), its views (yazi, hivegrid-git, lazygit; config/sidebar.lua) and the
-# overview dock (hivegrid-overview; config/overview.lua).
-CHROME_MARKERS = ("hivegrid-overview", "wezterm-sidebar", "hivegrid-git", "hivegrid-panel")
+# Chrome = panes that are never part of the agent grid: the sidebar bar (hivegrid-bar), its
+# views (yazi, hivegrid-git, lazygit; config/sidebar.lua), the overview dock (hivegrid-overview;
+# config/overview.lua) and the panels.
+CHROME_MARKERS = ("hivegrid-overview", "hivegrid-bar", "hivegrid-git", "hivegrid-panel")
 CHROME_PROGS = {"yazi", "lazygit"}
 
 # Mirrors config/agentstatus.lua TITLE_WORKING / SPIN.
@@ -178,13 +179,15 @@ class Agent:
     state: str                    # working|busy|done|idle|attention|exited
     reason: str = ""
     since: float = 0.0
-    source: str = "title"         # "ext"|"title"|"scrape"
+    source: str = "title"         # "ext"|"title"|"scrape"|"shell" (an agent ran here and quit)
     pid: int = None
     session_id: str = None
     pending: dict = None
     active: bool = False          # focused pane of its tab
     profile: str = None
     error: str = None
+    num: int = 0                  # reading-order number in its tab (the dock's and picker's digits)
+    tab_index: int = 1            # position of its tab in the window, from 1 (the picker's "tab N")
 
 
 def omp_title(title):
@@ -235,6 +238,32 @@ def _tty(pane):
     return str(pane.get("tty_name", "")).replace("/dev/", "")
 
 
+def _numbering(panes, fg):
+    """({pane id: reading-order number among the non-chrome panes of its tab},
+    {tab id: position of the tab in its window, from 1}). The same digits as the overview dock
+    and the pane picker (config/agentstatus.lua, panemap.numbering); `wezterm cli list` lists
+    tabs in window order."""
+    by_tab, tab_index, per_window = {}, {}, {}
+    for p in panes:
+        tab, win = int(p.get("tab_id", 0)), int(p.get("window_id", 0))
+        if tab not in tab_index:
+            per_window[win] = per_window.get(win, 0) + 1
+            tab_index[tab] = per_window[win]
+        _, comm, _, args = fg.get(_tty(p), (None, "", 0, ""))
+        if not is_chrome(comm, args):
+            by_tab.setdefault(tab, []).append(p)
+    nums = {}
+    for tab_panes in by_tab.values():
+        for n, p in enumerate(_reading_order(tab_panes), 1):
+            nums[p["pane_id"]] = n
+    return nums, tab_index
+
+
+def _same_time(a, b):
+    """Two epoch seconds that went through JSON (Python's and WezTerm's encoders) are equal."""
+    return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) < 1e-3
+
+
 # ---------------------------------------------------------------- collect
 
 def collect(run=wezterm_cli, now=time.time, fg=None):
@@ -259,20 +288,26 @@ def _collect(run, now, fg):
     live_ids = {p["pane_id"] for p in panes}
     seen_dirty = False
     agents = []
+    nums, tab_index = _numbering(panes, fg)
 
     for p in sorted(panes, key=lambda p: p["pane_id"]):
         pid_ = p["pane_id"]
         fpid, comm, _etimes, args = fg.get(_tty(p), (None, "", 0, ""))
         if is_chrome(comm, args):
             continue
+        prev = seen.get(str(pid_))
+        prev = prev if isinstance(prev, dict) else {}
         raw = _read_json(os.path.join(d, f"{pid_}.json"))
         sf = raw if isinstance(raw, dict) and raw.get("state") in STATES + ("exited",) else None
+        if sf is not None and comm and comm not in SHELLS and not _pid_alive(sf.get("pid")):
+            sf = None  # the agent that wrote it is gone and something else runs here now
         raw_title = str(p.get("title", ""))
         title_state, heading = omp_title(raw_title)
         agent = Agent(
             pane=pid_, tab=int(p.get("tab_id", 0)), window=int(p.get("window_id", 0)),
             cwd=_cwd_path(p.get("cwd")), title=heading or raw_title, state="idle",
             since=t, source="title", active=bool(p.get("is_active")), profile=_profile(args) if comm == "omp" else None,
+            num=nums.get(pid_, 0), tab_index=tab_index.get(int(p.get("tab_id", 0)), 1),
         )
         if sf is not None:
             alive = _pid_alive(sf.get("pid"))
@@ -297,28 +332,31 @@ def _collect(run, now, fg):
                 agent.since = None
             else:
                 agent.state = sf["state"] if sf["state"] != "exited" else "idle"
-                if agent.state == "done" and acks.get(str(pid_)) == agent.since:
+                if agent.state == "done" and _same_time(acks.get(str(pid_)), agent.since):
                     agent.state = "idle"
-        elif title_state or comm == "omp" or raw_title.startswith("π"):
-            if comm in SHELLS:
-                continue  # omp is gone, a stale title lingers
+        elif (title_state or comm == "omp" or raw_title.startswith("π")) and comm not in SHELLS:
             agent.state = title_state or "idle"
             agent.source = "title"
             agent.since = None
             agent.pid = fpid if comm == "omp" else None
         elif comm in AGENT_PROCS:
             agent.state, agent.source, agent.since, agent.pid = "idle", "scrape", None, fpid
+        elif comm in SHELLS and prev.get("agent"):
+            # the agent quit and left its shell (omp removes its state file on a clean exit)
+            agent.state, agent.source, agent.since = "exited", "shell", None
         else:
-            continue  # plain shell / unrelated program
+            continue  # plain shell (no agent ran here) / unrelated program
 
         if agent.since is None:  # title/scrape-derived: first time this state was seen
-            prev = seen.get(str(pid_))
-            if isinstance(prev, dict) and prev.get("state") == agent.state and isinstance(prev.get("since"), (int, float)):
+            if prev.get("state") == agent.state and isinstance(prev.get("since"), (int, float)):
                 agent.since = float(prev["since"])
             else:
                 agent.since = t
-                seen[str(pid_)] = {"state": agent.state, "since": t}
+                seen[str(pid_)] = {"state": agent.state, "since": t, "agent": True}
                 seen_dirty = True
+        elif not prev.get("agent"):
+            seen[str(pid_)] = {"agent": True}
+            seen_dirty = True
         agents.append(agent)
 
     # bookkeeping: drop what belongs to vanished panes (only trust a non-empty listing)
@@ -653,13 +691,17 @@ def _split_new(run, target_pane, cmd, cwd):
 def spawn_agent(cwd=None, near=None, run=wezterm_cli, out=None):
     """Start the agent command (HIVEGRID_AGENT_CMD, default omp; run as `bash -ic '<cmd>; exec
     bash'`) in a new pane of the origin tab, always: the pane is split off the last grid pane and
-    the tab is re-gridded (arrange). `near` only supplies the default cwd. Returns the new pane id
-    or None."""
-    cwd = cwd or (near.cwd if near is not None and near.cwd else None) or os.environ.get("HOME", "/")
+    the tab is re-gridded (arrange). The directory is `cwd`, else `near`'s, else the one of the pane
+    the hive was opened over, else $HOME. Returns the new pane id or None."""
     o = origin(run)
     if o is None:
         return None
     focus, tab, _window = o
+    if not cwd and near is not None and near.cwd:
+        cwd = near.cwd
+    if not cwd:
+        here = next((p for p in _list_panes(run) or [] if p["pane_id"] == focus), None)
+        cwd = (_cwd_path(here.get("cwd")) if here else "") or os.environ.get("HOME", "/")
     cmd = _agent_command()
     new = None
     for attempt in (0, 1):

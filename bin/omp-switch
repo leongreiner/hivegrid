@@ -161,8 +161,12 @@ def transfer(session, src, dst):
         elif mine.startswith(theirs):
             fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".omp-switch.")
             os.close(fd)
-            shutil.copy2(session, tmp)
-            os.replace(tmp, target)  # the target held an older part of this chat
+            try:
+                shutil.copy2(session, tmp)
+                os.replace(tmp, target)  # the target held an older part of this chat
+            except OSError:
+                os.unlink(tmp)
+                raise
         else:
             raise Failure(f"profile {dst} already has a different chat under this session name")
     else:

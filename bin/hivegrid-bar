@@ -8,9 +8,15 @@ above the last one). A left click announces the button as the user var `sidebar_
 view is open are highlighted: the view comes from the state file
 $XDG_RUNTIME_DIR/wezterm-sidebar-$WEZTERM_PANE ("<open|closed> <files|git>", written by the
 config), the dock from "<state file>.ov". The pointer becomes a hand over the buttons (OSC 22) and
-the hovered button fades to a lighter shade (about 150 ms in, 200 ms out). The Hivegrid build tells
-the bar when the pointer leaves it (DEC private mode 8800, a motion report at column 0, row 0),
-so the hover also ends then; without it the hover ends at the next motion inside the bar.
+the hovered button fades in a rounded chip of a lighter shade (about 150 ms in, 200 ms out); an
+open view's button keeps a raised chip and an accent stripe at the window edge. The Hivegrid build
+tells the bar when the pointer leaves it (DEC private mode 8800, a motion report at column 0,
+row 0), so the hover also ends then; without it the hover ends at the next motion inside the bar.
+
+The bar sets its surface as the pane's default background (OSC 11), so WezTerm paints the window
+padding above and below it in that colour, and follows the saved theme (settings.json) without a
+restart. The user vars hivegrid_no_focus and hivegrid_no_dim ask the Hivegrid build not to give it
+the keyboard on a click and not to dim it as an inactive pane.
 
 Icons are drawn with PIL from the Symbols Nerd Font as inline images, large and crisp; without
 PIL or the font they are the same glyphs as text, one cell high.
@@ -30,21 +36,30 @@ import tty
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from hivegrid_ui import cell_pixels, decode, iterm_image, mix, sgr_color  # noqa: E402
+from hivegrid_ui import (  # noqa: E402
+    cell_pixels, decode, images_enabled, iterm_image, mix, sgr_color, split_complete,
+)
 
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:  # noqa: BLE001 - any import problem means text icons
     Image = None
 
+try:
+    from hivegrid_settings_core import ThemeWatch  # noqa: E402
+except Exception:  # noqa: BLE001 - without it the bar keeps the colours it was started with
+    ThemeWatch = None
+
 BUTTONS = ("files", "git", "overview", "settings")
 GLYPHS = {"files": "\uf07c", "git": "\ue725", "overview": "\uf0ca", "settings": "\uf013"}
 FONT_NAME = "SymbolsNerdFontMono-Regular.ttf"
+SS = 4  # supersampling of the button shapes
 STEPS = 8  # shades between rest and full hover: at most this many icon images per button
 HOVER_BLEND = 0.45  # share of the way from surface to raised that the hovered background reaches
 FADE_IN, FADE_OUT = 0.15, 0.20  # seconds from rest to full hover and back
 FRAME = 1 / 30  # seconds between frames while a fade runs
 IDLE = 0.3  # seconds between looks at the state files while nothing animates
+THEME_POLL = 1.0  # seconds between looks at the saved theme
 FONT_DIRS = (
     os.environ.get("HIVEGRID_ICON_FONT_DIR", ""),
     os.path.expanduser("~/.local/share/hivegrid"),
@@ -102,23 +117,60 @@ class Bar:
         self.clock = None  # time of the last fade step; None while no fade runs
         self.drawn = {}  # button -> (hot, step) as on screen
         self.serial = 0
-        self.font_path = find_font() if Image else None
+        self.font_path = find_font() if Image and images_enabled() else None
         self.icons = {}
+        self.theme = ThemeWatch() if ThemeWatch else None
+        self.theme_at = 0.0  # time of the last look at the saved theme
+
+    def restyle(self, now):
+        """Takes the saved theme's colours (a Save in the settings panel) at most once a second;
+        True when they changed, so the caller repaints everything."""
+        if not self.theme or now - self.theme_at < THEME_POLL:
+            return False
+        self.theme_at = now
+        try:
+            palette = self.theme.poll()
+        except Exception:  # noqa: BLE001 - a half-written settings file: keep the colours
+            return False
+        new = {k: palette.get(k, v) for k, v in self.c.items()} if palette else self.c
+        if new == self.c:
+            return False
+        self.c = new
+        self.icons.clear()
+        self.out.write(f"\x1b]11;{self.c['surface']}\x07")
+        return True
 
     # drawing ------------------------------------------------------------------
-    def icon_png(self, name, step, w, h):
-        """The icon in the shade `step` (0 dim .. STEPS bright), cached per name, step and size."""
-        key = (name, step, w, h)
+    def button_png(self, name, hot, step, cw, ch, cols):
+        """The whole button as one image, cols x 3 cells: a rounded chip in the hover or open
+        shade, the accent stripe at the left edge when open, the icon centred. The chip keeps
+        the same margin to the window edge and to the divider, which sits half a cell right
+        of the bar's last column. Cached per name, shade and size."""
+        key = (name, hot, step, cw, ch, cols)
         if key not in self.icons:
-            size = max(int(min(w, h) * 0.8), 8)
-            font = ImageFont.truetype(self.font_path, size)
-            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            w, h = cols * cw, 3 * ch
+            half = cw // 2
+            t = step / STEPS
+            inset = max(ch // 8, 2)
+            # The shapes are drawn at SS times the size and scaled down: PIL does not smooth
+            # the corners of a rounded rectangle.
+            shapes = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+            sd = ImageDraw.Draw(shapes)
+            if hot or step:
+                bg = self.c["raised"] if hot else mix(self.c["surface"], self.c["raised"], HOVER_BLEND * t)
+                sd.rounded_rectangle((half * SS, inset * SS, w * SS - 1, (h - inset) * SS - 1),
+                                     radius=max(cw * 3 // 4, 3) * SS, fill=bg)
+            if hot:
+                sd.rounded_rectangle((-SS * 2, inset * SS, max(cw * 3 // 8, 2) * SS - 1, (h - inset) * SS - 1),
+                                     radius=SS * 2, fill=self.c["accent"])
+            img = shapes.resize((w, h), Image.BOX)  # an exact average: no ringing at the edges
             draw = ImageDraw.Draw(img)
+            font = ImageFont.truetype(self.font_path, max(int(min(w - half, h) * 0.7), 8))
             glyph = GLYPHS[name]
             box = draw.textbbox((0, 0), glyph, font=font)
-            x = (w - (box[2] - box[0])) // 2 - box[0]
+            x = (w + half - (box[2] - box[0])) // 2 - box[0]
             y = (h - (box[3] - box[1])) // 2 - box[1]
-            draw.text((x, y), glyph, font=font, fill=mix(self.c["dim"], self.c["bright"], step / STEPS))
+            draw.text((x, y), glyph, font=font, fill=self.c["bright"] if hot else mix(self.c["dim"], self.c["bright"], t))
             buf = io.BytesIO()
             img.save(buf, "PNG")
             self.icons[key] = buf.getvalue()
@@ -134,27 +186,27 @@ class Bar:
     def button(self, name, top, cols, cw, ch, hot, step):
         """Escape sequences that paint one button: three rows and its icon."""
         e = "\x1b"
+        if self.font_path and cols > 1:
+            buf = [f"{e}[{top + y + 1};1H{e}[0;{sgr_color(self.c['surface'], True)}m{' ' * cols}" for y in range(3)]
+            png = self.button_png(name, hot, step, cw, ch, cols)
+            # doNotMoveCursor keeps the next row's cursor move independent of the image.
+            buf.append(f"{e}[{top + 1};1H" + iterm_image(png, cols, 3).replace(
+                "inline=1;", "inline=1;doNotMoveCursor=1;", 1))
+            return "".join(buf)
+        # Text fallback: the cells carry the shade, the open button a left stripe.
         if hot:
             bg, fg, mark = self.c["raised"], self.c["bright"], "▎"
         else:
             t = step / STEPS
             bg = mix(self.c["surface"], self.c["raised"], HOVER_BLEND * t)
             fg, mark = mix(self.c["dim"], self.c["bright"], t), " "
-        buf = []
-        for y in range(3):
-            buf.append(
-                f"{e}[{top + y + 1};1H{e}[0;{sgr_color(bg, True)};{sgr_color(self.c['accent'], False)}m"
-                f"{mark}{' ' * (cols - 1)}"
-            )
-        if self.font_path and cols > 1:
-            png = self.icon_png(name, step, (cols - 1) * cw, 3 * ch)
-            # doNotMoveCursor keeps the next row's cursor move independent of the image.
-            buf.append(f"{e}[{top + 1};2H" + iterm_image(png, cols - 1, 3).replace(
-                "inline=1;", "inline=1;doNotMoveCursor=1;", 1))
-        else:
-            buf.append(
-                f"{e}[{top + 2};{(cols + 1) // 2}H{e}[0;1;{sgr_color(bg, True)};{sgr_color(fg, False)}m{GLYPHS[name]}"
-            )
+        buf = [
+            f"{e}[{top + y + 1};1H{e}[0;{sgr_color(bg, True)};{sgr_color(self.c['accent'], False)}m{mark}{' ' * (cols - 1)}"
+            for y in range(3)
+        ]
+        buf.append(
+            f"{e}[{top + 2};{(cols + 1) // 2}H{e}[0;1;{sgr_color(bg, True)};{sgr_color(fg, False)}m{GLYPHS[name]}"
+        )
         return "".join(buf)
 
     def draw(self, rows, cols, state, full):
@@ -230,10 +282,21 @@ class Bar:
         try:
             tty.setraw(self.fd)
             self.out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
-            self.out.write("\x1b]1337;SetUserVar=hivegrid_bar=" + base64.b64encode(b"1").decode() + "\x07")
+            # The surface as the pane's default background (OSC 11): WezTerm fills the window
+            # padding above and below an edge pane and the leftover pixels beside its last
+            # column with that colour, so the bar runs from the header to the bottom border.
+            self.out.write(f"\x1b]11;{self.c['surface']}\x07")
+            one = base64.b64encode(b"1").decode()
+            # hivegrid_bar marks the pane for the config and the fork. On the Hivegrid build,
+            # hivegrid_no_focus keeps a click here from taking the keyboard from the grid,
+            # hivegrid_no_dim keeps inactive_pane_hsb off, so the bar shows the theme's colours,
+            # and hivegrid_fixed_width keeps its columns when the tab is resized.
+            self.out.write("".join(f"\x1b]1337;SetUserVar={var}={one}\x07" for var in (
+                "hivegrid_bar", "hivegrid_no_focus", "hivegrid_no_dim", "hivegrid_fixed_width")))
             self.out.flush()
             signal.signal(signal.SIGWINCH, lambda *_: resized.update(v=True))
             path = state_path()
+            pending = b""  # an escape sequence the last read cut off
             while self.running:
                 try:
                     size = os.get_terminal_size(self.out.fileno())
@@ -241,7 +304,10 @@ class Bar:
                 except OSError:
                     cols, rows = 5, 24
                 state = read_state(path)
-                busy = self.advance(time.monotonic())
+                now = time.monotonic()
+                if self.restyle(now):
+                    resized["v"] = True
+                busy = self.advance(now)
                 self.draw(rows, cols, state, resized["v"])
                 resized["v"] = False
                 try:
@@ -252,11 +318,12 @@ class Bar:
                     data = os.read(self.fd, 4096)
                     if not data:
                         break
-                    for ev in decode(data):
+                    head, pending = split_complete(pending + data)
+                    for ev in decode(head):
                         self.handle(ev, rows)
         finally:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
-            self.out.write("\x1b]22;\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l")
+            self.out.write("\x1b]22;\x07\x1b]111\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l")
             self.out.flush()
             for p in (state_path(), state_path() + ".ov"):
                 try:

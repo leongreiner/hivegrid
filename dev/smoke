@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# End-to-end smoke test in the QA sandbox (dev/qa/hgq, slot 11; local only, CI has no Xvfb or
+# fork build): starts Hivegrid, opens the bar's views and the overview dock with their keys,
+# checks that the panes appear and go away in `hgq cli 11 list`, saves a screenshot of every
+# state and fails on Lua errors in the GUI log. The slot is stopped at the end, pass or fail.
+#
+#   dev/smoke [--keep]       --keep leaves slot 11 running for a look (hgq down 11 stops it)
+#
+# Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst, ~/.local/opt/hivegrid-wezterm).
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 2
+SLOT=11
+KEEP=${1:-}
+# Never the live Hivegrid: hgq builds its own environment, these must not leak into checks.
+unset WEZTERM_PANE WEZTERM_UNIX_SOCKET
+HGQ=dev/qa/hgq
+SHOTS=${HGQ_ROOT:-/tmp/hivegrid-qa}/s$SLOT/shots/smoke
+fails=0
+
+for t in Xvfb xwininfo import; do
+  command -v "$t" >/dev/null || { echo "smoke: $t is not installed" >&2; exit 2; }
+done
+[ -x "${HG_WEZTERM_DIR:-$HOME/.local/opt/hivegrid-wezterm}/wezterm-gui" ] ||
+  { echo "smoke: no fork build (HG_WEZTERM_DIR)" >&2; exit 2; }
+
+cleanup() { [ "$KEEP" = --keep ] || "$HGQ" down "$SLOT" >/dev/null; }
+trap cleanup EXIT
+
+# One line per pane of tab 0: "id left cols title", ordered left to right.
+panes() {
+  "$HGQ" cli "$SLOT" list --format json 2>/dev/null | python3 -c '
+import json, sys
+rows = [p for p in json.load(sys.stdin) if p["tab_id"] == 0]
+for p in sorted(rows, key=lambda p: (p["left_col"], p["top_row"])):
+    print(p["pane_id"], p["left_col"], p["size"]["cols"], p["title"])'
+}
+
+# expect NAME PYTHON-CONDITION: polls (10 s) until the condition over `ps` (list of
+# (id, left, cols, title)) holds, then saves a screenshot.
+expect() {
+  local name=$1 cond=$2 out
+  for _ in $(seq 40); do
+    out=$(panes)
+    if printf '%s\n' "$out" | python3 -c '
+import sys
+ps = [(int(a), int(b), int(c), d) for a, b, c, d in ((l.rstrip("\n").split(" ", 3) + [""])[:4] for l in sys.stdin if l.strip())]
+sys.exit(0 if ('"$cond"') else 1)'; then
+      "$HGQ" shot "$SLOT" "$SHOTS/$name.png" >/dev/null
+      echo "ok   $name"
+      return 0
+    fi
+    sleep 0.25
+  done
+  "$HGQ" shot "$SLOT" "$SHOTS/$name.FAILED.png" >/dev/null
+  echo "FAIL $name: panes were:"
+  printf '       %s\n' "$out"
+  fails=$((fails + 1))
+  return 1
+}
+
+key() { "$HGQ" x "$SLOT" key "$@"; }
+
+"$HGQ" down "$SLOT" >/dev/null 2>&1 || true
+rm -rf "$SHOTS" && mkdir -p "$SHOTS"
+"$HGQ" up "$SLOT" 1600 1000 || exit 1
+"$HGQ" focus "$SLOT"
+
+# The bar is a narrow pane at the left edge, the shell fills the rest.
+expect start 'len(ps) == 2 and ps[0][1] == 0 and ps[0][2] <= 8 and ps[1][2] > 100'
+key ctrl+f
+expect explorer 'len(ps) == 3 and ps[1][3].startswith("Yazi")'
+# The git view replaces the explorer in the same place.
+key ctrl+g
+expect gitview 'len(ps) == 3 and not any(p[3].startswith("Yazi") for p in ps) and ps[1][1] < ps[2][1]'
+key ctrl+space o
+expect overview 'len(ps) == 4 and ps[-1][2] < ps[-2][2]'
+key ctrl+space o
+expect overview-closed 'len(ps) == 3'
+key ctrl+space Tab
+expect sidebar-hidden 'len(ps) == 2 and ps[0][2] <= 8'
+key ctrl+space Tab
+expect sidebar-shown 'len(ps) == 3'
+
+# Lua errors of the config (a module that broke at load or in an event handler).
+if grep -E 'ERROR .*(runtime error|syntax error|lua)' "${HGQ_ROOT:-/tmp/hivegrid-qa}/s$SLOT/wezterm.log"; then
+  echo "FAIL lua errors in the GUI log (above)"
+  fails=$((fails + 1))
+else
+  echo "ok   no Lua errors in the GUI log"
+fi
+
+echo "screenshots: $SHOTS"
+if [ "$fails" -gt 0 ]; then
+  echo "smoke: $fails failed"
+  exit 1
+fi
+echo "smoke passed"

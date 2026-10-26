@@ -11,13 +11,36 @@ return function(config, wezterm)
   local theme = require 'theme'
   local P = theme.P
   local CPU_MEM_TTL, GPU_TTL, DISK_TTL, GPU_RETRY = 2, 3, 30, 60
-  local JETSON_LOAD = { '/sys/devices/platform/gpu.0/load', '/sys/devices/gpu.0/load' }
+  -- HIVEGRID_PROC_DIR / HIVEGRID_SYS_DIR point the readers at fixture trees in tests.
+  local PROC = os.getenv('HIVEGRID_PROC_DIR') or '/proc'
+  local SYS = os.getenv('HIVEGRID_SYS_DIR') or '/sys'
+  local JETSON_LOAD = { SYS .. '/devices/platform/gpu.0/load', SYS .. '/devices/gpu.0/load' }
 
   local cpu = { prev_total = nil, prev_idle = nil, t = 0, pct = nil }
   local mem = { t = 0, total = nil, avail = nil }
   local disk = { t = 0, pct = nil, free_kib = nil }
   local gpu = { t = 0, kind = nil, retry_at = 0, util = nil, used_mib = nil, total_mib = nil }
   local last_spawn = 0
+
+  -- A config reload (a settings save, an edited .lua) rebuilds this module; the last
+  -- samples survive it in wezterm.GLOBAL so the header does not lose CPU (which needs two
+  -- readings) and DSK (spawned at most once a second) for the next few ticks.
+  local SAVED = { cpu = cpu, mem = mem, disk = disk, gpu = gpu }
+  do
+    local ok, saved = pcall(wezterm.json_parse, wezterm.GLOBAL.sysstats_state or '')
+    if ok and type(saved) == 'table' then
+      for name, t in pairs(SAVED) do
+        for k, v in pairs(type(saved[name]) == 'table' and saved[name] or {}) do t[k] = v end
+      end
+    end
+  end
+  local saved_stamp
+  local function save()
+    local stamp = cpu.t .. ':' .. mem.t .. ':' .. disk.t .. ':' .. gpu.t .. ':' .. tostring(gpu.kind)
+    if stamp == saved_stamp then return end
+    saved_stamp = stamp
+    wezterm.GLOBAL.sysstats_state = wezterm.json_encode(SAVED)
+  end
 
   -- Pure parsers -----------------------------------------------------------
 
@@ -82,7 +105,7 @@ return function(config, wezterm)
 
   local function refresh_cpu(now)
     if now - cpu.t < CPU_MEM_TTL then return end
-    local total, idle = parse_cpu(slurp('/proc/stat'))
+    local total, idle = parse_cpu(slurp(PROC .. '/stat'))
     if not total then return end
     -- After a long gap (segment hidden) the delta would average idle history: rebaseline.
     if cpu.prev_total and now - cpu.t <= 10 and total > cpu.prev_total then
@@ -93,7 +116,7 @@ return function(config, wezterm)
 
   local function refresh_mem(now)
     if now - mem.t < CPU_MEM_TTL then return end
-    local total, avail = parse_meminfo(slurp('/proc/meminfo'))
+    local total, avail = parse_meminfo(slurp(PROC .. '/meminfo'))
     if total then mem.total, mem.avail, mem.t = total, avail, now end
   end
 
@@ -158,6 +181,7 @@ return function(config, wezterm)
     refresh_mem(now)
     local spawned = refresh_gpu(now)
     if not spawned then refresh_disk(now) end
+    save()
   end
 
   -- Model and rendering -----------------------------------------------------

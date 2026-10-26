@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Hivegrid QA sandbox: an isolated Hivegrid (the fork build + this repo's config/ and bin/) on
+# its own Xvfb display, with a sandbox HOME, XDG_RUNTIME_DIR and mux socket, so a running
+# Hivegrid is never touched. The sandbox ~/.config/wezterm is a symlink to REPO/config, so Lua
+# edits reload on their own; bin/ edits apply to programs started afterwards.
+#
+#   hgq up SLOT [W H]        start Xvfb :(90+SLOT) and Hivegrid, window W x H (default 1920x1080)
+#   hgq down SLOT            stop it (and every program whose HOME is the sandbox)
+#   hgq restart SLOT [W H]   down + up (keeps the sandbox HOME, settings.json included)
+#   hgq env SLOT             print exports (eval "$(hgq env 1)") for DISPLAY, HOME, socket, ...
+#   hgq shot SLOT OUT.png [WxH+X+Y]           screenshot (optionally cropped)
+#   hgq zoom SLOT OUT.png WxH+X+Y [SCALE%]    cropped and enlarged (default 300%) for details
+#   hgq cli SLOT ARGS...     wezterm cli against the sandbox (list, split-pane, send-text, get-text ...)
+#   hgq x SLOT ARGS...       synthetic input: move/click/down/up/drag/scroll/key/type (see xin.py)
+#   hgq resize SLOT W H      resize the Hivegrid window within the screen
+#   hgq focus SLOT           give the window X focus again (WezTerm drops clicks while unfocused)
+#   hgq win SLOT             print the Hivegrid window id and geometry
+#   hgq log SLOT [N]         print the wezterm-gui log tail (Lua errors land there)
+#   hgq sh SLOT CMD...       run CMD with the sandbox environment
+#
+# A slot lives in $HGQ_ROOT/sSLOT/{home,run,work,shots} (HGQ_ROOT default /tmp/hivegrid-qa);
+# work/ is scratch space for fixture repos and files. The sandbox HOME links to the real ~/.omp,
+# ~/.claude*, ~/.config/gh, ~/.config/lazygit, ~/.gitconfig, the quota cache and the shell init
+# files, so omp, gh, lazygit and the quota chips work; settings.json is a copy. omp sessions
+# started in a sandbox therefore land in the real omp history.
+# Overrides: HG_WEZTERM_DIR (a fork build, default ~/.local/opt/hivegrid-wezterm; deploy a test
+# build with OPT=/tmp/x WRAPPER=/tmp/x/hivegrid wezterm/build-hivegrid.sh), HIVEGRID_REPO,
+# HGQ_ROOT, HGQ_PROJECTS (linked as ~/Projects, default ~/Projects).
+# Needs Xvfb, xwininfo, ImageMagick (import) and libXtst.
+set -euo pipefail
+HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+REPO=${HIVEGRID_REPO:-$(cd "$HERE/../.." && pwd)}
+QA=${HGQ_ROOT:-/tmp/hivegrid-qa}
+REAL=$HOME
+case $REAL in "$QA"/*) echo "hgq: run it from the real HOME, not inside a sandbox" >&2; exit 2 ;; esac
+D=${HG_WEZTERM_DIR:-$REAL/.local/opt/hivegrid-wezterm}
+PROJECTS=${HGQ_PROJECTS:-$REAL/Projects}
+XIN=$HERE/xin.py
+
+slot=${2:-}
+cmd=${1:-help}
+case $cmd in help | -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;; esac
+[[ $slot =~ ^[0-9]+$ ]] || { echo "hgq: SLOT (a number) required; hgq help" >&2; exit 2; }
+S=$QA/s$slot
+H=$S/home
+RUN=$S/run
+DISP=:$((90 + slot))
+
+# The sandbox starts from an empty environment plus a few variables, like a desktop launch:
+# the calling shell (often an agent's) carries NO_COLOR, CI, PAGER, GIT_* and the like, which
+# would leak into every pane and change how lazygit, omp, yazi and the shells look.
+sandbox_env() {
+  local keep=() v
+  for v in USER LOGNAME SHELL LANG LANGUAGE $(compgen -e | grep '^LC_' || true); do
+    [ -n "${!v:-}" ] && keep+=("$v=${!v}")
+  done
+  ENV=(env -i "${keep[@]}" HOME="$H" XDG_RUNTIME_DIR="$RUN" DISPLAY="$DISP"
+    LD_LIBRARY_PATH="$D/lib"
+    PATH="$H/.local/bin:$D:$REAL/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+  local sock
+  sock=$(ls -t "$RUN"/wezterm/gui-sock-* 2>/dev/null | head -1 || true)
+  [ -n "$sock" ] && [ "${1:-}" != nosock ] && ENV+=(WEZTERM_UNIX_SOCKET="$sock")
+  return 0
+}
+
+link() { [ -e "$1" ] || [ -L "$1" ] || return 0; mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; }
+
+prepare_home() {
+  mkdir -p "$H/.config/hivegrid" "$H/.local/bin" "$H/.cache" "$H/.local/share" "$S/work" "$S/shots"
+  mkdir -p "$RUN" && chmod 700 "$RUN"
+  link "$REPO/config" "$H/.config/wezterm"
+  link "$REPO/config/yazi" "$H/.config/hivegrid/yazi"
+  [ -f "$H/.config/hivegrid/settings.json" ] ||
+    cp "$REAL/.config/hivegrid/settings.json" "$H/.config/hivegrid/settings.json" 2>/dev/null || true
+  for f in "$REPO"/bin/*; do
+    case $f in *__pycache__*) continue ;; esac
+    link "$f" "$H/.local/bin/$(basename "$f")"
+  done
+  for t in yazi ya lazygit gh omp claude uv uvx; do link "$REAL/.local/bin/$t" "$H/.local/bin/$t"; done
+  link "$REAL/.omp" "$H/.omp"
+  for c in "$REAL"/.claude "$REAL"/.claude-* "$REAL"/.claude.json; do link "$c" "$H/$(basename "$c")"; done
+  # Shell init and what it sources; atuin keeps its own (sandbox) history database.
+  for c in .bashrc .profile .cargo .rustup .nvm .bun .atuin .bash-preexec.sh .gitconfig; do
+    link "$REAL/$c" "$H/$c"
+  done
+  for c in atuin gh lazygit; do link "$REAL/.config/$c" "$H/.config/$c"; done
+  touch "$H/.sudo_as_admin_successful" "$H/.hushlogin"
+  link "$REAL/.cache/wezterm-claude-quota" "$H/.cache/wezterm-claude-quota"
+  link "$REAL/.local/share/hivegrid" "$H/.local/share/hivegrid"
+  link "$REAL/.local/share/wezterm" "$H/.local/share/wezterm"
+  link "$REAL/.local/share/fonts" "$H/.local/share/fonts"
+  link "$REAL/.fonts" "$H/.fonts"
+  link "$PROJECTS" "$H/Projects"
+}
+
+window_id() {
+  # The main window; WezTerm's "Configuration Error" windows share its class.
+  DISPLAY=$DISP xwininfo -root -tree 2>/dev/null |
+    awk '/"org.wezfurlong.wezterm"/ && !/Configuration Error/ {print $1; exit}'
+}
+
+up() {
+  local w=${3:-1920} h=${4:-1080}
+  prepare_home
+  if ! DISPLAY=$DISP xwininfo -root >/dev/null 2>&1; then
+    # Own session, so a caller's timeout (a process-group kill) leaves the display alone.
+    setsid Xvfb "$DISP" -screen 0 "${w}x${h}x24" -nolisten tcp +extension GLX +extension RANDR \
+      </dev/null >"$S/xvfb.log" 2>&1 &
+    echo $! >"$S/xvfb.pid"
+    for _ in $(seq 50); do DISPLAY=$DISP xwininfo -root >/dev/null 2>&1 && break; sleep 0.1; done
+  fi
+  sandbox_env nosock
+  # A plain backgrounded command (no `&&` list): bash then forks straight into setsid, so no
+  # intermediate shell keeps waiting on wezterm-gui while holding the caller's stdout pipe.
+  (cd "$H" || exit 1
+    setsid "${ENV[@]}" "$D/wezterm-gui" --config enable_wayland=false \
+      --config "front_end=\"Software\"" start --always-new-process --cwd "$H" \
+      </dev/null >"$S/wezterm.log" 2>&1 &
+    echo $! >"$S/wezterm.pid")
+  local id=""
+  for _ in $(seq 100); do id=$(window_id); [ -n "$id" ] && break; sleep 0.1; done
+  [ -n "$id" ] || { echo "hgq: no Hivegrid window; see $S/wezterm.log" >&2; exit 1; }
+  sleep 1
+  DISPLAY=$DISP python3 "$XIN" resize "$id" "$w" "$h"
+  # No window manager on Xvfb: without an explicit focus WezTerm never gets FocusIn.
+  DISPLAY=$DISP python3 "$XIN" focus "$id"
+  for _ in $(seq 50); do ls "$RUN"/wezterm/gui-sock-* >/dev/null 2>&1 && break; sleep 0.1; done
+  sleep 2
+  echo "slot $slot up: DISPLAY=$DISP window=$id size=${w}x${h}; shots in $S/shots, scratch in $S/work"
+}
+
+down() {
+  [ -f "$S/wezterm.pid" ] && kill "$(cat "$S/wezterm.pid")" 2>/dev/null || true
+  pkill -f "wezterm-gui .* start --always-new-process --cwd $H\$" 2>/dev/null || true
+  sleep 0.5
+  # Leftover pane programs (bar, dock, omp, shells) of this sandbox: everything whose HOME is it.
+  for p in /proc/[0-9]*; do
+    [ "${p#/proc/}" = "$$" ] && continue
+    { tr '\0' '\n' <"$p/environ"; } 2>/dev/null | grep -qx "HOME=$H" && kill "${p#/proc/}" 2>/dev/null || true
+  done
+  [ -f "$S/xvfb.pid" ] && kill "$(cat "$S/xvfb.pid")" 2>/dev/null || true
+  rm -f "$S/wezterm.pid" "$S/xvfb.pid"
+  rm -rf "$RUN/wezterm"
+  echo "slot $slot down"
+}
+
+case $cmd in
+  up) up "$@" ;;
+  down) down ;;
+  restart) down; up "$@" ;;
+  env)
+    sandbox_env
+    for kv in "${ENV[@]:2}"; do printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"; done
+    echo 'unset WAYLAND_DISPLAY WEZTERM_PANE TERM_PROGRAM NO_COLOR CI'
+    ;;
+  shot)
+    out=${3:?out.png}
+    if [ -n "${4:-}" ]; then DISPLAY=$DISP import -window root -crop "$4" +repage "$out"
+    else DISPLAY=$DISP import -window root "$out"; fi
+    echo "$out"
+    ;;
+  zoom)
+    out=${3:?out.png}; geo=${4:?WxH+X+Y}; scale=${5:-300%}
+    DISPLAY=$DISP import -window root -crop "$geo" +repage -filter point -resize "$scale" "$out"
+    echo "$out"
+    ;;
+  cli) shift 2; sandbox_env; exec "${ENV[@]}" "$D/wezterm" cli "$@" ;;
+  x) shift 2; DISPLAY=$DISP exec python3 "$XIN" "$@" ;;
+  resize) DISPLAY=$DISP python3 "$XIN" resize "$(window_id)" "${3:?W}" "${4:?H}" ;;
+  focus) DISPLAY=$DISP python3 "$XIN" focus "$(window_id)" ;;
+  win) id=$(window_id); echo "$id"; DISPLAY=$DISP xwininfo -id "$id" | sed -n '/Absolute/,/Height/p' ;;
+  log) tail -n "${3:-60}" "$S/wezterm.log"; ls -t "$RUN"/wezterm/*.txt 2>/dev/null | head -1 | xargs -r tail -n 40 ;;
+  sh) shift 2; sandbox_env; cd "$H"; exec "${ENV[@]}" "$@" ;;
+  *) echo "hgq: unknown command $cmd; hgq help" >&2; exit 2 ;;
+esac
