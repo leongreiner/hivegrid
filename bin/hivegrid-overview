@@ -30,8 +30,8 @@ from hivegrid_ui import BOLD, DIM, Canvas, decode  # noqa: E402
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ORDER = ("ask", "bell", "finished", "waiting", "working", "exited", "idle")
 DEFAULT_PAL = {
-    "deep": "#070d19", "base": "#0b1220", "text": "#c9d6ee", "bright": "#eaf1ff", "muted": "#8a9cc2",
-    "dim": "#7487ad", "accent": "#4f9dff", "raised": "#1d3a70", "border": "#1e2a45",
+    "deep": "#070d19", "base": "#0b1220", "surface": "#111b30", "text": "#c9d6ee", "bright": "#eaf1ff",
+    "muted": "#8a9cc2", "dim": "#7487ad", "accent": "#4f9dff", "raised": "#1d3a70", "border": "#1e2a45",
 }
 
 
@@ -78,28 +78,29 @@ def human(secs):
     return f"{secs // 86400}d{secs % 86400 // 3600:02d}h"
 
 
-def render(doc, w, h, now, goto=None, equalize=None):
+def render(doc, w, h, now, goto=None, equalize=None, arrange=None):
     """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
-    equalize() by a click on the ▦ button."""
+    equalize() by a click on ▦, arrange() by a click on ⊞."""
     pal = dict(DEFAULT_PAL)
     pal.update((doc or {}).get("pal") or {})
-    cv = Canvas(w, h, pal["text"], pal["base"])
-    cv.fill(0, 0, w, 1, bg=pal["deep"])
-    cv.put(1, 0, "⬡ Overview", pal["accent"], pal["deep"], BOLD)
-    cv.fill(0, 1, w, 1, bg=pal["base"], fg=pal["border"], ch="─")
+    cv = Canvas(w, h, pal["text"], pal["surface"])
+    cv.fill(0, 0, w, 1, bg=pal["surface"])
+    cv.put(1, 0, "⬡ Overview", pal["accent"], pal["surface"], BOLD)
+    cv.fill(0, 1, w, 1, bg=pal["surface"], fg=pal["border"], ch="─")
     if doc is None:
         cv.put(1, 3, "waiting for Hivegrid…", pal["muted"])
         return cv
     panes = doc["panes"]
 
-    # Header right: the equalize button, left of it the number of panes per state in state
-    # colour.
+    # Header right: the buttons (arrange, equalize), left of them the number of panes per
+    # state in state colour.
     x = w - 1
-    if equalize:
-        x -= 3
-        cv.put(x, 0, " ▦ ", pal["bright"], pal["raised"], BOLD)
-        cv.hit(x, 0, 3, 1, lambda button: equalize())
-        x -= 1
+    for label, action in ((" ▦ ", equalize), (" ⊞ ", arrange)):
+        if action:
+            x -= len(label)
+            cv.put(x, 0, label, pal["bright"], pal["raised"], BOLD)
+            cv.hit(x, 0, len(label), 1, lambda button, action=action: action())
+            x -= 1
     seen = {}
     for p in panes:
         seen.setdefault(p["kind"], [p["glyph"], p["color"], 0])[2] += 1
@@ -109,7 +110,7 @@ def render(doc, w, h, now, goto=None, equalize=None):
         if x - len(text) - 1 < 12:
             break
         x -= len(text)
-        cv.put(x, 0, text, color, pal["deep"])
+        cv.put(x, 0, text, color, pal["surface"])
         x -= 1
 
     rows_per = 1
@@ -129,7 +130,7 @@ def render(doc, w, h, now, goto=None, equalize=None):
     y = 2
     for p in panes[:shown]:
         active = bool(p.get("active"))
-        bg = pal["raised"] if active else pal["base"]
+        bg = pal["raised"] if active else pal["surface"]
         lines = 2 if two_lines else 1
         cv.fill(0, y, w, lines, bg=bg)
         if active:
@@ -157,7 +158,7 @@ def render(doc, w, h, now, goto=None, equalize=None):
         y += rows_per
     if hidden:
         cv.put(2, h - 2, f"+{hidden} more", pal["dim"])
-    cv.put(1, h - 1, fit("1-9 jump · e equalize · q", w - 2), pal["dim"], pal["base"], DIM)
+    cv.put(1, h - 1, fit("1-9 jump · e ▦ · a ⊞ · q", w - 2), pal["dim"], pal["surface"], DIM)
     return cv
 
 
@@ -199,6 +200,9 @@ class Dock:
     def equalize(self, *_):
         self.request("hivegrid_overview_equalize", "")
 
+    def arrange(self, *_):
+        self.request("hivegrid_overview_arrange", "")
+
     def number(self, n):
         for p in (self.doc or {}).get("panes", []):
             if p.get("num") == n:
@@ -218,13 +222,15 @@ class Dock:
             self.running = False
         elif not mods and key == "e":
             self.equalize()
+        elif not mods and key == "a":
+            self.arrange()
         elif not mods and len(key) == 1 and key in "123456789":
             self.number(int(key))
 
     def draw(self, size):
         cols, rows = size
         now = time.time()
-        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize)
+        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize, self.arrange)
         frame = "\x1b[?25l" + self.cv.render()
         if frame != self.last:
             self.out.write(frame)
@@ -282,7 +288,7 @@ def main(argv=None):
             return 2
     path = path or state_path()
     if dump_size:
-        print("\n".join(dump(render(load(path), *dump_size, time.time(), lambda _: None, lambda: None))))
+        print("\n".join(dump(render(load(path), *dump_size, time.time(), lambda _: None, lambda: None, lambda: None))))
         return 0
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("hivegrid-overview: needs a terminal (--dump prints one frame)", file=sys.stderr)

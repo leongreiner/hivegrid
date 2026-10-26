@@ -10,14 +10,15 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 
 ## Features
 
-- Overview dock at the right edge of a tab (`LEADER+o`): every grid pane with its number, state (working, waiting, ask, finished, exited), directory, time in that state and omp's session title; click a row or press its digit to jump there, `▦` equalizes the grid. A pane picker (`LEADER+g`) lists every agent too, and background panes raise bell toasts. omp panes report their state exactly, through the run-state glyph omp puts in the terminal title.
+- Overview dock at the right edge of a tab (`LEADER+o`): every grid pane with its number, state (working, waiting, ask, finished, exited), directory, time in that state and omp's session title; click a row or press its digit to jump there, `▦` equalizes the grid and `⊞` arranges it (below). A pane picker (`LEADER+g`) lists every agent too, and background panes raise bell toasts. omp panes report their state exactly, through the run-state glyph omp puts in the terminal title.
+- Auto-arrange: when a tidy grid gains or loses one pane (a split, a closed pane) the panes are re-tiled into the grid that reads best for their number and the window's shape, e.g. five panes side by side become 3 + 2 in two rows. Panes are moved, never recreated, and keep their numbers. Layouts you built by hand (panes not in aligned rows) and layouts made by `omp-grid` in one go are left alone; `Ctrl+Shift+A` or `⊞` arranges any tab on demand.
 - `omp-grid` launcher: equal grids, main-plus-side and column layouts, per-pane directories, optional new tab.
 - Resize, pane and broadcast key tables, and an equalize command that evens out all dividers.
 - Broadcast mode that types into every pane of the tab, with a visible `BROADCAST` marker.
 - System stats in the header: CPU, RAM, disk, GPU, each with its percentage, a slim bar and, when the window is wide enough, the absolute amount (`11.7G/31G`, `165G free`).
 - Claude Code usage (5h and 7d windows) for every account as a header chip with numbers and slim bars (an account that needs a login shows only an amber `login` chip); accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
 - Panels inside the window (the gear button of the left bar, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
-- Permanent narrow bar at the left of every tab with buttons for the file explorer, the git view and the settings panel. The explorer is a yazi sidebar; the git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. A coloured dot gives the working-tree state (green clean, amber changes, red conflicts) and repositories with GitHub Actions workflows show `CI ✓` / `CI ✗` / `CI ◔` for the latest runs on the checked-out branch (read through `gh` every minute; `?` when `gh` cannot tell, nothing without workflows). It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory. `Ctrl+F` / `Ctrl+G` do the same as the buttons.
+- Permanent narrow bar at the left of every tab with buttons for the file explorer, the git view, the overview dock and the settings panel. The explorer is a yazi sidebar; the git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. A coloured dot gives the working-tree state (green clean, amber changes, red conflicts) and repositories with GitHub Actions workflows show `CI ✓` / `CI ✗` / `CI ◔` for the latest runs on the checked-out branch (read through `gh` every minute; `?` when `gh` cannot tell, nothing without workflows). It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory. `Ctrl+F` / `Ctrl+G` do the same as the buttons.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
 - Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (click it to open the agent hive), wide padding, and dimmed inactive panes.
 
@@ -48,6 +49,7 @@ The usage chip in the header needs each account logged in at least once: an omp 
 | | `LEADER+r` | resize mode (arrows or `h/j/k/l`, `Esc`/`Enter` leaves) |
 | | `LEADER+p` | pane mode: `r`/`R` rotate, `g` select, `s`/`S` swap, `x` close, `t` to new tab, `z` zoom, `e` equalize, `Esc`/`q` leaves |
 | Grid | `LEADER+e`, `Ctrl+Shift+E` | equalize panes (also the `▦` button of the overview dock) |
+| | `Ctrl+Shift+A` | arrange the panes into the best grid (also the `⊞` button) |
 | | `LEADER+1` / `2` / `3` | new tab with `omp` / 2x2 grid / 3x3 grid (also in the `+` right-click menu) |
 | Agents | `Alt+n`, `LEADER+n` | jump to the next pane needing attention |
 | | `LEADER+o` | show or hide the overview dock (right edge) |
@@ -69,7 +71,7 @@ The usage chip in the header needs each account logged in at least once: an omp 
 | | `Alt+q` | Claude quota selector with all accounts; `LEADER+q` hides or shows the header chip |
 | | `Ctrl+Shift+R` | reload config |
 
-Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), splits, the account launcher and the panel keys can be rebound in the settings panel (Keys); everything else is fixed.
+Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), `Ctrl+Shift+A` (arrange), splits, the account launcher and the panel keys can be rebound in the settings panel (Keys); everything else is fixed.
 
 ## Panels
 

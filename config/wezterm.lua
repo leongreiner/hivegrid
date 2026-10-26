@@ -123,8 +123,9 @@ config.command_palette_font_size = 11
 config.pane_select_bg_color = P.raised
 config.pane_select_fg_color = P.bright
 
--- Space between the header and the first line of the grid.
-config.window_padding = { left = 20, right = 20, top = 22, bottom = 16 }
+-- Space between the header and the first line of the grid. Nothing at the sides: the sidebar
+-- bar and the overview dock sit against the window edges and paint their whole width.
+config.window_padding = { left = 0, right = 0, top = 22, bottom = 16 }
 
 -- Header proportions: a taller bar, status groups centred in it with air above and
 -- below, and a hairline under it. These options exist only in the Hivegrid WezTerm
@@ -398,12 +399,19 @@ local layouts = require('layouts')(config, wezterm)
 -- CTRL+f reaches the panel instead of triggering what it is bound to.
 wezterm.on('user-var-changed', function(window, pane, name, value)
   if name == 'sidebar_click' then
-    -- The settings button of the sidebar bar; its other buttons are handled in sidebar.lua.
-    if tostring(value):match('^settings') and sb.is_sidebar(pane:pane_id()) then
-      window:perform_action(settings_action(), pane)
+    -- The settings and overview buttons of the sidebar bar; its other buttons are handled
+    -- in sidebar.lua.
+    if sb.is_sidebar(pane:pane_id()) then
+      local button = tostring(value):match('^(%a+)')
+      if button == 'settings' then
+        window:perform_action(settings_action(), pane)
+      elseif button == 'overview' and overview then
+        overview.toggle(window, pane)
+      end
     end
     return
   end
+local overview -- set at the end, once the dock module is loaded
   if name ~= 'hivegrid_capture' then return end
   if value == '1' then
     window:set_config_overrides {
@@ -422,6 +430,6 @@ table.insert(config.keys, bound('settings', 'LEADER+,', panel_action('settings')
 table.insert(config.keys, bound('usage_panel', 'LEADER+h', panel_action('usage')))
 
 -- Overview dock: LEADER+o by default (settings key overview_toggle).
-require('overview')(config, wezterm, as, sb, layouts)
+overview = require('overview')(config, wezterm, as, sb, layouts)
 
 return config

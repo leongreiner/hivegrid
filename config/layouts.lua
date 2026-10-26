@@ -1,6 +1,8 @@
 -- Pane/layout control for grids of agents. Wire: require('layouts')(config, wezterm)
 --   LEADER+r  resize mode      LEADER+p  pane mode
 --   LEADER+e  equalize panes   LEADER+b  broadcast typed input (guarded)
+--   CTRL+SHIFT+A  arrange the panes into the grid that reads best (also automatic when a
+--   tidy layout gains or loses one pane)
 return function(config, wezterm)
   local act = wezterm.action
   config.keys = config.keys or {}
@@ -285,6 +287,256 @@ return function(config, wezterm)
 
   -- equalize(window, pane) is also called by the overview dock's button.
   local api = { equalize = equalize }
+
+  -- Arrange ---------------------------------------------------------------
+  -- Re-tiles the grid panes into the grid that reads best for their number and the window's
+  -- shape (5 panes in a row become 3 + 2 in two rows), keeping every process: the panes are
+  -- moved, never recreated. They keep their reading order, so the numbers stay.
+  -- Moving works in two steps: all panes but the first go to temporary tabs, so each one
+  -- is then split into a big, empty area; the first pane's area is cut into the rows, and
+  -- each row into its panes, with percentages that give equal sizes.
+  local panemap = require 'panemap'
+  local CELL_ASPECT = 2.1 -- cell height / cell width on screen
+  local MIN_PANE_COLS, MIN_PANE_ROWS = 60, 8
+
+  -- Panes per row of the ideal grid for n panes in an area of cols x rows cells: the row
+  -- count whose panes come closest to square on screen, few empty slots, no pane narrower
+  -- than MIN_PANE_COLS where avoidable. The top rows take the extra panes.
+  local function ideal_counts(n, cols, rows)
+    local best, best_r
+    for r = 1, n do
+      local c = math.ceil(n / r)
+      local pc = (cols - (c - 1)) / c
+      local pr = (rows - (r - 1)) / r
+      if r == 1 or pr >= MIN_PANE_ROWS then
+        local score = math.abs(math.log(pc / (pr * CELL_ASPECT))) + 0.15 * (r * c - n) / n
+        if pc < MIN_PANE_COLS then
+          score = score + (MIN_PANE_COLS - pc) / MIN_PANE_COLS
+        end
+        if not best or score < best then
+          best, best_r = score, r
+        end
+      end
+    end
+    local counts = {}
+    for i = 1, best_r do
+      counts[i] = n // best_r + (i <= n % best_r and 1 or 0)
+    end
+    return counts
+  end
+
+  -- Panes per row of the current layout, nil when the panes are not in aligned rows.
+  local function shape_of(grid)
+    local list = {}
+    for _, p in ipairs(grid) do
+      list[#list + 1] = p
+    end
+    table.sort(list, function(a, b)
+      if a.top ~= b.top then
+        return a.top < b.top
+      end
+      return a.left < b.left
+    end)
+    local rows = {}
+    for _, p in ipairs(list) do
+      local row = rows[#rows]
+      if row and math.abs(p.top - row.top) <= 2 then
+        if math.abs(p.height - row.height) > 2 then
+          return nil
+        end
+        row.n = row.n + 1
+      else
+        if row and p.top < row.top + row.height - 1 then
+          return nil
+        end
+        rows[#rows + 1] = { top = p.top, height = p.height, n = 1 }
+      end
+    end
+    local counts = {}
+    for i, r in ipairs(rows) do
+      counts[i] = r.n
+    end
+    return counts
+  end
+
+  local function same_counts(a, b)
+    if not a or not b or #a ~= #b then
+      return false
+    end
+    for i = 1, #a do
+      if a[i] ~= b[i] then
+        return false
+      end
+    end
+    return true
+  end
+
+  -- A single row or a single column.
+  local function is_strip(counts)
+    if not counts then
+      return false
+    end
+    if #counts == 1 then
+      return true
+    end
+    for _, c in ipairs(counts) do
+      if c ~= 1 then
+        return false
+      end
+    end
+    return true
+  end
+
+  -- The tab's grid panes (as panes_with_info rows) and the size of the area they fill.
+  local function grid_of(tab)
+    local grid, x0, x1, y0, y1 = {}, math.huge, 0, math.huge, 0
+    for _, i in ipairs(tab:panes_with_info()) do
+      if not require('sidebar').is_dock(i.pane:pane_id()) then
+        grid[#grid + 1] = i
+        x0, x1 = math.min(x0, i.left), math.max(x1, i.left + i.width)
+        y0, y1 = math.min(y0, i.top), math.max(y1, i.top + i.height)
+      end
+    end
+    return grid, x1 - x0, y1 - y0
+  end
+
+  local function arrange(window, pane)
+    local tab = window:active_tab()
+    local grid, cols, rows = grid_of(tab)
+    local n = #grid
+    if n < 2 then
+      return
+    end
+    local num = panemap.numbering(grid)
+    local order = {}
+    for i, info in ipairs(grid) do
+      order[num[i]] = info.pane:pane_id()
+    end
+    local counts = ideal_counts(n, cols, rows)
+    local cli = make_cli(pane)
+    for _, info in ipairs(grid) do
+      if info.is_zoomed then
+        cli('zoom-pane', '--pane-id', info.pane:pane_id(), '--unzoom')
+      end
+    end
+
+    local function pct(x)
+      return math.floor(100 * x + 0.5)
+    end
+    local anchor = order[1]
+    local start, s = {}, 1
+    for r, c in ipairs(counts) do
+      start[r] = s
+      s = s + c
+    end
+    for k = 2, n do
+      cli('move-pane-to-new-tab', '--pane-id', order[k])
+    end
+    local placed, failed = { [anchor] = true }, false
+    local function put(target, dir, percent, id)
+      local ok = false
+      if not failed then
+        ok = cli('split-pane', '--pane-id', target, dir, '--percent', percent, '--move-pane-id', id)
+      end
+      if ok then
+        placed[id] = true
+      else
+        failed = true
+      end
+      return ok
+    end
+    local R, first = #counts, { anchor }
+    for r = 2, R do
+      local id = order[start[r]]
+      if put(first[r - 1], '--bottom', pct((R - r + 1) / (R - r + 2)), id) then
+        first[r] = id
+      end
+    end
+    for r = 1, R do
+      local prev, c = first[r], counts[r]
+      for j = 2, c do
+        local id = order[start[r] + j - 1]
+        if prev and put(prev, '--right', pct((c - j + 1) / (c - j + 2)), id) then
+          prev = id
+        end
+      end
+    end
+    -- Anything not placed (a split failed) goes back beside the first pane, never lost.
+    for k = 2, n do
+      if not placed[order[k]] then
+        cli('split-pane', '--pane-id', anchor, '--right', '--move-pane-id', order[k])
+      end
+    end
+    cli('activate-pane', '--pane-id', pane:pane_id())
+    cli('activate-tab', '--tab-id', tab:tab_id())
+    if failed then
+      toast(window, 'arrange: could not build the grid; panes were put back side by side')
+    end
+  end
+  api.arrange = arrange
+  local arrange_action = wezterm.action_callback(arrange)
+  local ar_key = require('settings')(config, wezterm).key('arrange', 'CTRL+SHIFT+a')
+  bind(ar_key.mods, ar_key.key, arrange_action)
+
+  -- Auto arrange: when the number of grid panes changes and then holds for two status ticks
+  -- (omp-grid is still splitting before that), a tab whose layout was a tidy one, the
+  -- ideal grid for the old count or a single row or column, is re-tiled for the new count.
+  -- A layout the user built by hand (panes not in aligned rows) is left alone.
+  local seen = {} -- tab id -> { n = settled pane count, shape = its rows, pend, ticks }
+  wezterm.on('update-status', function(window)
+    local tab = window:active_tab()
+    local active = window:active_pane()
+    if not tab or not active then
+      return
+    end
+    local grid, cols, rows = grid_of(tab)
+    local on_tab = false
+    for _, p in ipairs(tab:panes()) do
+      on_tab = on_tab or p:pane_id() == active:pane_id()
+    end
+    if not on_tab then
+      return -- an overlay (panel) is showing
+    end
+    local id, n = tab:tab_id(), #grid
+    local st = seen[id]
+    if not st then
+      seen[id] = { n = n, shape = shape_of(grid) }
+      return
+    end
+    if n == st.n then
+      st.pend, st.shape = nil, shape_of(grid)
+      return
+    end
+    if st.pend ~= n then
+      st.pend, st.ticks = n, 1
+      return
+    end
+    st.ticks = st.ticks + 1
+    if st.ticks < 3 then
+      return
+    end
+    local prev_n, prev_shape = st.n, st.shape
+    st.n, st.pend = n, nil
+    local zoomed = false
+    for _, i in ipairs(grid) do
+      zoomed = zoomed or i.is_zoomed
+    end
+    if n < 2 or zoomed then
+      st.shape = shape_of(grid)
+      return
+    end
+    -- One pane more or fewer is somebody splitting or closing; a jump (omp-grid building its
+    -- layout) is a layout chosen on purpose and stays as it is. A tidy layout is re-tiled
+    -- even when its shape is already right: the split left one pane half as big, and rows
+    -- with fewer panes would not even out with equalize (it aligns them to the other rows).
+    local now = shape_of(grid)
+    local tidy = same_counts(prev_shape, ideal_counts(prev_n, cols, rows)) or is_strip(prev_shape)
+    if tidy and now and math.abs(n - prev_n) == 1 then
+      arrange(window, active)
+      grid = grid_of(tab)
+    end
+    st.shape = shape_of(grid)
+  end)
 
   -- Pane mode -----------------------------------------------------------
   local function once(...)

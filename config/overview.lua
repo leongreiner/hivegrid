@@ -33,9 +33,30 @@ return function(config, wezterm, as, sb, layouts)
     return ('%s/hivegrid-overview-%d.json'):format(RUNTIME, pane_id)
   end
 
-  -- Forgets the dock of a tab and removes its state file.
+  -- While a dock is open the bar highlights its button: it watches for the file
+  -- "<bar state file>.ov", which this keeps in step with the dock.
+  local flagged = {} -- tab id -> bar pane id that carries the flag
+  local function set_flag(tab_id, on)
+    local handle = ((wezterm.GLOBAL.sidebar or {})[tostring(tab_id)] or {}).handle
+    local old = flagged[tab_id]
+    if old and (not on or old ~= handle) then
+      os.remove(('%s/wezterm-sidebar-%d.ov'):format(RUNTIME, old))
+      flagged[tab_id] = nil
+    end
+    if on and handle and flagged[tab_id] ~= handle then
+      local f = io.open(('%s/wezterm-sidebar-%d.ov'):format(RUNTIME, handle), 'w')
+      if f then
+        f:write('1')
+        f:close()
+        flagged[tab_id] = handle
+      end
+    end
+  end
+
+  -- Forgets the dock of a tab and removes its state file and bar flag.
   local function drop(tab_id, rec)
     os.remove(state_file(rec.pane))
+    set_flag(tab_id, false)
     local all = records()
     all[tostring(tab_id)] = nil
     wezterm.GLOBAL.overview = all
@@ -55,11 +76,12 @@ return function(config, wezterm, as, sb, layouts)
     return out
   end
 
-  local PAL = { 'deep', 'base', 'text', 'bright', 'muted', 'dim', 'accent', 'raised', 'border' }
+  local PAL = { 'deep', 'base', 'surface', 'text', 'bright', 'muted', 'dim', 'accent', 'raised', 'border' }
   local written = {} -- dock pane id -> last JSON written
 
   -- Writes the rows when they changed (atomically, the dock may read at any moment).
   local function publish(window, mtab, rec)
+    set_flag(mtab:tab_id(), true)
     local rows = as.overview(window, mtab:tab_id())
     local last = rec.last
     for _, r in ipairs(rows) do
@@ -86,22 +108,46 @@ return function(config, wezterm, as, sb, layouts)
     window:toast_notification('Hivegrid overview', text, nil, 3000)
   end
 
-  local function hide(cli, tab_id, rec, infos, from)
+  -- Tabs whose dock the user closed: wezterm.GLOBAL.overview_off[tab id] = true.
+  local function off(tab_id) return (wezterm.GLOBAL.overview_off or {})[tostring(tab_id)] end
+  local function set_off(tab_id, v)
+    local all = wezterm.GLOBAL.overview_off or {}
+    all[tostring(tab_id)] = v
+    wezterm.GLOBAL.overview_off = all
+  end
+
+  -- Opening or closing a top-level split squeezes the grid columns unevenly (the dock takes
+  -- its columns from the first columns, and gives them all back to the last one). A grid
+  -- whose panes were all about equally wide is equalized again afterwards.
+  local function even(grid)
+    local lo, hi = math.huge, 0
+    for _, i in ipairs(grid) do
+      lo, hi = math.min(lo, i.width), math.max(hi, i.width)
+    end
+    return hi - lo <= 3
+  end
+
+  local function hide(window, cli, tab_id, rec, infos, from)
     local dock = exists(infos, rec.pane)
     if dock then wezterm.GLOBAL.overview_width = dock.width end
+    local was_even = TOP_LEVEL and even(grid_panes(infos))
     cli('kill-pane', '--pane-id', rec.pane)
     if from:pane_id() == rec.pane and rec.last then cli('activate-pane', '--pane-id', rec.last) end
     written[rec.pane] = nil
     drop(tab_id, rec)
+    if was_even then
+      local target = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last) or from
+      layouts.equalize(window, target)
+    end
   end
 
-  local function show(window, mtab, infos, cli, from)
+  local function show(window, mtab, infos, cli, from, quiet)
     local grid = grid_panes(infos)
     if #grid == 0 then return end
     local total, anchor = 0, nil
     for _, i in ipairs(infos) do total = math.max(total, i.left + i.width) end
     if total < MIN_TOTAL then
-      toast(window, 'The window is too narrow for the overview')
+      if not quiet then toast(window, 'The window is too narrow for the overview') end
       return
     end
     -- The pane to split: any pane for a top-level split, else the top-right grid pane.
@@ -114,6 +160,7 @@ return function(config, wezterm, as, sb, layouts)
     if TOP_LEVEL then anchor = active or grid[1] end
     local width = math.min(wezterm.GLOBAL.overview_width or math.max(MIN_COLS, math.floor(total * FRACTION)),
       math.floor(total / 2))
+    local was_even = TOP_LEVEL and even(grid)
     local args = { 'split-pane', '--right', '--cells', width, '--pane-id', anchor.pane:pane_id() }
     if TOP_LEVEL then args[#args + 1] = '--top-level' end
     args[#args + 1] = '--'
@@ -121,7 +168,7 @@ return function(config, wezterm, as, sb, layouts)
     local ok, out = cli(table.unpack(args))
     local id = ok and tonumber(out)
     if not id then
-      toast(window, 'Could not open the overview dock (is hivegrid-overview in ~/.local/bin?)')
+      if not quiet then toast(window, 'Could not open the overview dock (is hivegrid-overview in ~/.local/bin?)') end
       return
     end
     local rec = { pane = id, last = (active or anchor).pane:pane_id() }
@@ -129,6 +176,31 @@ return function(config, wezterm, as, sb, layouts)
     publish(window, mtab, rec)
     -- The split focuses the new pane; the keyboard stays where it was.
     cli('activate-pane', '--pane-id', from:pane_id())
+    if was_even then layouts.equalize(window, from) end
+  end
+
+  -- A tab with two or more grid panes gets the dock by itself, once its layout has held for
+  -- two status ticks (omp-grid is still splitting before that). A tab where the user closed
+  -- the dock keeps it closed until LEADER+o opens it again.
+  local pending = {} -- tab id -> { n = grid pane count, ticks = ticks at that count }
+  local function auto_open(window, mtab)
+    local tab_id = mtab:tab_id()
+    local infos = mtab:panes_with_info()
+    local n = #grid_panes(infos)
+    local from = window:active_pane()
+    if off(tab_id) or n < 2 or not from or not exists(infos, from:pane_id()) then
+      pending[tab_id] = nil
+      return
+    end
+    local p = pending[tab_id]
+    if not p or p.n ~= n then
+      pending[tab_id] = { n = n, ticks = 1 }
+      return
+    end
+    p.ticks = p.ticks + 1
+    if p.ticks < 3 or (p.tried and os.time() - p.tried < 10) then return end
+    p.tried = os.time()
+    show(window, mtab, infos, sb.make_cli(from), from, true)
   end
 
   local function toggle(window, pane)
@@ -136,11 +208,24 @@ return function(config, wezterm, as, sb, layouts)
     local tab_id = mtab:tab_id()
     local infos = mtab:panes_with_info()
     local rec = load(tab_id)
+    -- A click on the bar's button arrives from the bar pane: act as the grid pane used last,
+    -- so the keyboard goes back to the grid.
+    if sb.is_sidebar(pane:pane_id()) then
+      local last = ((wezterm.GLOBAL.sidebar or {})[tostring(tab_id)] or {}).last or (rec and rec.last)
+      local target = last and wezterm.mux.get_pane(last)
+      if not target then
+        local g = grid_panes(infos)[1]
+        target = g and g.pane
+      end
+      pane = target or pane
+    end
     local cli = sb.make_cli(pane)
     if rec and exists(infos, rec.pane) then
-      hide(cli, tab_id, rec, infos, pane)
+      set_off(tab_id, true)
+      hide(window, cli, tab_id, rec, infos, pane)
     else
       if rec then drop(tab_id, rec) end
+      set_off(tab_id, nil)
       show(window, mtab, infos, cli, pane)
     end
   end
@@ -155,29 +240,49 @@ return function(config, wezterm, as, sb, layouts)
       if rec then
         local infos = mtab:panes_with_info()
         if not exists(infos, rec.pane) then
+          -- Closed from inside the dock (q) or by hand: it stays closed in this tab.
+          set_off(tab_id, true)
           written[rec.pane] = nil
           drop(tab_id, rec)
+          if rec.even and mtab:tab_id() == window:active_tab():tab_id() then
+            local from = window:active_pane()
+            if from then layouts.equalize(window, from) end
+          end
         elseif #grid_panes(infos) == 0 then
           local dock = wezterm.mux.get_pane(rec.pane)
           if dock then sb.make_cli(dock)('kill-pane', '--pane-id', rec.pane) end
           written[rec.pane] = nil
           drop(tab_id, rec)
         else
+          local ev = TOP_LEVEL and even(grid_panes(infos))
+          if ev ~= rec.even then
+            rec.even = ev
+            save(tab_id, rec)
+          end
           publish(window, mtab, rec)
         end
       end
     end
+    local active = window:active_tab()
+    if active and not load(active:tab_id()) then auto_open(window, active) end
   end)
 
   -- Requests from the dock, which must come from the dock pane of its own tab: a click on a
-  -- row (or its digit) focuses that grid pane, the grid button equalizes the panes.
+  -- row (or its digit) focuses that grid pane, the grid buttons equalize or arrange the panes.
   wezterm.on('user-var-changed', function(window, pane, name, value)
-    if name ~= 'hivegrid_overview_goto' and name ~= 'hivegrid_overview_equalize' then return end
+    if name ~= 'hivegrid_overview_goto' and name ~= 'hivegrid_overview_equalize'
+        and name ~= 'hivegrid_overview_arrange' then
+      return
+    end
     local tab = pane:tab()
     local rec = tab and load(tab:tab_id())
     if not rec or rec.pane ~= pane:pane_id() then return end
     if name == 'hivegrid_overview_equalize' then
       layouts.equalize(window, pane)
+      return
+    end
+    if name == 'hivegrid_overview_arrange' then
+      layouts.arrange(window, pane)
       return
     end
     local id = tonumber(tostring(value):match('^(%d+)'))

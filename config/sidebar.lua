@@ -18,7 +18,7 @@ local function build(config, wezterm)
   config.keys = config.keys or {}
   config.mouse_bindings = config.mouse_bindings or {}
 
-  local HANDLE_COLS, MIN_COLS, FRACTION, MIN_GRID = 3, 28, 0.22, 20
+  local HANDLE_COLS, MIN_COLS, FRACTION, MIN_GRID = 5, 28, 0.22, 20
   local RUNTIME = os.getenv('XDG_RUNTIME_DIR') or '/tmp'
   local VIEWS = {
     files = { bin = wezterm.home_dir .. '/.local/bin/yazi' },
@@ -26,41 +26,55 @@ local function build(config, wezterm)
   }
   local theme = require 'theme'
 
-  -- Runs inside the bar pane: three buttons (explorer, git, settings) drawn from the
-  -- state file "<open|closed> <files|git>", written by Lua and polled here so a resize
-  -- (WINCH) or a state change redraws. A left click announces the button as the user var
-  -- sidebar_click. Buttons are 3 rows tall: files rows 2-4, git 5-7, settings the 3 rows
-  -- above the last one; the open view's button is highlighted.
-  local ICONS = { FILES = utf8.char(0xf07c), GIT = utf8.char(0xe725), SETTINGS = utf8.char(0xf013) }
+  -- Runs inside the bar pane: four buttons (explorer, git, overview dock, settings) drawn
+  -- from the state file "<open|closed> <files|git>", written by Lua, plus the flag file
+  -- "<state file>.ov" while the overview dock is open (written by overview.lua); both are
+  -- polled here so a resize (WINCH) or a state change redraws. A left click announces the
+  -- button as the user var sidebar_click. Buttons are 3 rows tall: files rows 2-4, git 5-7,
+  -- overview 8-10, settings the 3 rows above the last one; the open ones are highlighted.
+  local function rgb(hex)
+    return ('%d;%d;%d'):format(tonumber(hex:sub(2, 3), 16), tonumber(hex:sub(4, 5), 16),
+      tonumber(hex:sub(6, 7), 16))
+  end
+  local P = theme.P
+  local SUBST = {
+    FILES = utf8.char(0xf07c), GIT = utf8.char(0xe725), LIST = utf8.char(0xf0ca),
+    SETTINGS = utf8.char(0xf013),
+    SURFACE = rgb(P.surface), RAISED = rgb(P.raised), DIM = rgb(P.dim), BRIGHT = rgb(P.bright),
+    ACCENT = rgb(P.accent),
+  }
   local HANDLE_SCRIPT = ([==[
 st="${XDG_RUNTIME_DIR:-/tmp}/wezterm-sidebar-$WEZTERM_PANE"
-trap 'rm -f "$st"' EXIT
+trap 'rm -f "$st" "$st.ov"' EXIT
 trap '' INT
 trap 'dirty=1' WINCH
 stty -echo
 printf '\e[?1049h\e[?25l\e[?7l\e[?1000h\e[?1006h'
-names=(files git settings) icons=(@FILES@ @GIT@ @SETTINGS@) E=$'\e'
+printf '\e]1337;SetUserVar=hivegrid_bar=%s\a' "$(printf 1 | base64)"
+names=(files git overview settings) icons=(@FILES@ @GIT@ @LIST@ @SETTINGS@) E=$'\e'
 draw() {
-  local on= r c i y t bg fg mark out
-  [[ ${1%% *} == open ]] && on=${1#* }
+  local s v f r c i y t bg fg mark pad out hot
+  read -r s v f <<<"$1"
   read -r r c < <(stty size </dev/tty)
-  out="$E[0m$E[48;2;15;26;48m$E[2J"
-  for i in 0 1 2; do
-    t=$((i == 2 ? r - 3 : 2 + 3 * i))
-    bg='15;26;48' fg='116;135;173' mark=' '
-    [[ ${names[i]} == "$on" ]] && { bg='29;58;112' fg='201;214;238'; mark=▎; }
+  printf -v pad '%*s' $((c - 1)) ''
+  out="$E[0m$E[48;2;@SURFACE@m$E[2J"
+  for i in 0 1 2 3; do
+    t=$((i == 3 ? r - 3 : 2 + 3 * i))
+    bg='@SURFACE@' fg='@DIM@' mark=' ' hot=
+    [[ $s == open && ${names[i]} == "$v" ]] && hot=1
+    [[ ${names[i]} == overview && $f == ov ]] && hot=1
+    [[ -n $hot ]] && { bg='@RAISED@' fg='@BRIGHT@'; mark=▎; }
     for y in 0 1 2; do
-      out+="$E[$((t + y));1H$E[0;48;2;$bg;38;2;79;157;255m$mark "
+      out+="$E[$((t + y));1H$E[0;48;2;$bg;38;2;@ACCENT@m$mark$pad"
     done
-    out+="$E[$((t + 1));2H$E[0;1;48;2;$bg;38;2;${fg}m${icons[i]}"
+    out+="$E[$((t + 1));$(((c + 1) / 2))H$E[0;1;48;2;$bg;38;2;${fg}m${icons[i]}"
   done
-  out+="$E[0;48;2;7;13;25m"
-  for ((i = 1; i <= r; i++)); do out+="$E[$i;${c}H "; done
   printf %s "$out"
 }
 dirty=1 prev=
 while :; do
   cur='closed files'; [[ -r $st ]] && read -r cur <"$st"
+  [[ -e $st.ov ]] && cur+=' ov'
   if [[ $dirty == 1 || $cur != "$prev" ]]; then dirty=0 prev=$cur; draw "$cur"; fi
   IFS= read -rsn1 -t 0.3 k; rc=$?
   ((rc == 0)) || { ((rc > 128)) && continue; break; }
@@ -71,11 +85,12 @@ while :; do
   read -r r _ < <(stty size </dev/tty)
   if ((y >= 2 && y <= 4)); then b=files
   elif ((y >= 5 && y <= 7)); then b=git
+  elif ((y >= 8 && y <= 10)); then b=overview
   elif ((y >= r - 3 && y <= r - 1)); then b=settings
   else continue; fi
   printf '\e]1337;SetUserVar=sidebar_click=%s\a' "$(printf %s "$b:$RANDOM$SECONDS" | base64)"
 done
-]==]):gsub('@(%u+)@', ICONS)
+]==]):gsub('@(%u+)@', SUBST)
 
   -- Pure layout logic: operates on plain rows, so it is testable with fake data. -------
   local function rows(infos)
