@@ -76,6 +76,10 @@ omp-grid --layout columns 4 --tab --dirs ~/a,~/b  # new tab, 4 columns, director
 
 `claude-quota` fetches Claude Code usage for each configured account and caches only the percentages and reset times in `~/.cache/wezterm-claude-quota/`. The header reads that cache; the network is never touched from the GUI thread. It reads the OAuth token in-process from the `.credentials.json` of each configured directory (defaults `~/.claude`, `~/.claude-2`, `~/.claude-private`; override with `CLAUDE_QUOTA_DIRS`, a comma-separated list), calls the usage endpoint with caching and backoff, and never stores tokens. An expired token shows as `login` and is not refreshed. Run `claude-quota refresh` or `claude-quota show` by hand to check it.
 
+## Custom WezTerm build
+
+`wezterm/` is a submodule pointing at a private WezTerm fork (branch `hivegrid`) that adds clickable header segments. The config also runs on stock WezTerm 20240203, where those clicks are ignored. To build it without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`; `wezterm/HIVEGRID.md` has the details.
+
 ## Notes and limits
 
 - WezTerm has no custom clickable header buttons or in-pane overlays, so state is shown through tab titles, the right status and the minimap.
