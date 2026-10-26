@@ -135,6 +135,7 @@ return function(config, wezterm, as, sb, layouts)
     if from:pane_id() == rec.pane and rec.last then cli('activate-pane', '--pane-id', rec.last) end
     written[rec.pane] = nil
     drop(tab_id, rec)
+    sb.restore(window, window:active_tab())
     if was_even then
       local target = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last) or from
       layouts.equalize(window, target)
@@ -176,6 +177,7 @@ return function(config, wezterm, as, sb, layouts)
     publish(window, mtab, rec)
     -- The split focuses the new pane; the keyboard stays where it was.
     cli('activate-pane', '--pane-id', from:pane_id())
+    sb.restore(window, mtab) -- the top-level split squeezed the bar; no waiting for the tick
     if was_even then layouts.equalize(window, from) end
   end
 

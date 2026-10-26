@@ -26,71 +26,16 @@ local function build(config, wezterm)
   }
   local theme = require 'theme'
 
-  -- Runs inside the bar pane: four buttons (explorer, git, overview dock, settings) drawn
-  -- from the state file "<open|closed> <files|git>", written by Lua, plus the flag file
-  -- "<state file>.ov" while the overview dock is open (written by overview.lua); both are
-  -- polled here so a resize (WINCH) or a state change redraws. A left click announces the
-  -- button as the user var sidebar_click. Buttons are 3 rows tall: files rows 2-4, git 5-7,
-  -- overview 8-10, settings the 3 rows above the last one; the open ones are highlighted.
-  local function rgb(hex)
-    return ('%d;%d;%d'):format(tonumber(hex:sub(2, 3), 16), tonumber(hex:sub(4, 5), 16),
-      tonumber(hex:sub(6, 7), 16))
-  end
+  -- The bar pane runs bin/hivegrid-bar (buttons, highlights, hover pointer, clicks; see
+  -- there) with the theme's colours. It reads the state file "<open|closed> <files|git>"
+  -- that write_state keeps, and the flag file "<state file>.ov" overview.lua keeps while the
+  -- dock is open, and announces a click as the user var sidebar_click.
   local P = theme.P
-  local SUBST = {
-    FILES = utf8.char(0xf07c), GIT = utf8.char(0xe725), LIST = utf8.char(0xf0ca),
-    SETTINGS = utf8.char(0xf013),
-    SURFACE = rgb(P.surface), RAISED = rgb(P.raised), DIM = rgb(P.dim), BRIGHT = rgb(P.bright),
-    ACCENT = rgb(P.accent),
+  local BAR_COMMAND = {
+    wezterm.home_dir .. '/.local/bin/hivegrid-bar',
+    '--surface', P.surface, '--raised', P.raised, '--dim', P.dim, '--bright', P.bright,
+    '--accent', P.accent,
   }
-  local HANDLE_SCRIPT = ([==[
-st="${XDG_RUNTIME_DIR:-/tmp}/wezterm-sidebar-$WEZTERM_PANE"
-trap 'rm -f "$st" "$st.ov"' EXIT
-trap '' INT
-trap 'dirty=1' WINCH
-stty -echo
-printf '\e[?1049h\e[?25l\e[?7l\e[?1000h\e[?1006h'
-printf '\e]1337;SetUserVar=hivegrid_bar=%s\a' "$(printf 1 | base64)"
-names=(files git overview settings) icons=(@FILES@ @GIT@ @LIST@ @SETTINGS@) E=$'\e'
-draw() {
-  local s v f r c i y t bg fg mark pad out hot
-  read -r s v f <<<"$1"
-  read -r r c < <(stty size </dev/tty)
-  printf -v pad '%*s' $((c - 1)) ''
-  out="$E[0m$E[48;2;@SURFACE@m$E[2J"
-  for i in 0 1 2 3; do
-    t=$((i == 3 ? r - 3 : 2 + 3 * i))
-    bg='@SURFACE@' fg='@DIM@' mark=' ' hot=
-    [[ $s == open && ${names[i]} == "$v" ]] && hot=1
-    [[ ${names[i]} == overview && $f == ov ]] && hot=1
-    [[ -n $hot ]] && { bg='@RAISED@' fg='@BRIGHT@'; mark=▎; }
-    for y in 0 1 2; do
-      out+="$E[$((t + y));1H$E[0;48;2;$bg;38;2;@ACCENT@m$mark$pad"
-    done
-    out+="$E[$((t + 1));$(((c + 1) / 2))H$E[0;1;48;2;$bg;38;2;${fg}m${icons[i]}"
-  done
-  printf %s "$out"
-}
-dirty=1 prev=
-while :; do
-  cur='closed files'; [[ -r $st ]] && read -r cur <"$st"
-  [[ -e $st.ov ]] && cur+=' ov'
-  if [[ $dirty == 1 || $cur != "$prev" ]]; then dirty=0 prev=$cur; draw "$cur"; fi
-  IFS= read -rsn1 -t 0.3 k; rc=$?
-  ((rc == 0)) || { ((rc > 128)) && continue; break; }
-  [[ $k == $'\e' ]] || continue
-  seq=; while IFS= read -rsn1 -t 0.05 ch; do seq+=$ch; [[ $ch == [Mm] ]] && break; done
-  [[ $seq == '[<0;'*M ]] || continue
-  y=${seq#*;}; y=${y#*;}; y=${y%M}
-  read -r r _ < <(stty size </dev/tty)
-  if ((y >= 2 && y <= 4)); then b=files
-  elif ((y >= 5 && y <= 7)); then b=git
-  elif ((y >= 8 && y <= 10)); then b=overview
-  elif ((y >= r - 3 && y <= r - 1)); then b=settings
-  else continue; fi
-  printf '\e]1337;SetUserVar=sidebar_click=%s\a' "$(printf %s "$b:$RANDOM$SECONDS" | base64)"
-done
-]==]):gsub('@(%u+)@', SUBST)
 
   -- Pure layout logic: operates on plain rows, so it is testable with fake data. -------
   local function rows(infos)
@@ -365,7 +310,8 @@ done
   local function new_handle(cli, anchor)
     local args = { 'split-pane', '--left', '--cells', HANDLE_COLS, '--pane-id', anchor.id }
     if TOP_LEVEL then args[#args + 1] = '--top-level' end
-    for _, a in ipairs { '--', 'bash', '-c', HANDLE_SCRIPT } do args[#args + 1] = a end
+    args[#args + 1] = '--'
+    for _, a in ipairs(BAR_COMMAND) do args[#args + 1] = a end
     local ok, out = cli(table.unpack(args))
     return ok and tonumber(out) or nil
   end
@@ -439,6 +385,9 @@ done
     end
     save(tab:tab_id(), rec)
     write_state(rec)
+    -- Showing or hiding the view can squeeze the bar for a moment; put it back at once.
+    rs = rows(tab:panes_with_info())
+    settle(window, tab, rs, rec)
   end
 
   local S = require('settings')(config, wezterm)
@@ -467,6 +416,14 @@ done
   api.make_cli = make_cli
 
   function api.toggle(window, pane, view) apply(window, pane, view) end
+
+  -- Puts the bar (and the view) back at their widths now. A top-level split elsewhere in the
+  -- tab (the overview dock) squeezes the first columns, the bar's among them, until the next
+  -- status tick would notice; callers that changed the layout call this instead of waiting.
+  function api.restore(window, tab)
+    local rs = rows(tab:panes_with_info())
+    settle(window, tab, rs, reconcile(load(tab:tab_id()), rs))
+  end
 
   -- The git view lists the repositories of the directory it was started in, so it is
   -- restarted when the active grid pane moves to another directory (another pane gets

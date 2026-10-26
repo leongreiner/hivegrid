@@ -56,6 +56,9 @@ for agent_dir in "$HOME/.omp/agent" "$HOME"/.omp/profiles/*/agent; do
   install_file "$repo/ext/hivegrid-agent-state.ts" "$agent_dir/extensions/hivegrid-agent-state.ts" 644
 done
 install_file "$repo/assets/icon.png" "$icon_dst"
+# Icon font of the sidebar bar (hivegrid-bar draws its buttons from it; text glyphs without it).
+font_src=$repo/wezterm/assets/fonts/SymbolsNerdFontMono-Regular.ttf
+[ -f "$font_src" ] && install_file "$font_src" "$HOME/.local/share/hivegrid/SymbolsNerdFontMono-Regular.ttf" 644
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT

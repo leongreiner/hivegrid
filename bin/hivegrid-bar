@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Hivegrid sidebar bar: the narrow strip at the left of every tab, with four buttons.
+
+Runs in the bar pane that config/sidebar.lua creates. Buttons: file explorer, git view, overview
+dock, settings; each is 3 rows tall (files rows 2-4, git 5-7, overview 8-10, settings the 3 rows
+above the last one). A left click announces the button as the user var `sidebar_click`
+(files, git, overview or settings, plus a salt so repeated clicks are changes). Buttons whose
+view is open are highlighted: the view comes from the state file
+$XDG_RUNTIME_DIR/wezterm-sidebar-$WEZTERM_PANE ("<open|closed> <files|git>", written by the
+config), the dock from "<state file>.ov". The pointer becomes a hand over the buttons (OSC 22).
+
+Icons are drawn with PIL from the Symbols Nerd Font as inline images, large and crisp; without
+PIL or the font they are the same glyphs as text, one cell high.
+
+Usage: hivegrid-bar --surface #rrggbb --raised #rrggbb --dim #rrggbb --bright #rrggbb --accent #rrggbb
+"""
+import argparse
+import base64
+import io
+import os
+import select
+import signal
+import sys
+import termios
+import tty
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from hivegrid_ui import cell_pixels, decode, iterm_image, sgr_color  # noqa: E402
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:  # noqa: BLE001 - any import problem means text icons
+    Image = None
+
+BUTTONS = ("files", "git", "overview", "settings")
+GLYPHS = {"files": "\uf07c", "git": "\ue725", "overview": "\uf0ca", "settings": "\uf013"}
+FONT_NAME = "SymbolsNerdFontMono-Regular.ttf"
+FONT_DIRS = (
+    os.environ.get("HIVEGRID_ICON_FONT_DIR", ""),
+    os.path.expanduser("~/.local/share/hivegrid"),
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "wezterm", "assets", "fonts"),
+)
+
+
+def find_font():
+    for d in FONT_DIRS:
+        path = os.path.join(d, FONT_NAME) if d else ""
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def tops(rows):
+    """Top row (0-based) of each button for a bar `rows` tall."""
+    return {"files": 1, "git": 4, "overview": 7, "settings": rows - 4}
+
+
+def button_at(y, rows):
+    """The button under row y (0-based), or None."""
+    for name, top in tops(rows).items():
+        if top <= y < top + 3:
+            return name
+    return None
+
+
+def state_path():
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return f"{runtime}/wezterm-sidebar-{os.environ.get('WEZTERM_PANE', '0')}"
+
+
+def read_state(path):
+    """(open view or None, dock open) from the state file and its .ov flag."""
+    view = None
+    try:
+        with open(path, encoding="utf-8") as f:
+            parts = f.read().split()
+        if len(parts) >= 2 and parts[0] == "open":
+            view = parts[1]
+    except OSError:
+        pass
+    return view, os.path.exists(path + ".ov")
+
+
+class Bar:
+    def __init__(self, colors):
+        self.c = colors
+        self.fd = sys.stdin.fileno()
+        self.out = sys.stdout
+        self.running = True
+        self.dirty = True
+        self.hover = None
+        self.serial = 0
+        self.last = None
+        self.font_path = find_font() if Image else None
+        self.icons = {}
+
+    # drawing ------------------------------------------------------------------
+    def icon_png(self, name, hot, w, h):
+        key = (name, hot, w, h)
+        if key not in self.icons:
+            size = max(int(min(w, h) * 0.8), 8)
+            font = ImageFont.truetype(self.font_path, size)
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            glyph = GLYPHS[name]
+            box = draw.textbbox((0, 0), glyph, font=font)
+            x = (w - (box[2] - box[0])) // 2 - box[0]
+            y = (h - (box[3] - box[1])) // 2 - box[1]
+            draw.text((x, y), glyph, font=font, fill=self.c["bright" if hot else "dim"])
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            self.icons[key] = buf.getvalue()
+        return self.icons[key]
+
+    def draw(self, rows, cols, state):
+        view, dock = state
+        cw, ch = cell_pixels(self.out.fileno())
+        e = "\x1b"
+        buf = [f"{e}[0m{e}[{sgr_color(self.c['surface'], True)}m{e}[2J"]
+        for name, top in tops(rows).items():
+            hot = (view == name) or (name == "overview" and dock)
+            bg = self.c["raised"] if hot else self.c["surface"]
+            for y in range(3):
+                mark = "▎" if hot else " "
+                buf.append(
+                    f"{e}[{top + y + 1};1H{e}[0;{sgr_color(bg, True)};{sgr_color(self.c['accent'], False)}m"
+                    f"{mark}{' ' * (cols - 1)}"
+                )
+            if self.font_path and cols > 1:
+                png = self.icon_png(name, hot, (cols - 1) * cw, 3 * ch)
+                # doNotMoveCursor keeps the next row's cursor move independent of the image.
+                buf.append(f"{e}[{top + 1};2H" + iterm_image(png, cols - 1, 3).replace(
+                    "inline=1;", "inline=1;doNotMoveCursor=1;", 1))
+            else:
+                fg = self.c["bright" if hot else "dim"]
+                buf.append(
+                    f"{e}[{top + 2};{(cols + 1) // 2}H{e}[0;1;{sgr_color(bg, True)};{sgr_color(fg, False)}m{GLYPHS[name]}"
+                )
+        buf.append(f"{e}[0m")
+        self.out.write("".join(buf))
+        self.out.flush()
+
+    # events ---------------------------------------------------------------------
+    def pointer(self, name):
+        """Hand pointer over a button, default elsewhere (OSC 22, Hivegrid build)."""
+        if name != self.hover:
+            self.hover = name
+            self.out.write("\x1b]22;" + ("pointer" if name else "") + "\x07")
+            self.out.flush()
+
+    def click(self, name):
+        self.serial += 1
+        value = base64.b64encode(f"{name}:{self.serial}".encode()).decode()
+        self.out.write(f"\x1b]1337;SetUserVar=sidebar_click={value}\x07")
+        self.out.flush()
+
+    def handle(self, ev, rows):
+        if ev[0] != "mouse":
+            return
+        _, action, button, x, y = ev
+        name = button_at(y, rows)
+        # Motion without a button is reported like a drag; either way it moves the pointer.
+        if action in ("drag", "press", "release"):
+            self.pointer(name)
+        if action == "press" and button == "left" and name:
+            self.click(name)
+
+    def run(self):
+        old = termios.tcgetattr(self.fd)
+        resized = {"v": True}
+        try:
+            tty.setraw(self.fd)
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1003h\x1b[?1006h")
+            self.out.write("\x1b]1337;SetUserVar=hivegrid_bar=" + base64.b64encode(b"1").decode() + "\x07")
+            self.out.flush()
+            signal.signal(signal.SIGWINCH, lambda *_: resized.update(v=True))
+            path, prev = state_path(), None
+            while self.running:
+                try:
+                    size = os.get_terminal_size(self.out.fileno())
+                    cols, rows = size.columns, size.lines
+                except OSError:
+                    cols, rows = 5, 24
+                state = read_state(path)
+                if resized["v"] or state != prev:
+                    resized["v"], prev = False, state
+                    self.draw(rows, cols, state)
+                try:
+                    ready, _, _ = select.select([self.fd], [], [], 0.3)
+                except InterruptedError:
+                    continue
+                if ready:
+                    data = os.read(self.fd, 4096)
+                    if not data:
+                        break
+                    for ev in decode(data):
+                        self.handle(ev, rows)
+        finally:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
+            self.out.write("\x1b]22;\x07\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l")
+            self.out.flush()
+            for p in (state_path(), state_path() + ".ov"):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def parse_color(text):
+    if len(text) != 7 or text[0] != "#" or any(c not in "0123456789abcdefABCDEF" for c in text[1:]):
+        raise argparse.ArgumentTypeError(f"not a #rrggbb colour: {text!r}")
+    return text.lower()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    for name, default in (("surface", "#111b30"), ("raised", "#1d3a70"), ("dim", "#7487ad"),
+                          ("bright", "#eaf1ff"), ("accent", "#4f9dff")):
+        ap.add_argument(f"--{name}", type=parse_color, default=default)
+    args = ap.parse_args()
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("hivegrid-bar: needs a terminal", file=sys.stderr)
+        return 2
+    bar = Bar(vars(args))
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, lambda *_: sys.exit(0))
+    bar.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
