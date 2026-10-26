@@ -1,0 +1,3 @@
+# init.lua's double-click detection needs click events.
+[mgr]
+mouse_events = [ "click", "scroll" ]

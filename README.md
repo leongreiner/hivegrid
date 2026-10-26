@@ -31,7 +31,7 @@ cd hivegrid
 ./install.sh [--tools]
 ```
 
-The installer copies `config/` to `~/.config/wezterm/`, `bin/` to `~/.local/bin/`, the icon, and a `Hivegrid` launcher that overrides the `org.wezfurlong.wezterm` desktop entry. Differing existing files are saved once as `*.bak.<timestamp>`. `--tools` also downloads the latest `yazi`, `ya` and `lazygit` into `~/.local/bin`. No sudo is used. `./sync.sh` copies the live setup back into the repo for maintenance.
+The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `~/.config/hivegrid/yazi/` (the explorer's own yazi config; a global `~/.config/yazi` is never read or changed), `bin/` to `~/.local/bin/`, the icon, and a `Hivegrid` launcher that overrides the `org.wezfurlong.wezterm` desktop entry. Differing existing files are saved once as `*.bak.<timestamp>`. `--tools` also downloads the latest `yazi`, `ya` and `lazygit` into `~/.local/bin`. No sudo is used. `./sync.sh` copies the live setup back into the repo for maintenance.
 
 ## Keys
 
@@ -53,6 +53,8 @@ The installer copies `config/` to `~/.config/wezterm/`, `bin/` to `~/.local/bin/
 | | `LEADER+b` | toggle broadcast typing to all panes of the tab |
 | Sidebar | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | | `LEADER+Tab` | hide or show, remembering the view |
+| | `Ctrl+C` in the explorer | copy the absolute path of the hovered file or folder, or of all selected entries one per line |
+| | double click in the explorer | open a terminal in that folder (a file's folder), split right of the last active grid pane, or below it when that pane is narrow; it takes focus |
 | Misc | `Ctrl+C` / `Ctrl+V` | smart copy or interrupt / paste |
 | | `Alt+s` | toggle system stats |
 | | `Alt+q` | Claude quota selector with all accounts; `LEADER+q` hides or shows the header chip |
@@ -79,6 +81,8 @@ omp-grid --layout columns 4 --tab --dirs ~/a,~/b  # new tab, 4 columns, director
 - WezTerm has no custom clickable header buttons or in-pane overlays, so state is shown through tab titles, the right status and the minimap.
 - omp state detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
 - The sidebar takes the full window height only in a single-pane tab; in a grid it is docked beside the leftmost pane.
+- The sidebar views start in the working directory of the pane they were opened from (the git view in its repository root). A pane whose shell reports a path from another host, such as an ssh session, uses the directory of its local foreground process instead.
+- The explorer copies paths with the terminal clipboard escape (OSC 52), which WezTerm accepts, and also through `wl-copy`, `xclip` or `xsel` when present.
 - `Ctrl+V` paste is not fanned out in broadcast mode, because the clipboard is not readable from Lua.
 
 ## License

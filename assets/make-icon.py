@@ -23,13 +23,24 @@ img=Image.new("RGBA",(W,W),(0,0,0,0))
 img.alpha_composite(glow)
 d=ImageDraw.Draw(img)
 gap=0.90   # shrink so cells keep the source gap
+# Outer cells, clockwise from the top: done, working, needs input, working, waiting, working.
+STATES = [
+    ((130, 240, 195), (30, 168, 118)),   # done: green
+    ((196, 224, 255), (112, 170, 238)),  # working: light blue
+    ((255, 190, 190), (236, 110, 118)),  # needs human input: light red
+    ((196, 224, 255), (112, 170, 238)),  # working
+    ((205, 218, 240), (122, 142, 184)),  # waiting or looping: grey-blue
+    ((196, 224, 255), (112, 170, 238)),  # working
+]
 for i,c in enumerate(centres):
     pts=poly(c,R*gap)
     if i==0:
         d.polygon(pts,fill=(14,132,255,255))
+        d.line(pts+[pts[0]],fill=(150,205,255,255),width=int(7*SS),joint="curve")
     else:
-        d.polygon(pts,fill=(7,24,58,255))
-    d.line(pts+[pts[0]],fill=(66,150,255,255) if i else (150,205,255,255),width=int(7*SS*1.0),joint="curve")
+        line,fill=STATES[i-1]
+        d.polygon(pts,fill=fill+(255,))
+        d.line(pts+[pts[0]],fill=line+(255,),width=int(7*SS),joint="curve")
 # bright core on the centre cell
 ca=Image.new("L",(W,W),0)
 ImageDraw.Draw(ca).polygon(poly(centres[0],R*0.55),fill=230)

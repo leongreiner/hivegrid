@@ -4,8 +4,9 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cfg=$HOME/.config/wezterm
+yazi_dst=$HOME/.config/hivegrid/yazi
 bindir=$HOME/.local/bin
-icon_dst=$HOME/.local/share/wezterm/hivegrid-icon.png
+icon_dst=$HOME/.local/share/wezterm/hivegrid-icon-2.png
 desktop_dst=$HOME/.local/share/applications/org.wezfurlong.wezterm.desktop
 stamp=$(date +%Y%m%d-%H%M%S)
 want_tools=0
@@ -44,6 +45,8 @@ install_file() {
 }
 
 for f in "$repo"/config/*.lua; do install_file "$f" "$cfg/$(basename "$f")"; done
+while IFS= read -r f; do install_file "$f" "$yazi_dst/${f#"$repo"/config/yazi/}"; done \
+  < <(find "$repo/config/yazi" -type f | sort)
 for f in "$repo"/bin/*; do install_file "$f" "$bindir/$(basename "$f")" 755; done
 install_file "$repo/assets/icon.png" "$icon_dst"
 

@@ -1,0 +1,6 @@
+# Ctrl+C is WezTerm's smart copy; with no text selected it reaches yazi as ^C, whose
+# default (close the tab, i.e. quit) would kill the sidebar instead of copying.
+[mgr]
+prepend_keymap = [
+	{ on = "<C-c>", run = "copy path", desc = "Copy the absolute path of the hovered or selected files" },
+]
