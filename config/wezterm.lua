@@ -43,6 +43,16 @@ config.keys = {
 config.scrollback_lines = 20000
 config.enable_wayland = true
 
+-- On Wayland WezTerm looks cursors up in XCURSOR_THEME, which GNOME does not export, so
+-- the resize cursor over pane dividers falls back to the arrow. Use the session's theme.
+local function gnome_setting(key)
+  local ok, out = wezterm.run_child_process { 'gsettings', 'get', 'org.gnome.desktop.interface', key }
+  if not ok then return nil end
+  return (out:gsub('%s+$', ''):gsub("^'(.*)'$", '%1'))
+end
+config.xcursor_theme = gnome_setting('cursor-theme') or 'Adwaita'
+config.xcursor_size = tonumber(gnome_setting('cursor-size')) or 24
+
 -- Hivegrid look: solid navy base. The window stays fully opaque.
 config.window_background_opacity = 1.0
 config.text_background_opacity = 1.0
@@ -119,17 +129,24 @@ local cq = require('claudequota')(config, wezterm)
 local sb = require('sidebar')(config, wezterm)
 config.status_update_interval = 1000
 
--- Cells the header spends outside the tab titles: window buttons, the "+" button and
--- the brand. Measured on the fancy bar at window_frame.font_size 9.5 (cell 7.6 px).
--- The fancy bar caps every tab at window width / (tabs + 1) - 1.5 cells and never
--- shrinks tabs for the right status, so titles are fitted to that cap here and the
--- status is fitted to what the tabs leave over.
-local CELL_PX, BUTTONS_CELLS, NEW_TAB_CELLS, BRAND_CELLS = 7.6, 21, 8, 15
+-- Space the header spends outside the tab titles, measured on the fancy bar at 96 dpi
+-- (window_frame.font_size 9.5 gives an 8 px cell): the margin before the brand mark,
+-- the "+" button and the window buttons, all in pixels at 96 dpi and scaled with the
+-- window's dpi. The fancy bar caps every tab at window width / (tabs + 1) - 1.5 cells
+-- and never shrinks tabs for the right status, so titles are fitted to that cap here
+-- and the status is fitted to what the tabs leave over.
+local LEFT_PX, NEW_TAB_PX, BUTTONS_PX = 14, 21, 146
+local BRAND_CELLS = theme.width(theme.brand())
 local TAB_PAD_CELLS = 4 -- element padding, border and the close button
 local TAB_CELLS = 34 -- widest title text
 
-local function tab_cap(pixel_width, ntabs)
-  return math.floor(pixel_width / (ntabs + 1) / CELL_PX - 1.5)
+-- The bar font's cell is its 0.602 em advance rounded up to whole pixels.
+local function cell_px(dpi)
+  return math.ceil(9.5 * (dpi or 96) / 72 * 0.6021)
+end
+
+local function tab_cap(pixel_width, ntabs, cell)
+  return math.floor(pixel_width / (ntabs + 1) / cell - 1.5)
 end
 
 -- Fits a tab's pieces into `cap` cells (the cap is read from wezterm.GLOBAL by the
@@ -151,26 +168,6 @@ local function tab_layout(parts, tab_index, cap)
   return name, proc, marks, fixed + (utf8.len(name) or #name) + mneed + pneed + TAB_PAD_CELLS
 end
 
--- Powerline cap glyphs are drawn by WezTerm itself (custom_block_glyphs), so they
--- fill the whole cell without a patched font.
-local CAP = { round_l = '\u{e0b6}', round_r = '\u{e0b4}' }
-
-local function brand_items()
-  local body = '#16294d'
-  local items = { { Foreground = { Color = body } }, { Text = CAP.round_l } }
-  theme.extend(items, theme.gradient({
-    { fg = P.accent, text = ' ⬢ ', bold = true },
-    { fg = P.bright, text = 'HIVE', bold = true },
-    { fg = P.accent, text = 'GRID ', bold = true },
-  }, body, body))
-  theme.extend(items, {
-    { Background = { Color = P.deep } }, { Foreground = { Color = body } },
-    { Attribute = { Intensity = 'Normal' } }, { Text = CAP.round_r },
-    'ResetAttributes',
-  })
-  return items
-end
-
 -- Right side of the header, left to right: [BROADCAST] cwd, sidebar, pane minimap,
 -- agent counts, Claude quota chip, system stats. The chips share one cell budget:
 -- what the tabs leave over; the system stats pick a tier that fits and the cwd takes
@@ -184,12 +181,15 @@ wezterm.on('update-status', function(window, pane)
     if not sb.is_sidebar(p:pane_id()) then n = n + 1 end
   end
 
-  local pixel_width = window:get_dimensions().pixel_width
-  local total = pixel_width / CELL_PX
+  local dims = window:get_dimensions()
+  local pixel_width = dims.pixel_width
+  local cell = cell_px(dims.dpi)
   local mtabs = window:mux_window():tabs()
-  local cap = tab_cap(pixel_width, #mtabs)
+  local cap = tab_cap(pixel_width, #mtabs, cell)
   wezterm.GLOBAL.hivegrid_tab_cap = cap
-  local used = BUTTONS_CELLS + NEW_TAB_CELLS + BRAND_CELLS
+  local fixed_px = (LEFT_PX + NEW_TAB_PX + BUTTONS_PX) * (dims.dpi or 96) / 96
+  local total = (pixel_width - fixed_px) / cell
+  local used = BRAND_CELLS
   for i, t in ipairs(mtabs) do
     local ap = t:active_pane()
     local parts = as.tab_parts {
@@ -208,32 +208,56 @@ wezterm.on('update-status', function(window, pane)
     if #items > 0 then blocks[#blocks + 1] = { name = name, items = items, w = w or theme.width(items) } end
   end
   if window:active_key_table() == 'broadcast' then
-    add('broadcast', {
-      { Background = { Color = P.red } }, { Foreground = { Color = P.deep } },
-      { Attribute = { Intensity = 'Bold' } }, { Text = ' BROADCAST ' }, 'ResetAttributes',
-    })
+    add('broadcast', theme.pill({
+      { Foreground = { Color = P.bright } }, { Attribute = { Intensity = 'Bold' } },
+      { Text = 'BROADCAST' },
+    }, '#c23b4a'))
   end
   add('sidebar', sb.status(window))
   add('minimap', as.minimap(window, { max_width = 28 }))
   add('agents', as.status(window, pane))
+  local quota_tiers, quota_tier = {}, 1
   if cq.visible() then
-    local items, w = cq.segments()
-    add('quota', items, w)
+    quota_tiers = cq.tiers()
+    if #quota_tiers > 0 then add('quota', quota_tiers[1].items, quota_tiers[1].w) end
   end
 
+  -- Each block is one pill, a cell apart; the system stats keep room for their
+  -- narrowest tier before the other blocks are fitted.
+  local reserve = ss.visible() and ss.min_width() or 0
+  if reserve > 0 then reserve = reserve + 1 end
   local function fixed_width()
-    local w = 0
+    local w = reserve
     for _, b in ipairs(blocks) do w = w + b.w + 1 end
     return w
   end
-  for _, drop in ipairs { 'sidebar', 'minimap', 'agents', 'quota' } do
+  -- The quota pill narrows to its third tier before any other block is given up and
+  -- to its last before the agent counts go; the quota pill itself is dropped last.
+  local function shrink_quota(limit)
+    for _, b in ipairs(blocks) do
+      if b.name == 'quota' then
+        while quota_tier < math.min(limit, #quota_tiers) and fixed_width() > avail do
+          quota_tier = quota_tier + 1
+          b.items, b.w = quota_tiers[quota_tier].items, quota_tiers[quota_tier].w
+        end
+      end
+    end
+  end
+  for _, step in ipairs {
+    { 'shrink', 3 }, { 'drop', 'sidebar' }, { 'drop', 'minimap' },
+    { 'shrink', 5 }, { 'drop', 'agents' }, { 'drop', 'quota' },
+  } do
     if fixed_width() <= avail then break end
-    for i, b in ipairs(blocks) do
-      if b.name == drop then table.remove(blocks, i) break end
+    if step[1] == 'shrink' then
+      shrink_quota(step[2])
+    else
+      for i, b in ipairs(blocks) do
+        if b.name == step[2] then table.remove(blocks, i) break end
+      end
     end
   end
 
-  local left = avail - fixed_width()
+  local left = avail - fixed_width() + reserve
   local sys_items, sys_w = {}, 0
   if ss.visible() then sys_items, sys_w = ss.segments { budget = left } end
   left = left - sys_w - (sys_w > 0 and 1 or 0)
@@ -241,23 +265,22 @@ wezterm.on('update-status', function(window, pane)
   local items = {}
   local label = string.format('%d pane%s', n, n == 1 and '' or 's')
   local text = path ~= '' and (path .. '  ' .. label) or label
-  if #text + 2 > left then text = label end
-  if #text + 2 <= left then
-    items[#items + 1] = { Foreground = { Color = P.dim } }
-    items[#items + 1] = { Text = text .. ' ' }
+  if #text + 4 > left - 1 then text = label end
+  if #text + 4 <= left - 1 then
+    theme.extend(items, theme.pill({
+      { Foreground = { Color = P.muted } }, { Text = text },
+    }, P.pill))
+    items[#items + 1] = { Text = ' ' }
   end
-  local first = true
   for _, b in ipairs(blocks) do
-    if not first then theme.extend(items, theme.sep()) end
-    first = false
     theme.extend(items, b.items)
+    items[#items + 1] = { Text = ' ' }
   end
   if sys_w > 0 then
-    if not first then theme.extend(items, theme.sep()) end
     theme.extend(items, sys_items)
+    items[#items + 1] = { Text = ' ' }
   end
-  items[#items + 1] = { Text = ' ' }
-  window:set_left_status(wezterm.format(brand_items()))
+  window:set_left_status(wezterm.format(theme.brand()))
   window:set_right_status(wezterm.format(items))
 end)
 

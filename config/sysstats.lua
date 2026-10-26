@@ -200,36 +200,62 @@ return function(config, wezterm)
   -- bar = cells of bar (0: label and number only), amount = trailing size text,
   -- only = labels kept in the tier.
   local TIERS = {
-    { bar = 8, amount = true },
+    { bar = 10, amount = true },
+    { bar = 8 },
     { bar = 6 },
-    { bar = 4 },
     { bar = 0 },
     { bar = 0, only = { CPU = true, RAM = true } },
   }
 
-  local function chip(m, tier)
+  -- Items of one metric: muted label, rounded gauge (bar tiers), value, amount.
+  local function body(m, tier)
     local items = { { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' } }
     if tier.bar > 0 then
-      theme.extend(items, theme.bar(m[2], tier.bar, color(m[2]), P.track))
+      theme.extend(items, theme.gauge(m[2], tier.bar, color(m[2]), P.pill))
     end
     items[#items + 1] = { Foreground = { Color = color(m[2]) } }
-    items[#items + 1] = { Text = string.format(tier.bar > 0 and ' %2.0f%%' or '%3.0f%%', m[2]) }
+    items[#items + 1] = { Text = string.format(tier.bar > 0 and ' %3.0f%%' or '%3.0f%%', m[2]) }
     if tier.amount and m[3] then
       items[#items + 1] = { Foreground = { Color = P.dim } }
       items[#items + 1] = { Text = ' ' .. m[3] }
     end
-    return theme.chip(items)
+    return items
   end
 
+  -- Gauge tiers give every metric its own pill; label-only tiers share one pill.
   local function render(tier)
-    local items = {}
+    local items, shared = {}, {}
     for _, m in ipairs(metrics()) do
       if not tier.only or tier.only[m[1]] then
-        if #items > 0 then theme.extend(items, theme.sep()) end
-        theme.extend(items, chip(m, tier))
+        if tier.bar > 0 then
+          if #items > 0 then items[#items + 1] = { Text = ' ' } end
+          theme.extend(items, theme.pill(body(m, tier), P.pill))
+        else
+          if #shared > 0 then shared[#shared + 1] = { Text = '  ' } end
+          theme.extend(shared, body(m, tier))
+        end
       end
     end
+    if #shared > 0 then items = theme.pill(shared, P.pill) end
     return items
+  end
+
+  -- Renders only change when a source was sampled, so a tick between samples reuses
+  -- the last items instead of rebuilding every tier.
+  local memo = { stamp = {}, tiers = {} }
+  local function cached(tier)
+    local s = memo.stamp
+    if s[1] ~= cpu.t or s[2] ~= mem.t or s[3] ~= disk.t or s[4] ~= gpu.t then
+      s[1], s[2], s[3], s[4] = cpu.t, mem.t, disk.t, gpu.t
+      memo.tiers = {}
+    end
+    local hit = memo.tiers[tier]
+    if not hit then
+      local items = render(tier)
+      hit = { items = items, w = theme.width(items) }
+      memo.tiers[tier] = hit
+    end
+    return hit
   end
 
   local api = {}
@@ -244,11 +270,16 @@ return function(config, wezterm)
     refresh()
     local budget = opts and opts.budget or math.huge
     for _, tier in ipairs(TIERS) do
-      local items = render(tier)
-      local w = theme.width(items)
-      if w > 0 and w <= budget then return items, w end
+      local hit = cached(tier)
+      if hit.w > 0 and hit.w <= budget then return hit.items, hit.w end
     end
     return {}, 0
+  end
+
+  -- Width of the narrowest tier, so the header can keep room for it.
+  function api.min_width()
+    refresh()
+    return cached(TIERS[#TIERS]).w
   end
 
   function api.text(opts)

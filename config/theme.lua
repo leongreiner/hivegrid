@@ -6,7 +6,8 @@ M.P = {
   deep = '#070d19', -- header band, darker than the terminal so the bar reads as a recessed frame
   base = '#0b1220', -- terminal background
   surface = '#111b30', -- chips, inactive tabs
-  raised = '#1b3560', -- active tab, active minimap cell
+  pill = '#15244a', -- body of a status pill, lighter than the header so pills read as raised
+  raised = '#1d3a70', -- active tab, the pill that needs the eye
   track = '#1f2d4d', -- empty part of a gauge
   border = '#1e2a45',
   edge_hi = '#4a6fb0', -- lit edge of a raised shape
@@ -64,21 +65,40 @@ function M.width(items)
   return n
 end
 
--- Fixed-width bar made of lower-half blocks (a full-height block is a slab in a
--- one-row header): `fill` over a `track`, half-cell precision via the quadrant
--- glyph for an odd half.
-function M.bar(pct, cells, fill, track)
-  local halves = math.floor(math.max(0, math.min(100, pct)) / 100 * cells * 2 + 0.5)
-  if pct > 0 and halves == 0 then halves = 1 end
-  local full, odd = halves // 2, halves % 2
-  local items = { { Foreground = { Color = fill } } }
-  if full > 0 then items[#items + 1] = { Text = string.rep('▄', full) } end
-  if odd > 0 then items[#items + 1] = { Text = '▖' } end
-  local rest = cells - full - odd
-  if rest > 0 then
-    items[#items + 1] = { Foreground = { Color = track } }
-    items[#items + 1] = { Text = string.rep('▄', rest) }
+-- Rounded cap glyphs (Powerline half circles, drawn by WezTerm itself).
+M.CAP_L, M.CAP_R = '\u{e0b6}', '\u{e0b4}'
+local EIGHTHS = { '▏', '▎', '▍', '▌', '▋', '▊', '▉' }
+
+-- Rounded progress bar `cells` wide (caps included): `fill` over a rounded track a
+-- shade lighter than the pill body `bg`, eighth-cell precision.
+function M.gauge(pct, cells, fill, bg)
+  local track = M.lerp(bg, M.P.edge_hi, 0.3)
+  local inner = cells - 2
+  local eighths = math.floor(math.max(0, math.min(100, pct)) / 100 * inner * 8 + 0.5)
+  if pct > 0 and eighths == 0 then eighths = 1 end
+  local full, part = eighths // 8, eighths % 8
+  local items = {
+    { Foreground = { Color = eighths > 0 and fill or track } }, { Background = { Color = bg } },
+    { Text = M.CAP_L },
+  }
+  if full > 0 then
+    items[#items + 1] = { Background = { Color = fill } }
+    items[#items + 1] = { Text = string.rep(' ', full) }
   end
+  local rest = inner - full
+  if part > 0 then
+    items[#items + 1] = { Foreground = { Color = fill } }
+    items[#items + 1] = { Background = { Color = track } }
+    items[#items + 1] = { Text = EIGHTHS[part] }
+    rest = rest - 1
+  end
+  if rest > 0 then
+    items[#items + 1] = { Background = { Color = track } }
+    items[#items + 1] = { Text = string.rep(' ', rest) }
+  end
+  items[#items + 1] = { Foreground = { Color = eighths >= inner * 8 and fill or track } }
+  items[#items + 1] = { Background = { Color = bg } }
+  items[#items + 1] = { Text = M.CAP_R }
   return items
 end
 
@@ -105,19 +125,45 @@ function M.extend(dst, src)
   return dst
 end
 
--- A group of header items with a one-cell margin each side, no background: the
--- status line is full bar height while tabs are one text row, so boxes would not align.
-function M.chip(items)
-  local out = { { Text = ' ' } }
-  M.extend(out, items)
+-- A rounded pill: cap, one cell of padding, `items`, padding, cap. Caps take `bg` as
+-- foreground on the bar; the body paints `bg` behind every item, so the body is
+-- re-asserted after each ResetAttributes in `items`.
+function M.pill(items, bg)
+  local out = {
+    { Foreground = { Color = bg } }, { Text = M.CAP_L },
+    { Background = { Color = bg } }, { Text = ' ' },
+  }
+  for _, it in ipairs(items) do
+    out[#out + 1] = it
+    if it == 'ResetAttributes' then out[#out + 1] = { Background = { Color = bg } } end
+  end
   out[#out + 1] = { Text = ' ' }
+  out[#out + 1] = 'ResetAttributes'
+  out[#out + 1] = { Foreground = { Color = bg } }
+  out[#out + 1] = { Text = M.CAP_R }
   out[#out + 1] = 'ResetAttributes'
   return out
 end
 
--- Thin divider between groups.
-function M.sep()
-  return { { Foreground = { Color = M.P.border } }, { Text = '│' }, 'ResetAttributes' }
+-- The Hivegrid mark: Nerd md-hexagon-multiple (three hexagons, the bundled Symbols Nerd
+-- Font draws it) in the accent colour, no text and no pill, with air before it and
+-- after it so it never touches the first tab. opts.glyph and opts.color override the
+-- defaults; opts.pill sits it on a raised pill. Returns wezterm.format items.
+function M.brand(opts)
+  opts = opts or {}
+  local mark = {
+    { Foreground = { Color = opts.color or M.P.accent } },
+    { Text = opts.glyph or '\u{f06e1}' },
+  }
+  if opts.pill then
+    local items = M.pill(mark, M.P.raised)
+    items[#items + 1] = { Text = ' ' }
+    return items
+  end
+  local items = { { Text = ' ' } }
+  M.extend(items, mark)
+  items[#items + 1] = { Text = '  ' }
+  return items
 end
 
 return M

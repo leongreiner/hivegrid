@@ -258,7 +258,7 @@ function api.status(window, _)
   local _, totals = scan(window)
   local items = marks(totals)
   if #items == 0 then return {} end
-  return theme.chip(items)
+  return theme.pill(items, P.pill)
 end
 
 -- Minimap of the active tab: one glyph per layout cell, rows split by a bar,
@@ -279,7 +279,7 @@ function api.minimap(window, opts)
         local s = STATES[e.st.kind or 'idle']
         return { glyph = s.glyph, color = s.color, active = e.info.is_active, zoomed = e.info.is_zoomed }
       end)
-      return theme.chip(items)
+      return theme.pill(items, P.pill)
     end
   end
   return {}

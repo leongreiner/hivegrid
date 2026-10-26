@@ -1,8 +1,8 @@
 -- Claude Code usage windows (5h / 7d) per account.
 -- Wire: local cq = require('claudequota')(config, wezterm)
 --   cq.visible()           -> boolean (LEADER+q toggles the header chip; default true)
---   cq.segments()          -> wezterm.format items, width in cells: one coloured block per
---                             account plus the text of the most critical one (about 12 cells)
+--   cq.tiers()             -> header pills richest first as { items, w }: every account with
+--                             label, gauge and numbers, down to dots plus the critical account
 --   cq.text()              -> plain text of the chip, for tests
 --   cq.refresh_if_due(win) -> spawns `claude-quota refresh` at most once per 60 s (call from update-status)
 --   cq.select              -> action for ALT+q: an InputSelector with both windows and reset
@@ -123,29 +123,147 @@ return function(config, wezterm)
     return { sums = sums, label = label, text = text }
   end
 
+  -- Header tiers ---------------------------------------------------------------
+
+  local GAUGE = 6 -- cells, caps included
+
+  local function lab(s, n) return n and s.label:sub(1, n) or s.label end
+
+  -- Items of one account's numbers: every window with its own colour, a reset
+  -- countdown only for a window at or above 80%, `login` / `--` when nothing is cached.
+  local function numbers(s, now)
+    local items = {}
+    if #s.windows == 0 then
+      items[#items + 1] = { Foreground = { Color = s.color } }
+      items[#items + 1] = { Text = s.login and 'login' or '--' }
+      return items
+    end
+    if s.login then
+      items[#items + 1] = { Foreground = { Color = P.amber } }
+      items[#items + 1] = { Text = 'login ' }
+    end
+    for i, w in ipairs(s.windows) do
+      local pct, reset = w[2].pct, w[2].reset_at
+      if i > 1 then items[#items + 1] = { Text = ' ' } end
+      items[#items + 1] = { Foreground = { Color = P.muted } }
+      items[#items + 1] = { Text = w[1] .. ' ' }
+      items[#items + 1] = { Foreground = { Color = color(pct) } }
+      items[#items + 1] = { Text = string.format('%.0f%%', pct) }
+      if pct >= 80 and type(reset) == 'number' then
+        items[#items + 1] = { Foreground = { Color = P.dim } }
+        items[#items + 1] = { Text = ' ↻' .. remaining(reset - now) }
+      end
+    end
+    if s.stale then
+      items[#items + 1] = { Foreground = { Color = P.amber } }
+      items[#items + 1] = { Text = '~' }
+    end
+    return items
+  end
+
+  local function worst_text(s)
+    if s.pct < 0 then return s.login and 'login' or '--' end
+    return string.format('%.0f%%', s.pct) .. (s.stale and '~' or '')
+  end
+
+  local function label_items(s, crit, n)
+    return {
+      { Foreground = { Color = crit and P.bright or P.muted } },
+      { Attribute = { Intensity = crit and 'Bold' or 'Normal' } },
+      { Text = lab(s, n) .. ' ' },
+      { Attribute = { Intensity = 'Normal' } },
+    }
+  end
+
+  -- Richest first. `crit` is the most critical account, lifted onto the raised
+  -- colour with a bold bright label when it is at least amber.
+  local function build_tiers(m, now)
+    local sums, crit = m.sums, nil
+    for _, s in ipairs(sums) do
+      if s.pct >= 50 and (not crit or s.pct > crit.pct) then crit = s end
+    end
+    local function bg_of(s) return s == crit and P.raised or P.pill end
+    local function gauge(s)
+      return theme.gauge(math.max(s.pct, 0), GAUGE, s.color, bg_of(s))
+    end
+
+    local function per_account(label_n, with_numbers)
+      local items = {}
+      for _, s in ipairs(sums) do
+        if #items > 0 then items[#items + 1] = { Text = ' ' } end
+        local body = label_items(s, s == crit, label_n)
+        theme.extend(body, gauge(s))
+        body[#body + 1] = { Text = ' ' }
+        if with_numbers then
+          theme.extend(body, numbers(s, now))
+        else
+          theme.extend(body, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
+        end
+        theme.extend(items, theme.pill(body, bg_of(s)))
+      end
+      return items
+    end
+
+    local function one_pill(label_n)
+      local body = {}
+      for _, s in ipairs(sums) do
+        if #body > 0 then body[#body + 1] = { Text = '  ' } end
+        theme.extend(body, label_items(s, s == crit, label_n))
+        theme.extend(body, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
+      end
+      return theme.pill(body, P.pill)
+    end
+
+    local function dots()
+      local body = {}
+      for _, s in ipairs(sums) do
+        body[#body + 1] = { Foreground = { Color = s.color } }
+        body[#body + 1] = { Text = '● ' }
+      end
+      local c = crit
+      if not c then
+        for _, s in ipairs(sums) do if not c or s.pct > c.pct then c = s end end
+      end
+      theme.extend(body, label_items(c, true))
+      if c.pct < 0 then
+        theme.extend(body, { { Foreground = { Color = c.color } }, { Text = worst_text(c) } })
+      else
+        theme.extend(body, {
+          { Foreground = { Color = P.muted } }, { Text = c.worst[1] .. ' ' },
+          { Foreground = { Color = c.color } }, { Text = worst_text(c) },
+        })
+      end
+      return theme.pill(body, crit and P.raised or P.pill)
+    end
+
+    local out = {}
+    for _, items in ipairs {
+      per_account(nil, true), per_account(4, false), one_pill(4), one_pill(1), dots(),
+    } do
+      out[#out + 1] = { items = items, w = theme.width(items) }
+    end
+    return out
+  end
+
   local api = {}
 
   function api.visible()
     return wezterm.GLOBAL.claudequota_visible ~= false
   end
 
-  function api.segments()
+  -- Header pills richest first as { items, w }; empty when no account is cached. The
+  -- caller steps down the list until one fits its free width. Rebuilt when the cache
+  -- was re-read or every 15 s, which keeps the minute-grained countdowns current.
+  local memo = { entries = nil, slot = nil, tiers = {} }
+  function api.tiers()
     local now = os.time()
-    local m = chip_model(load_entries(now), now)
-    if not m then return {}, 0 end
-    local items = {}
-    for _, s in ipairs(m.sums) do
-      items[#items + 1] = { Foreground = { Color = s.color } }
-      items[#items + 1] = { Text = BLOCK }
+    local entries = load_entries(now)
+    local slot = now // 15
+    if memo.entries ~= entries or memo.slot ~= slot then
+      local m = chip_model(entries, now)
+      memo.entries, memo.slot, memo.tiers = entries, slot, m and build_tiers(m, now) or {}
     end
-    items[#items + 1] = { Foreground = { Color = P.muted } }
-    items[#items + 1] = { Text = ' ' .. m.label .. ' ' }
-    for _, t in ipairs(m.text) do
-      items[#items + 1] = { Foreground = { Color = t[1] } }
-      items[#items + 1] = { Text = t[2] }
-    end
-    local chip = theme.chip(items)
-    return chip, theme.width(chip)
+    return memo.tiers
   end
 
   function api.text()
@@ -206,6 +324,77 @@ return function(config, wezterm)
     return wezterm.format(items)
   end
 
+  -- Starting omp for an account -----------------------------------------------
+  -- omp picks its account with --profile (or OMP_PROFILE), not CLAUDE_CONFIG_DIR; the
+  -- profiles pair with the Claude config dirs ~/.claude, ~/.claude-2, ~/.claude-private
+  -- exactly as the claude-work / claude-team / claude-private aliases do.
+  local PROFILES = { main = 'work', ['2'] = 'team', private = 'private' }
+  local DEFAULT_PROFILE = 'work' -- what a bare `omp` uses (OMP_PROFILE default in ~/.bashrc)
+  local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
+
+  local function toast(window, msg) window:toast_notification('Hivegrid', msg, nil, 4000) end
+
+  local function basename(p) return (tostring(p or ''):match('([^/]+)$') or ''):gsub('^%-', '') end
+
+  -- The pane to type into: the active one, or the last non-sidebar pane when the
+  -- sidebar has focus.
+  local function target_pane(window, pane)
+    local is_sidebar = require('sidebar').is_sidebar
+    if not is_sidebar(pane:pane_id()) then return pane end
+    local tab = window:active_tab()
+    local rec = (wezterm.GLOBAL.sidebar or {})[tostring(tab:tab_id())] or {}
+    local first
+    for _, p in ipairs(tab:panes()) do
+      if not is_sidebar(p:pane_id()) then
+        if p:pane_id() == rec.last then return p end
+        first = first or p
+      end
+    end
+    return first
+  end
+
+  -- Profile of a running omp: --profile on its command line, else OMP_PROFILE from
+  -- its environment (only that variable is read), else the bare-omp default.
+  local function running_profile(info)
+    local argv = info.argv or {}
+    for i, a in ipairs(argv) do
+      local v = a:match('^%-%-profile=(.+)$') or (a == '--profile' and argv[i + 1])
+      if v then return v end
+    end
+    local f = info.pid and io.open('/proc/' .. info.pid .. '/environ', 'rb')
+    if not f then return nil end
+    local env = f:read('*a') or ''
+    f:close()
+    return env:match('%f[^%z]OMP_PROFILE=([^%z]*)') or env:match('^OMP_PROFILE=([^%z]*)') or DEFAULT_PROFILE
+  end
+
+  local function start_omp(window, pane, label)
+    local profile = PROFILES[label]
+    if not profile then
+      return toast(window, 'No omp profile is paired with account ' .. tostring(label))
+    end
+    local target = target_pane(window, pane)
+    local info = target and target:get_foreground_process_info()
+    if not info then return toast(window, 'Cannot tell what is running in the pane') end
+    local name = basename(info.name or (info.argv or {})[1])
+    if name == 'omp' then
+      local running = running_profile(info)
+      if running == profile then return toast(window, 'omp is already running with account ' .. label) end
+      local account = running
+      for l, p in pairs(PROFILES) do
+        if p == running then account = string.format('%s (%s)', l, p) end
+      end
+      return toast(window, string.format('omp is running with account %s in this pane',
+        account or 'unknown'))
+    end
+    if not SHELLS[name] then
+      return toast(window, string.format('%s is running in this pane, not a shell prompt', name))
+    end
+    target:send_text('omp --profile=' .. profile .. '\r')
+  end
+  api.start_omp = start_omp
+
+  -- Alt+q: the selector doubles as the account list; Enter or a click on a row starts omp.
   api.select = wezterm.action_callback(function(window, pane)
     local now = os.time()
     local choices = {}
@@ -220,9 +409,11 @@ return function(config, wezterm)
     window:perform_action(
       wezterm.action.InputSelector {
         title = 'Claude quota',
-        description = 'Usage per account and window. Esc closes.',
+        description = 'Enter or click: start omp with that account in the active pane. Esc closes.',
         choices = choices,
-        action = wezterm.action_callback(function() end),
+        action = wezterm.action_callback(function(win, p, id)
+          if id and id ~= 'none' then start_omp(win, p, id) end
+        end),
       },
       pane
     )
@@ -234,6 +425,21 @@ return function(config, wezterm)
   if wezterm.GLOBAL.claudequota_visible == nil then wezterm.GLOBAL.claudequota_visible = true end
   config.keys = config.keys or {}
   table.insert(config.keys, { key = 'q', mods = 'ALT', action = api.select })
+  -- LEADER+u then 1/2/3 starts omp for main / 2 / private without the popup.
+  config.key_tables = config.key_tables or {}
+  config.key_tables.omp_account = {
+    { key = '1', action = wezterm.action_callback(function(w, p) start_omp(w, p, 'main') end) },
+    { key = '2', action = wezterm.action_callback(function(w, p) start_omp(w, p, '2') end) },
+    { key = '3', action = wezterm.action_callback(function(w, p) start_omp(w, p, 'private') end) },
+    { key = 'Escape', action = wezterm.action.PopKeyTable },
+  }
+  table.insert(config.keys, {
+    key = 'u',
+    mods = 'LEADER',
+    action = wezterm.action.ActivateKeyTable {
+      name = 'omp_account', one_shot = true, timeout_milliseconds = 4000,
+    },
+  })
   table.insert(config.keys, {
     key = 'q',
     mods = 'LEADER',
