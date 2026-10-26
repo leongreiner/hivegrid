@@ -2,8 +2,11 @@
 
 find_repos() lists the repositories of a workspace directory the way VS Code's Source Control
 view does: the repository around the directory plus every repository below it. status() reads one
-repository's branch, upstream distance and change counts with a single `git status` call.
+repository's branch, upstream distance and change counts with a single `git status` call. ci()
+reads the GitHub Actions result of the checked-out branch through the `gh` CLI, for repositories
+that have workflows.
 """
+import json
 import os
 import subprocess
 import time
@@ -20,10 +23,10 @@ DEFAULT_BUDGET = 2.0  # seconds the directory walk may take before it gives up
 class Repo:
     """One repository: its work tree, the name shown for it and its latest status."""
 
-    __slots__ = ("path", "name", "status")
+    __slots__ = ("path", "name", "status", "ci")
 
     def __init__(self, path, name):
-        self.path, self.name, self.status = path, name, None
+        self.path, self.name, self.status, self.ci = path, name, None, None
 
 
 def _git(path, *args, timeout=20):
@@ -118,3 +121,70 @@ def status(repo):
     out = _git(repo.path, "status", "--porcelain=v2", "--branch")
     repo.status = parse_status(out) if out is not None else {"error": True}
     return repo.status
+
+
+def has_ci(path):
+    """True when the work tree defines GitHub Actions workflows."""
+    try:
+        return any(n.endswith((".yml", ".yaml")) for n in os.listdir(os.path.join(path, ".github", "workflows")))
+    except OSError:
+        return False
+
+
+def parse_ci(text):
+    """Reduces `gh run list --json status,conclusion,workflowName` output (newest run first) to
+    one state from the latest run of each workflow: "fail" if any failed, else "running" if any is
+    unfinished, else "pass" if any passed, else "other" (cancelled/skipped only), "none" without
+    runs. None when the text is not a run list."""
+    try:
+        runs = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(runs, list):
+        return None
+    latest = {}
+    for r in runs:
+        if isinstance(r, dict):
+            latest.setdefault(r.get("workflowName"), r)
+    if not latest:
+        return "none"
+    states = set()
+    for r in latest.values():
+        if r.get("status") != "completed":
+            states.add("running")
+        elif r.get("conclusion") in ("failure", "timed_out", "startup_failure"):
+            states.add("fail")
+        elif r.get("conclusion") == "success":
+            states.add("pass")
+        else:
+            states.add("other")
+    return next(s for s in ("fail", "running", "pass", "other") if s in states)
+
+
+def _gh(path, *args, timeout=20):
+    env = dict(os.environ, GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1", NO_COLOR="1")
+    try:
+        r = subprocess.run(["gh", *args], cwd=path, capture_output=True, text=True, timeout=timeout,
+                           env=env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def ci(repo):
+    """Reads the CI state of the checked-out branch (or commit when detached) into repo.ci: None
+    without workflows, else "pass" / "fail" / "running" / "other" / "none" (no runs yet) or
+    "unknown" when gh failed (missing, logged out, offline, not a GitHub remote); a failed read
+    keeps the previous state. Network call: run it off the UI thread and rarely."""
+    if not has_ci(repo.path):
+        repo.ci = None
+        return None
+    branch = (_git(repo.path, "symbolic-ref", "--short", "-q", "HEAD") or "").strip()
+    sha = "" if branch else (_git(repo.path, "rev-parse", "HEAD") or "").strip()
+    state = None
+    if branch or sha:
+        out = _gh(repo.path, "run", "list", "--branch" if branch else "--commit", branch or sha,
+                  "--limit", "30", "--json", "status,conclusion,workflowName")
+        state = parse_ci(out) if out is not None else None
+    repo.ci = state or repo.ci or "unknown"
+    return repo.ci
