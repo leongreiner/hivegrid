@@ -264,7 +264,7 @@ wezterm.on('update-status', function(window)
   -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
   -- groups fit the free cells. Agent states live in the overview dock, not here.
   local groups = {
-    B = { tiers = cq.visible() and cq.tiers() or {} },
+    B = { tiers = cq.visible() and cq.tiers(cq.active(window)) or {} },
     C = { tiers = ss.visible() and ss.tiers() or {} },
   }
   local lead = {}

@@ -302,6 +302,60 @@ T.test('from the sidebar the account starts in the grid pane used last', functio
   T.eq({ bar.sent, a.sent, b.sent }, { {}, {}, { 'omp --profile=work\r' } })
 end)
 
+-- Active account ----------------------------------------------------------------------------
+
+local function profile_pane(wz, id, profile)
+  return wz.fake.pane { id = id, process_info = omp_info(100 + id, profile) }
+end
+
+-- Labels whose clickable region carries the bold label of the highlighted account.
+local function bold_labels(items)
+  local out, cur = {}, nil
+  for _, it in ipairs(items) do
+    if type(it) == 'table' and it.Click then
+      cur = it.Click:match('^quota:(.+)$')
+    elseif it == 'ClickEnd' then
+      cur = nil
+    elseif cur and type(it) == 'table' and it.Attribute and it.Attribute.Intensity == 'Bold' then
+      out[#out + 1] = cur
+    end
+  end
+  return out
+end
+
+T.test('the account of the focused omp pane is highlighted and follows focus', function(wz)
+  local cq = setup(wz, { files = {
+    main = ok_entry('main', 90, 95), ['2'] = ok_entry('2', 10, 20), private = ok_entry('private', 30, 40),
+  } })
+  local work, priv = profile_pane(wz, 1, 'work'), profile_pane(wz, 2, 'private')
+  local win = wz.fake.grid { { pane = work, active = true }, { pane = priv, left = 41 } }
+  T.eq(cq.active(win), 'main')
+  T.eq(bold_labels(cq.tiers(cq.active(win))[1].items), { 'main' })
+  priv:activate()
+  T.eq(cq.active(win), 'private')
+  T.eq(bold_labels(cq.tiers(cq.active(win))[1].items), { 'private' }, 'the highlight moved with focus')
+end)
+
+T.test('high usage alone highlights nothing; a pane without omp highlights nothing', function(wz)
+  local cq = setup(wz, { files = { main = ok_entry('main', 90, 95), ['2'] = ok_entry('2', 10, 20) } })
+  local win = wz.fake.grid { { pane = shell_pane(wz, 1) } }
+  T.eq(cq.active(win), nil)
+  for i, tier in ipairs(cq.tiers(nil)) do
+    if i < 5 then T.eq(bold_labels(tier.items), {}, 'tier ' .. i) end
+  end
+end)
+
+T.test('from the sidebar the highlight follows the grid pane used last', function(wz)
+  local cq = setup(wz)
+  local bar = shell_pane(wz, 1)
+  local a, b = profile_pane(wz, 2, 'work'), profile_pane(wz, 3, 'team')
+  local win, tab = wz.fake.grid {
+    { pane = bar, width = 5, active = true }, { pane = a, left = 6 }, { pane = b, left = 47 },
+  }
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 1, last = 3 } }
+  T.eq(cq.active(win), '2')
+end)
+
 -- Switching a running omp --------------------------------------------------------------------
 
 -- An omp pane that hands the prompt back to bash when it receives Ctrl+D (unless `stuck`).

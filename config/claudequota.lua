@@ -1,8 +1,9 @@
 -- Claude Code usage windows (5h / 7d) per account.
 -- Wire: local cq = require('claudequota')(config, wezterm)
 --   cq.visible()           -> boolean (LEADER+q toggles the header chip; default true)
---   cq.tiers()             -> header pills richest first as { items, w }: every account with
---                             label, numbers and slim bars, down to dots plus the critical account
+--   cq.tiers(active)       -> header pills richest first as { items, w }: every account with
+--                             label, numbers and slim bars, down to dots plus one account; the
+--                             account labelled `active` (cq.active) is raised and bold
 --   cq.text()              -> plain text of the chip, for tests
 --   cq.refresh_if_due(win) -> spawns `claude-quota refresh` at most once per 60 s (call from update-status)
 --   cq.select              -> action for ALT+q: an InputSelector with both windows and reset
@@ -163,22 +164,19 @@ return function(config, wezterm)
     }
   end
 
-  -- Richest first. `crit` is the most critical account that has numbers (at least
-  -- amber): its label is bold and bright and it sits on a raised block. Every tier is
+  -- Richest first. `active` is the label of the account whose omp runs in the focused pane
+  -- (api.active): its label is bold and bright and it sits on a raised block. Every tier is
   -- one continuous group with a divider between accounts, each account a click target.
   -- Numbers and bars always sit on the plain pill; an account that needs a login shows
   -- the amber `login` chip and nothing stale beside it.
-  local function build_tiers(m, now)
-    local sums, crit = m.sums, nil
-    for _, s in ipairs(sums) do
-      if not s.login and s.pct >= 50 and (not crit or s.pct > crit.pct) then crit = s end
-    end
+  local function build_tiers(m, now, active)
+    local sums = m.sums
     local function click(s, items) return theme.click('quota:' .. s.label, items) end
 
     -- opts: label_n (label cut), bar (cells of the slim line after each window),
     -- worst_only (only the window with the highest usage).
     local function account(s, opts)
-      local lit = s == crit
+      local lit = s.label == active
       local bg = lit and P.raised or P.pill
       local items = {}
       if lit then
@@ -235,7 +233,7 @@ return function(config, wezterm)
     local function compact(label_n)
       local parts = {}
       for _, s in ipairs(sums) do
-        local seg = label_items(s, s == crit, label_n)
+        local seg = label_items(s, s.label == active, label_n)
         if s.login then
           theme.extend(seg, theme.chip('login', P.amber, P.pill))
         else
@@ -251,9 +249,12 @@ return function(config, wezterm)
       for _, s in ipairs(sums) do
         theme.extend(body, click(s, { { Foreground = { Color = s.color } }, { Text = '● ' } }))
       end
-      local c = crit
-      if not c then c = most_critical(sums) end
-      local seg = label_items(c, true)
+      local c
+      for _, s in ipairs(sums) do
+        if s.label == active then c = s end
+      end
+      c = c or most_critical(sums)
+      local seg = label_items(c, c.label == active, nil)
       if c.pct < 0 or c.login then
         theme.extend(seg, { { Foreground = { Color = c.color } }, { Text = c.login and 'login' or '--' } })
       else
@@ -263,7 +264,7 @@ return function(config, wezterm)
         })
       end
       theme.extend(body, click(c, seg))
-      return theme.pill(body, crit and P.raised or P.pill)
+      return theme.pill(body, c.label == active and P.raised or P.pill)
     end
 
     local out = {}
@@ -282,17 +283,19 @@ return function(config, wezterm)
     return wezterm.GLOBAL.claudequota_visible ~= false
   end
 
-  -- Header pills richest first as { items, w }; empty when no account is cached. The
-  -- caller steps down the list until one fits its free width. Rebuilt when the cache
-  -- was re-read or every 15 s, which keeps the minute-grained countdowns current.
-  local memo = { entries = nil, slot = nil, tiers = {} }
-  function api.tiers()
+  -- Header pills richest first as { items, w }; empty when no account is cached. `active` is
+  -- the label api.active returned (nil: none highlighted). The caller steps down the list
+  -- until one fits its free width. Rebuilt when the cache was re-read, the active account
+  -- changed, or every 15 s, which keeps the minute-grained countdowns current.
+  local memo = { entries = nil, slot = nil, active = nil, tiers = {} }
+  function api.tiers(active)
     local now = os.time()
     local entries = load_entries(now)
     local slot = now // 15
-    if memo.entries ~= entries or memo.slot ~= slot then
+    if memo.entries ~= entries or memo.slot ~= slot or memo.active ~= active then
       local m = chip_model(entries, now)
-      memo.entries, memo.slot, memo.tiers = entries, slot, m and build_tiers(m, now) or {}
+      memo.entries, memo.slot, memo.active = entries, slot, active
+      memo.tiers = m and build_tiers(m, now, active) or {}
     end
     return memo.tiers
   end
@@ -555,6 +558,25 @@ return function(config, wezterm)
   -- The parent hands over agentstatus' per-pane state lookup (as.pane_kind) so a switch can
   -- ask before interrupting a working agent.
   function api.set_pane_kind(fn) api.pane_kind = fn end
+
+  -- Label of the account whose omp runs in the pane the user is working in (the focused pane,
+  -- or the last grid pane while the sidebar or dock has focus), nil when that pane runs no omp
+  -- or its profile pairs with no account. Read live from the process, so moving focus to a
+  -- pane under another profile moves the header highlight within one status tick.
+  function api.active(window)
+    local ok, pane = pcall(function() return window:active_pane() end)
+    if not ok or not pane then return nil end
+    local target = target_pane(window, pane)
+    if not target then return nil end
+    local okf, info = pcall(function() return target:get_foreground_process_info() end)
+    if not okf or not info or basename(info.name or (info.argv or {})[1]) ~= 'omp' then return nil end
+    local profile = running_profile(info)
+    if not profile then return nil end
+    for _, a in ipairs(S.accounts()) do
+      if a.profile == profile then return a.label end
+    end
+    return nil
+  end
 
   -- Alt+q: the selector doubles as the account list; Enter or a click on a row starts omp.
   api.select = wezterm.action_callback(function(window, pane)
