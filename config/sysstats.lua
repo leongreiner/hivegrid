@@ -1,16 +1,17 @@
 -- System stats for the header's right status: CPU, RAM, disk of /, GPU.
 -- Wire: local ss = require('sysstats')(config, wezterm)
 --   ss.visible()        -> boolean (ALT+s toggles; default true)
---   ss.segments(opts)   -> wezterm.format items; opts.compact drops labels and disk
+--   ss.segments(opts)   -> wezterm.format items, width in cells; opts.budget picks the richest
+--                          tier (bars, amounts) that fits; {} , 0 if none does
 --   ss.text(opts)       -> plain text of the same content, for tests
 -- Sampling happens inside segments()/text() behind per-source caches, so no
 -- update-status handler is registered and a hidden segment costs nothing.
 -- Units: all sizes are GiB (1024^3), printed with a "G" suffix.
 return function(config, wezterm)
-  local MUTED, GREEN, AMBER, RED = '#8b949e', '#23d18b', '#e5a50a', '#f14c4c'
+  local theme = require 'theme'
+  local P = theme.P
   local CPU_MEM_TTL, GPU_TTL, DISK_TTL, GPU_RETRY = 2, 3, 30, 60
   local JETSON_LOAD = { '/sys/devices/platform/gpu.0/load', '/sys/devices/gpu.0/load' }
-  local BARS = { '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█' }
 
   local cpu = { prev_total = nil, prev_idle = nil, t = 0, pct = nil }
   local mem = { t = 0, total = nil, avail = nil }
@@ -162,47 +163,73 @@ return function(config, wezterm)
   -- Model and rendering -----------------------------------------------------
 
   local function color(pct)
-    if pct > 85 then return RED end
-    if pct >= 60 then return AMBER end
-    return GREEN
-  end
-
-  local function bar(pct)
-    local i = math.floor(math.max(0, math.min(99.9, pct)) / 100 * 8) + 1
-    return BARS[i]
+    if pct > 85 then return P.red end
+    if pct >= 60 then return P.amber end
+    return P.green
   end
 
   local function gib(kib) return kib / 1048576 end
   local function size(g) return g >= 10 and string.format('%.0f', g) or string.format('%.1f', g) end
 
-  -- Each part: { label, text, pct, color-pct }; pct drives bar and color.
-  local function parts(opts)
-    local compact = opts and opts.compact
+  -- One entry per available source: { label, pct, amount }. amount is padded to a
+  -- fixed width so a changing number never shifts the chips beside it.
+  local function metrics()
     local out = {}
-    if cpu.pct then
-      out[#out + 1] = { 'CPU', string.format('%.0f%%', cpu.pct), cpu.pct }
-    end
+    if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct } end
     if mem.total then
       local used = gib(mem.total - mem.avail)
       out[#out + 1] = {
-        'RAM', string.format('%s/%sG', string.format('%.1f', used), size(gib(mem.total))),
-        100 * (mem.total - mem.avail) / mem.total,
+        'RAM', 100 * (mem.total - mem.avail) / mem.total,
+        string.format('%4s/%sG', string.format('%.1f', used), size(gib(mem.total))),
       }
     end
-    if disk.pct and not compact then
-      out[#out + 1] = {
-        'DSK', string.format('%.0f%% %sG free', disk.pct, size(gib(disk.free_kib))), disk.pct,
-      }
+    if disk.pct then
+      out[#out + 1] = { 'DSK', disk.pct, string.format('%4sG free', size(gib(disk.free_kib))) }
     end
     if gpu.util and gpu.kind == 'nvidia' and gpu.total_mib then
       out[#out + 1] = {
-        'GPU', string.format('%.0f%% %.1f/%sG', gpu.util, gpu.used_mib / 1024, size(gpu.total_mib / 1024)),
-        gpu.util,
+        'GPU', gpu.util, string.format('%4.1f/%sG', gpu.used_mib / 1024, size(gpu.total_mib / 1024)),
       }
     elseif gpu.util and gpu.kind == 'jetson' then
-      out[#out + 1] = { 'GPU', string.format('%.0f%% shared', gpu.util), gpu.util }
+      out[#out + 1] = { 'GPU', gpu.util, 'shared' }
     end
     return out
+  end
+
+  -- Richest first; the caller takes the first tier that fits its cell budget.
+  -- bar = cells of bar (0: label and number only), amount = trailing size text,
+  -- only = labels kept in the tier.
+  local TIERS = {
+    { bar = 8, amount = true },
+    { bar = 6 },
+    { bar = 4 },
+    { bar = 0 },
+    { bar = 0, only = { CPU = true, RAM = true } },
+  }
+
+  local function chip(m, tier)
+    local items = { { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' } }
+    if tier.bar > 0 then
+      theme.extend(items, theme.bar(m[2], tier.bar, color(m[2]), P.track))
+    end
+    items[#items + 1] = { Foreground = { Color = color(m[2]) } }
+    items[#items + 1] = { Text = string.format(tier.bar > 0 and ' %2.0f%%' or '%3.0f%%', m[2]) }
+    if tier.amount and m[3] then
+      items[#items + 1] = { Foreground = { Color = P.dim } }
+      items[#items + 1] = { Text = ' ' .. m[3] }
+    end
+    return theme.chip(items)
+  end
+
+  local function render(tier)
+    local items = {}
+    for _, m in ipairs(metrics()) do
+      if not tier.only or tier.only[m[1]] then
+        if #items > 0 then theme.extend(items, theme.sep()) end
+        theme.extend(items, chip(m, tier))
+      end
+    end
+    return items
   end
 
   local api = {}
@@ -211,31 +238,27 @@ return function(config, wezterm)
     return wezterm.GLOBAL.sysstats_visible ~= false
   end
 
+  -- Items and their width in cells: the richest tier within opts.budget (all
+  -- tiers when absent). Returns {}, 0 when nothing fits or nothing is sampled.
   function api.segments(opts)
     refresh()
-    local compact = opts and opts.compact
-    local items = {}
-    for i, p in ipairs(parts(opts)) do
-      if i > 1 then items[#items + 1] = { Text = '  ' } end
-      if not compact then
-        items[#items + 1] = { Foreground = { Color = MUTED } }
-        items[#items + 1] = { Text = p[1] .. ' ' }
-      end
-      items[#items + 1] = { Foreground = { Color = color(p[3]) } }
-      items[#items + 1] = { Text = p[2] .. ' ' .. bar(p[3]) }
+    local budget = opts and opts.budget or math.huge
+    for _, tier in ipairs(TIERS) do
+      local items = render(tier)
+      local w = theme.width(items)
+      if w > 0 and w <= budget then return items, w end
     end
-    if #items > 0 then
-      items[#items + 1] = { Text = '  ' }
-    end
-    return items
+    return {}, 0
   end
 
   function api.text(opts)
     refresh()
     local compact = opts and opts.compact
     local strs = {}
-    for _, p in ipairs(parts(opts)) do
-      strs[#strs + 1] = (compact and '' or (p[1] .. ' ')) .. p[2] .. ' ' .. bar(p[3])
+    for _, m in ipairs(metrics()) do
+      if not compact or m[1] == 'CPU' or m[1] == 'RAM' then
+        strs[#strs + 1] = string.format('%s %.0f%%', m[1], m[2])
+      end
     end
     return table.concat(strs, '  ')
   end

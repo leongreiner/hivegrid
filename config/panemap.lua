@@ -147,12 +147,14 @@ function M.grid(infos, opts)
 end
 
 -- Render a grid as wezterm.format items. style(i) -> { glyph, color, active,
--- zoomed }. Rows are separated by a dim bar since the status line has one row.
+-- zoomed }. Rows are separated by a dim bar since the status line has one row;
+-- the active cell has a bold cyan number.
 function M.render(g, style, opts)
   opts = opts or {}
-  local sep = opts.sep_color or '#5a5a5a'
-  local numc = opts.number_color or '#8b949e'
-  local active_bg = opts.active_bg or '#37373d'
+  local theme = require 'theme'
+  local P = theme.P
+  local sep = opts.sep_color or P.dim
+  local numc = opts.number_color or P.muted
   local items = {}
   for r = 1, g.rows do
     if r > 1 then
@@ -164,13 +166,10 @@ function M.render(g, style, opts)
       if i then
         local s = style(i)
         local attrs = s.active or s.zoomed
-        if s.active then
-          items[#items + 1] = { Background = { Color = active_bg } }
-          items[#items + 1] = { Attribute = { Intensity = 'Bold' } }
-        end
+        if s.active then items[#items + 1] = { Attribute = { Intensity = 'Bold' } } end
         if s.zoomed then items[#items + 1] = { Attribute = { Underline = 'Single' } } end
         if g.cw == 2 then
-          items[#items + 1] = { Foreground = { Color = numc } }
+          items[#items + 1] = { Foreground = { Color = s.active and P.cyan or numc } }
           items[#items + 1] = { Text = tostring(g.number[i]) }
         end
         items[#items + 1] = { Foreground = { Color = s.color } }

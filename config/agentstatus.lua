@@ -3,10 +3,10 @@
 -- minimap of the active tab's layout, and in a pane picker (LEADER+g).
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
--- `as` is { status, tab_title, bell, pane_label, agent_number, minimap, picker }.
+-- `as` is { status, tab_parts, bell, pane_label, agent_number, minimap, picker }.
 -- WezTerm 20240203 runs ALL update-status handlers in order, but only the FIRST
 -- format-tab-title handler executes, so the parent's own handlers must call
--- as.tab_title(...) / as.status(...) / as.minimap(...) / as.bell(...) themselves.
+-- as.tab_parts(...) / as.status(...) / as.minimap(...) / as.bell(...) themselves.
 -- This module registers only a cache-refreshing update-status handler (no
 -- set_right_status, so it cannot clobber the parent's status).
 --
@@ -35,6 +35,8 @@
 
 local wezterm = require 'wezterm'
 local panemap = require 'panemap'
+local theme = require 'theme'
+local P = theme.P
 
 local QUIET_SECS = 3 -- no screen change for this long => not working (heuristic)
 local RUN_SECS = 6 -- continuous change this long => working, marker or not
@@ -46,13 +48,13 @@ local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
 local AGENTS = { omp = true, claude = true, codex = true, gemini = true, aider = true, opencode = true }
 
 local STATES = {
-  ask = { color = '#d670d6', glyph = '?', text = 'asking', rank = 1 },
-  bell = { color = '#f14c4c', glyph = '!', text = 'bell', rank = 2 },
-  finished = { color = '#23d18b', glyph = '✓', text = 'finished', rank = 3 },
-  waiting = { color = '#e5a50a', glyph = '●', text = 'waiting', rank = 4 },
-  working = { color = '#3b8eea', glyph = '↻', text = 'working', rank = 5 },
-  exited = { color = '#8b949e', glyph = '○', text = 'exited', rank = 6 },
-  idle = { color = '#6e7681', glyph = '▫', text = 'idle', rank = 7 },
+  ask = { color = P.violet, glyph = '?', text = 'asking', rank = 1 },
+  bell = { color = P.red, glyph = '!', text = 'bell', rank = 2 },
+  finished = { color = P.green, glyph = '✓', text = 'finished', rank = 3 },
+  waiting = { color = P.amber, glyph = '●', text = 'waiting', rank = 4 },
+  working = { color = P.accent, glyph = '↻', text = 'working', rank = 5 },
+  exited = { color = P.grey, glyph = '○', text = 'exited', rank = 6 },
+  idle = { color = P.dim, glyph = '▫', text = 'idle', rank = 7 },
 }
 local ORDER = { 'ask', 'bell', 'finished', 'waiting', 'working', 'exited' }
 
@@ -220,7 +222,11 @@ local function scan(window, force)
       end
       entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
     end
-    tabs[tid] = { counts = counts }
+    local lead
+    for _, e in ipairs(entries) do
+      if e.info.is_active then lead = e.pane:pane_id() end
+    end
+    tabs[tid] = { counts = counts, lead = lead or (entries[1] and entries[1].pane:pane_id()) }
     list[#list + 1] = { tab = mtab, id = tid, entries = entries }
   end
 
@@ -231,13 +237,15 @@ local function scan(window, force)
   return list, totals
 end
 
+-- State counts such as "✓8 ●1", each in its state colour, one space apart.
 local function marks(counts)
   local items = {}
   for _, key in ipairs(ORDER) do
     local n = counts[key]
     if n then
+      if #items > 0 then items[#items + 1] = { Text = ' ' } end
       items[#items + 1] = { Foreground = { Color = STATES[key].color } }
-      items[#items + 1] = { Text = STATES[key].glyph .. n .. ' ' }
+      items[#items + 1] = { Text = STATES[key].glyph .. n }
     end
   end
   return items
@@ -248,7 +256,9 @@ local api = { internals = { markers = markers, step = step } }
 -- Right-status items; refreshes state as a side effect.
 function api.status(window, _)
   local _, totals = scan(window)
-  return marks(totals)
+  local items = marks(totals)
+  if #items == 0 then return {} end
+  return theme.chip(items)
 end
 
 -- Minimap of the active tab: one glyph per layout cell, rows split by a bar,
@@ -269,32 +279,30 @@ function api.minimap(window, opts)
         local s = STATES[e.st.kind or 'idle']
         return { glyph = s.glyph, color = s.color, active = e.info.is_active, zoomed = e.info.is_zoomed }
       end)
-      items[#items + 1] = 'ResetAttributes'
-      items[#items + 1] = { Text = ' ' }
-      return items
+      return theme.chip(items)
     end
   end
   return {}
 end
 
-function api.tab_title(tab, _, _, _, _, max_width)
-  local st = panes[tab.active_pane.pane_id]
-  local title = tab.tab_title
-  if not title or title == '' then
-    title = (st and st.label and st.label ~= '' and st.label) or tab.active_pane.title
+-- Pieces of a tab title: the pane's directory, the agent/process running there (nil
+-- for a plain shell), and the state marks of the tab's background panes.
+function api.tab_parts(tab)
+  -- A sidebar pane is not tracked: name the tab after the grid pane it sits beside.
+  local st = panes[tab.active_pane.pane_id] or panes[(tabs[tab.tab_id] or {}).lead]
+  local name, proc = tab.tab_title, nil
+  if not name or name == '' then
+    if st and st.cwd and st.cwd ~= '' then
+      name = basename(st.cwd)
+      if name == '' then name = st.cwd end
+      if st.proc and st.proc ~= '' and not SHELLS[st.proc] then proc = st.proc end
+    else
+      name = tab.active_pane.title
+    end
   end
   local counts = (tabs[tab.tab_id] or {}).counts or {}
   local tail = marks(counts)
-  local reserve = 0
-  for _, item in ipairs(tail) do
-    if item.Text then reserve = reserve + #item.Text end
-  end
-  local items = { { Text = string.format(' %d: %s ', tab.tab_index + 1, title) } }
-  if max_width and max_width > reserve + 8 then
-    items[1].Text = wezterm.truncate_right(items[1].Text, max_width - reserve - 1) .. ' '
-  end
-  for _, item in ipairs(tail) do items[#items + 1] = item end
-  return items
+  return { name = name, proc = proc, marks = tail, marks_width = theme.width(tail) }
 end
 
 -- Called from the parent's bell handler; never returns false so the toast runs.
@@ -335,11 +343,11 @@ local function pick(window, pane)
       choices[#choices + 1] = {
         id = tostring(e.pane:pane_id()),
         label = wezterm.format {
-          { Foreground = { Color = '#8b949e' } },
+          { Foreground = { Color = P.muted } },
           { Text = (multi and ('tab ' .. ti .. ' ') or '') .. 'agent ' .. e.num .. ' ' },
           { Foreground = { Color = s.color } },
           { Text = string.format('[%s]', s.text) .. string.rep(' ', 9 - #s.text) },
-          { Foreground = { Color = '#cccccc' } },
+          { Foreground = { Color = P.text } },
           { Text = (e.st.cwd ~= '' and e.st.cwd or e.st.label or '') .. (here and '  (here)' or '') },
         },
       }

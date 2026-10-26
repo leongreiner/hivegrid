@@ -20,7 +20,8 @@ local function build(config, wezterm)
     files = { bin = wezterm.home_dir .. '/.local/bin/yazi' },
     git = { bin = wezterm.home_dir .. '/.local/bin/lazygit' },
   }
-  local COLORS = { accent = '#3b8eea', muted = '#8b949e' }
+  local theme = require 'theme'
+  local COLORS = { accent = theme.P.accent, muted = theme.P.muted }
 
   -- Runs inside the handle pane. State file: "<open|closed> <files|git>", written by
   -- Lua, polled here so a resize (WINCH) or a state change redraws.
@@ -32,13 +33,15 @@ trap 'dirty=1' WINCH
 stty -echo
 printf '\e[?1049h\e[?25l\e[?7l\e[?1000h\e[?1006h'
 draw() {
-  local s=${1%% *} v=${1#* } r c g=▶ lab col='139;148;158' i out
+  local s=${1%% *} v=${1#* } r c g=▶ lab col='116;135;173' i out
   read -r r c < <(stty size </dev/tty)
-  [[ $s == open ]] && { g=◀; col='204;204;204'; }
+  [[ $s == open ]] && { g=◀; col='201;214;238'; }
   [[ $v == git ]] && lab=GIT || lab=EXPLORER
-  out=$'\e[0m\e[48;2;37;37;38m\e[2J\e[2;2H\e[1;38;2;59;142;234m'$g
-  out+=$'\e[0;48;2;37;37;38;38;2;'$col'm'
+  out=$'\e[0m\e[48;2;15;26;48m\e[2J\e[2;2H\e[1;38;2;79;157;255m'$g
+  out+=$'\e[0;48;2;15;26;48;38;2;'$col'm'
   for ((i = 0; i < ${#lab} && i + 5 < r; i++)); do out+=$'\e['$((4 + i))';2H'${lab:i:1}; done
+  out+=$'\e[0;48;2;7;13;25m'
+  for ((i = 1; i <= r; i++)); do out+=$'\e['$i';'$c'H '; done
   printf %s "$out"
 }
 dirty=1 prev=
@@ -247,7 +250,7 @@ done
   function api.toggle(window, pane, view) apply(window, pane, view) end
 
   -- Reconciles state with the live tab, so call it from update-status. Returns
-  -- wezterm.format items such as " [files] ": accent colour while open, muted when
+  -- wezterm.format items for a chip such as "◀ files": accent colour while open, muted when
   -- hidden, nothing before the sidebar was ever opened in this tab.
   function api.status(window)
     local tab = window:active_tab()
@@ -264,10 +267,10 @@ done
       write_state(rec)
     end
     if not rec.handle then return {} end
-    return {
+    return theme.chip({
       { Foreground = { Color = rec.content and COLORS.accent or COLORS.muted } },
-      { Text = ' [' .. (rec.view == 'git' and 'git' or 'files') .. '] ' },
-    }
+      { Text = (rec.content and '◀ ' or '▶ ') .. (rec.view == 'git' and 'git' or 'files') },
+    })
   end
 
   wezterm.on('user-var-changed', function(window, pane, name)
