@@ -6,8 +6,8 @@
 --                             account labelled `active` (cq.active) is raised and bold
 --   cq.text()              -> plain text of the chip, for tests
 --   cq.refresh_if_due(win) -> spawns `claude-quota refresh` at most once per 60 s (call from update-status)
---   cq.select              -> action for ALT+q: an InputSelector with both windows and reset
---                             countdowns of every account
+--   cq.select              -> action for ALT+q: the Hivegrid picker (picker.lua) with both windows
+--                             and reset countdowns of every account
 -- Reads only the numbers cached by ~/.local/bin/claude-quota (io.open, re-read at most every 5 s);
 -- the network and credentials are never touched from the GUI thread.
 -- The accounts shown come from settings.lua (the panel's list, else today's three, plus any
@@ -150,9 +150,15 @@ return function(config, wezterm)
 
   local function lab(s, n) return n and s.label:sub(1, n) or s.label end
 
-  local function worst_text(s)
-    if s.pct < 0 then return s.login and 'login' or '--' end
-    return string.format('%.0f%%', s.pct) .. (s.stale and '~' or '')
+  -- The worst window's number in its colour; the stale mark `~` is amber in every tier.
+  local function worst_items(s)
+    if s.pct < 0 then return { { Foreground = { Color = s.color } }, { Text = s.login and 'login' or '--' } } end
+    local items = { { Foreground = { Color = s.color } }, { Text = string.format('%.0f%%', s.pct) } }
+    if s.stale then
+      items[#items + 1] = { Foreground = { Color = P.amber } }
+      items[#items + 1] = { Text = '~' }
+    end
+    return items
   end
 
   local function label_items(s, crit, n)
@@ -237,7 +243,7 @@ return function(config, wezterm)
         if s.login then
           theme.extend(seg, theme.chip('login', P.amber, P.pill))
         else
-          theme.extend(seg, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
+          theme.extend(seg, worst_items(s))
         end
         parts[#parts + 1] = click(s, seg)
       end
@@ -258,10 +264,8 @@ return function(config, wezterm)
       if c.pct < 0 or c.login then
         theme.extend(seg, { { Foreground = { Color = c.color } }, { Text = c.login and 'login' or '--' } })
       else
-        theme.extend(seg, {
-          { Foreground = { Color = P.muted } }, { Text = c.worst[1] .. ' ' },
-          { Foreground = { Color = c.color } }, { Text = worst_text(c) },
-        })
+        theme.extend(seg, { { Foreground = { Color = P.muted } }, { Text = c.worst[1] .. ' ' } })
+        theme.extend(seg, worst_items(c))
       end
       theme.extend(body, click(c, seg))
       return theme.pill(body, c.label == active and P.raised or P.pill)
@@ -323,44 +327,35 @@ return function(config, wezterm)
     pcall(wezterm.background_child_process, { BIN, 'refresh' })
   end
 
-  -- Selector rows ------------------------------------------------------------
+  -- Picker rows ------------------------------------------------------------------
 
-  -- The selector reverses the highlighted row, so neutral text takes the default
-  -- colour (muted bits use faint intensity) and only the gauge and number carry colour.
-  local function row_label(s, now)
-    local FAINT, NORMAL = { Attribute = { Intensity = 'Half' } }, { Attribute = { Intensity = 'Normal' } }
-    local items = {
-      { Foreground = { Color = s.color } }, { Text = BLOCK .. ' ' },
-      'ResetAttributes', { Attribute = { Intensity = 'Bold' } },
-      { Text = string.format('%-8s', s.label) }, NORMAL,
-    }
+  -- One account as a picker row (picker.lua): its number (the LEADER+u digit), the label,
+  -- then per window "5h ━━━━━━━━──── 42% ↻2h10m" as coloured segments; stale numbers and the
+  -- account of the pane's running omp are marked on the right.
+  local function picker_row(s, n, now, active)
+    local cols = { { text = s.label, bold = true } }
     if #s.windows == 0 then
-      items[#items + 1] = { Foreground = { Color = s.color } }
-      items[#items + 1] = { Text = s.login and 'login required: the token expired or was rejected' or 'no data yet' }
+      cols[2] = { text = s.login and 'login required: the token expired or was rejected' or 'no data yet',
+        color = s.login and 'amber' or 'dim' }
     else
-      for i, w in ipairs(s.windows) do
+      for _, w in ipairs(s.windows) do
         local pct, reset = w[2].pct, w[2].reset_at
-        if i > 1 then items[#items + 1] = 'ResetAttributes'; items[#items + 1] = FAINT; items[#items + 1] = { Text = '   │   ' } end
-        items[#items + 1] = 'ResetAttributes'
-        items[#items + 1] = FAINT
-        items[#items + 1] = { Text = w[1] .. ' ' }
-        theme.extend(items, theme.line(pct, 12, color(pct), P.dim))
-        items[#items + 1] = 'ResetAttributes'
-        items[#items + 1] = { Foreground = { Color = color(pct) } }
-        items[#items + 1] = { Text = string.format(' %3.0f%%', pct) }
-        items[#items + 1] = 'ResetAttributes'
-        items[#items + 1] = FAINT
-        items[#items + 1] = {
-          Text = type(reset) == 'number' and string.format('  resets in %-6s', remaining(reset - now)) or '',
-        }
-      end
-      if s.stale then
-        items[#items + 1] = 'ResetAttributes'
-        items[#items + 1] = { Foreground = { Color = P.amber } }
-        items[#items + 1] = { Text = '  ~ stale' }
+        local segs = { { text = w[1] .. ' ', color = 'muted' } }
+        theme.extend(segs, theme.line(pct, 10, color(pct), theme.lerp(P.surface, P.edge_hi, 0.35)))
+        segs[#segs + 1] = { text = string.format(' %3.0f%%', pct), color = color(pct) }
+        if type(reset) == 'number' then
+          segs[#segs + 1] = { text = ' ↻' .. remaining(reset - now), color = 'dim' }
+        end
+        cols[#cols + 1] = { segs = segs }
       end
     end
-    return wezterm.format(items)
+    local meta, meta_color
+    if s.stale then meta, meta_color = '~ stale', 'amber' end
+    if s.label == active then meta, meta_color = (meta and (meta .. ' · ') or '') .. 'in use', 'accent' end
+    return {
+      id = s.label, key = n <= 9 and tostring(n) or nil, glyph = '●', color = s.color,
+      cols = cols, meta = meta, meta_color = meta_color,
+    }
   end
 
   -- Starting omp for an account / switching a running omp -----------------------
@@ -535,15 +530,17 @@ return function(config, wezterm)
         switch_account(window, target, info, running, profile, label)
       end
       if kind == 'working' or kind == 'busy' or kind == 'attention' then
-        window:perform_action(wezterm.action.InputSelector {
-          title = 'Switch account',
-          description = string.format('omp is %s in this pane. Switch to %s anyway? Esc keeps omp as it is.',
-            kind == 'attention' and 'waiting for an answer' or 'working', label),
-          choices = { { id = 'no', label = 'No, keep omp running' }, { id = 'yes', label = 'Yes, switch now' } },
-          action = wezterm.action_callback(function(_, _, id)
-            if id == 'yes' then go(true) end
-          end),
-        }, target)
+        require('picker').open(window, target, {
+          title = 'Switch account', crumb = label,
+          confirm = {
+            text = string.format('omp is %s in this pane. Switch it to %s anyway? %s, omp quits and the chat '
+              .. 'resumes under %s.', kind == 'attention' and 'waiting for an answer' or 'working', label,
+              kind == 'attention' and 'The question is left unanswered' or 'Its turn is interrupted', label),
+            yes = 'Yes, switch now', no = 'No, keep omp running', danger = true,
+          },
+        }, function(_, _, id)
+          if id == 'yes' then go(true) end
+        end)
         return
       end
       return go(false)
@@ -578,29 +575,25 @@ return function(config, wezterm)
     return nil
   end
 
-  -- Alt+q: the selector doubles as the account list; Enter or a click on a row starts omp.
+  -- Alt+q: the picker doubles as the account list; Enter, a click or the account's digit (the
+  -- LEADER+u one) starts omp with it in the pane, or moves the running omp over.
   api.select = wezterm.action_callback(function(window, pane)
     local now = os.time()
-    local choices = {}
+    local active = api.active(window)
+    local index = {}
+    for i, a in ipairs(S.accounts()) do index[a.label] = i end
+    local rows = {}
     for _, e in ipairs(load_entries(now)) do
-      choices[#choices + 1] = { id = tostring(e.label), label = row_label(summarize(e, now), now) }
+      local s = summarize(e, now)
+      rows[#rows + 1] = picker_row(s, index[s.label] or 99, now, active)
     end
-    if #choices == 0 then
-      choices[1] = { id = 'none', label = wezterm.format {
-        { Foreground = { Color = P.muted } }, { Text = 'No quota data cached yet' },
-      } }
-    end
-    window:perform_action(
-      wezterm.action.InputSelector {
-        title = 'Claude quota',
-        description = 'Enter or click: start omp with that account in the active pane. Esc closes.',
-        choices = choices,
-        action = wezterm.action_callback(function(win, p, id)
-          if id and id ~= 'none' then start_omp(win, p, id) end
-        end),
-      },
-      pane
-    )
+    require('picker').open(window, pane, {
+      title = 'Claude quota', crumb = #rows .. (#rows == 1 and ' account' or ' accounts'),
+      description = 'Starts omp with the account in this pane, or moves the omp running here to it.',
+      verb = 'start', rows = rows, empty = 'No quota data cached yet',
+    }, function(win, p, id)
+      start_omp(win, p, id)
+    end)
   end)
 
   -- Exposed for tests of the pure model.

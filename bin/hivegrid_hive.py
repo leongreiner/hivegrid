@@ -1,28 +1,42 @@
 """The Hivegrid hive: every agent pane as a hex cell, coloured by state. A cell shows only its
 status (glyph, pane number, folder); selecting one opens a larger popover with the details, the
-last screen lines and a prompt line. The agent data comes from hivegrid_agents (imported lazily)."""
+last screen lines and a prompt line. The agent data comes from hivegrid_agents (imported lazily).
+
+Where the terminal shows inline images (WezTerm, PIL installed, HIVEGRID_NO_IMAGES unset) the
+cells are anti-aliased images (CellArt) with the cell text written as terminal text into holes
+of the image; elsewhere they are drawn with block characters."""
+import collections
+import io
+import math
 import os
 import textwrap
 import threading
 import time
+import unicodedata
 
 import hivegrid_hex as X
 import hivegrid_ui as U
 from hivegrid_ui import BOLD, DIM
 
+try:
+    from PIL import Image, ImageDraw
+except Exception:  # noqa: BLE001 - no PIL: block characters
+    Image = ImageDraw = None
+
+# The hive's states in legend order; glyphs, words and colours come from the shared table.
 STATES = ("working", "busy", "attention", "done", "idle", "exited")
-GLYPH = {"working": "↻", "busy": "◔", "attention": "?", "done": "✓", "idle": "·", "exited": "○"}
-WORD = {"working": "working", "busy": "busy", "attention": "needs you", "done": "done", "idle": "idle",
-        "exited": "exited"}
+GLYPH = {s: U.STATES[s].glyph for s in STATES}
+WORD = {s: U.STATES[s].label for s in STATES}
 BUSY_STATES = ("working", "busy", "attention")
 ADD = "add"
 PEEK_LINES = 10
+HOVER_LIGHT = 0.16  # a hovered cell's fill moves this far toward `bright`
+POP_MIN_W, POP_MAX_W = 44, 64  # popover width: 42% of the area within these
 
 
 def state_color(p, state):
-    """Stable legend colour of a state: working blue, busy amber, attention violet, done green."""
-    return {"working": p.get("blue", p["accent"]), "busy": p["amber"], "attention": p["violet"],
-            "done": p["green"], "idle": p["grey"], "exited": p["muted"]}.get(state, p["grey"])
+    """Legend colour of a state, from the shared state table (unknown states read as idle)."""
+    return U.state_style(p, state)[2]
 
 
 def state_fill(p, state):
@@ -32,6 +46,132 @@ def state_fill(p, state):
     if state == "exited":
         return U.mix(p["base"], p["grey"], 0.3), p["bright"]
     return state_color(p, state), p["deep"]
+
+
+# ---- image cells ---------------------------------------------------------------------
+
+SS = 4  # supersampling of the sprite masks: PIL does not smooth polygon edges
+
+
+def art_metrics(cw, ch):
+    """(gap, ring, sep, margin) in pixels for cells of cw x ch px: `gap` is how far the fill sits
+    inside the lattice cell (half the space between two hexes); the selection ring runs in that
+    space, `sep` px off the fill, so selecting moves no text; text cells keep `margin` px from
+    the lattice edge, on flat fill."""
+    gap = max(2.5, cw * 0.55)
+    ring = max(2.0, round(cw * 0.35))
+    sep = max(1.0, cw / 8)
+    return gap, ring, sep, gap + max(1.5, cw * 0.2)
+
+
+def outline(form, cw, ch):
+    """(polygon in px relative to the cell's box top-left, corner radius) of a cell form:
+    ('hex', ry) or ('tile', tw, th)."""
+    if form[0] == "hex":
+        return X.hex_polygon(form[1], cw, ch), max(2.0, min(X.hex_extent(form[1], cw, ch)) * 0.12)
+    return X.tile_polygon(form[1], form[2], cw, ch), max(2.0, cw * 0.6)
+
+
+class CellArt:
+    """Renders hive cells (hexes or tiles) as inline images. A sprite (one cell in one look) is
+    cached per form, size and colours; a frame is cut into strips of cell rows, and a strip's
+    PNG is cached by what is in it, so a hover or a state change re-encodes only the strips that
+    cell touches, and resending an unchanged strip hits WezTerm's image cache."""
+
+    MAX_PNGS = 256
+
+    def __init__(self):
+        self.sprites = {}
+        self.pngs = collections.OrderedDict()
+        self.encoded = 0  # strips encoded so far (tests watch the caching with it)
+
+    def sprite(self, form, cw, ch, fill, ring=None, edge=None):
+        """-> (RGBA image, left, top): the cell filled with `fill`, with a selection `ring`
+        around it and/or a 1 px `edge` inside it; (left, top) is the image's corner relative to
+        the cell's box top-left in pixels (the shape reaches a little beyond the box)."""
+        key = (form, cw, ch, fill, ring, edge)
+        hit = self.sprites.get(key)
+        if hit is not None:
+            return hit
+        poly, r = outline(form, cw, ch)
+        xs, ys = [x for x, _ in poly], [y for _, y in poly]
+        left, top = math.floor(min(xs)), math.floor(min(ys))
+        w, h = math.ceil(max(xs)) - left, math.ceil(max(ys)) - top
+        poly = [(x - left, y - top) for x, y in poly]
+        gap, rw, sep, _ = art_metrics(cw, ch)
+
+        def shape(d):
+            return X.rounded(X.inset(poly, d), max(r - d + gap, 1.0))
+
+        def mask(*layers):
+            m = Image.new("L", (w * SS, h * SS), 0)
+            draw = ImageDraw.Draw(m)
+            for pts, value in layers:
+                draw.polygon([(x * SS, y * SS) for x, y in pts], fill=value)
+            return m.resize((w, h), Image.BOX)  # an exact average: no ringing at the edges
+
+        def layer(color, m):
+            lay = Image.new("RGBA", (w, h), U.rgb(color) + (255,))
+            lay.putalpha(m)
+            return lay
+
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        if ring:
+            outer = max(gap - sep - rw, 0.5)
+            img.alpha_composite(layer(ring, mask((shape(outer), 255), (shape(outer + rw), 0))))
+        img.alpha_composite(layer(fill, mask((shape(gap), 255))))
+        if edge:
+            img.alpha_composite(layer(edge, mask((shape(gap), 255), (shape(gap + 1), 0))))
+        self.sprites[key] = (img, left, top)
+        return img, left, top
+
+    def strips(self, items, region, cw, ch, holes=(), cut=None, band=4):
+        """The images of a frame: items [(form, x, y, fill, ring, edge)] (box top-left in cells),
+        drawn over the cell rect `region` (x, y, w, h) cut into strips of `band` rows, with the
+        cell rects `holes` and `cut` left transparent (the text and the popover drawn as cells
+        show there). -> [(x, y, w, h, png)], strips without a cell left out."""
+        rx, ry0, rw, rh = region
+        placed = []
+        for it in items:
+            img, left, top = self.sprite(it[0], cw, ch, *it[3:])
+            placed.append((it, img, (it[1] - rx) * cw + left, (it[2] - ry0) * ch + top))
+        out = []
+        for sy in range(0, rh, band):
+            sh = min(band, rh - sy)
+            py0, py1 = sy * ch, (sy + sh) * ch
+            members = [(it, img, px, py) for it, img, px, py in placed if py < py1 and py + img.height > py0]
+            if not members:
+                continue
+            inside = lambda r: r[1] < ry0 + sy + sh and r[1] + r[3] > ry0 + sy
+            hs = tuple(r for r in holes if inside(r))
+            c = cut if cut and inside(cut) else None
+            key = (cw, ch, rx, rw, ry0 + sy, sh, tuple((it, px, py) for it, _, px, py in members), hs, c)
+            png = self.pngs.get(key)
+            if png is None:
+                png = self._strip(members, rw * cw, sh * ch, py0, rx, ry0 + sy, cw, ch, hs, c)
+                self.pngs[key] = png
+                if len(self.pngs) > self.MAX_PNGS:
+                    self.pngs.popitem(last=False)
+            else:
+                self.pngs.move_to_end(key)
+            out.append((rx, ry0 + sy, rw, sh, png))
+        return out
+
+    def _strip(self, members, w, h, py0, cx0, cy0, cw, ch, holes, cut):
+        self.encoded += 1
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        for _, spr, px, py in members:
+            py -= py0
+            sx, sy = max(-px, 0), max(-py, 0)
+            ex, ey = min(spr.width, w - px), min(spr.height, h - py)
+            if ex > sx and ey > sy:
+                img.alpha_composite(spr, dest=(px + sx, py + sy), source=(sx, sy, ex, ey))
+        for x, y, cw_, ch_ in holes + ((cut,) if cut else ()):
+            box = ((x - cx0) * cw, (y - cy0) * ch, (x - cx0 + cw_) * cw, (y - cy0 + ch_) * ch)
+            img.paste((0, 0, 0, 0), tuple(max(v, 0) for v in box))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        return buf.getvalue()
 
 
 def human_age(seconds):
@@ -69,6 +209,14 @@ def screen_line(text, w):
     return clip(indent + " ".join(text.split()), w)
 
 
+def calm_title(title):
+    """omp's session title without its leading emoji (📂, 🙋, ⏱️); mirrors agentstatus.lua."""
+    t = (title or "").lstrip()
+    while t and (U.char_width(t[0]) == 0 or unicodedata.category(t[0]) == "So"):
+        t = t[1:]
+    return t.lstrip()
+
+
 def folder(cwd):
     if not cwd:
         return ""
@@ -76,13 +224,6 @@ def folder(cwd):
     if cwd.rstrip("/") == home.rstrip("/"):
         return "~"
     return os.path.basename(cwd.rstrip("/")) or "/"
-
-
-def tilde(path):
-    home = os.path.expanduser("~")
-    if path and (path == home or path.startswith(home + "/")):
-        return "~" + path[len(home):]
-    return path or ""
 
 
 def place_popover(area, anchor, widths, h):
@@ -127,7 +268,7 @@ def _threaded(fn):
 class HivePage(U.Page):
     title = "Hive"
 
-    def __init__(self, model, core=None, now=time.time, background=_threaded):
+    def __init__(self, model, core=None, now=time.time, background=_threaded, images=None, cell_px=None):
         self.model = model
         self._core = core
         self.now = now
@@ -155,6 +296,14 @@ class HivePage(U.Page):
         self._peeked_at = -1e9
         self._sec = None
         self._force = True
+        # image cells: on where the terminal shows images (None: ask hivegrid_ui); cell_px fixes
+        # the cell size in pixels (tests), else it is read from the tty at every frame
+        self.images = (U.images_enabled() if images is None else images) and Image is not None
+        self.cell_px = cell_px
+        self.art = CellArt() if self.images else None
+        self.hover = None          # id of the cell under the pointer (image cells draw it lighter)
+        self.ry = None             # hex row pitch of the last layout (None: tiles)
+        self.tile = None
 
     # core -------------------------------------------------------------------
     def core(self):
@@ -473,6 +622,8 @@ class HivePage(U.Page):
         if sec != self._sec:
             self._sec = sec
             changed = changed or self.open
+        if self.art_form() is not None and self.hovered(ui) != self.hover:
+            changed = True  # image cells shade the hovered hex themselves
         return changed
 
     def key(self, ui, mods, key):
@@ -575,7 +726,14 @@ class HivePage(U.Page):
         self.ry = None
         self.tile = None
         if self.mode == "hex":
-            cw, ch, pos = X.fit(total, w, h)
+            # The largest hexes that leave room for the popover on both sides (the band is
+            # centred), so opening it never covers a cell; a narrow window takes the largest
+            # that fits at all.
+            side = POP_MIN_W + 1
+            cw, ch, pos = X.fit(total, w - 2 * side, h) if w > 2 * side else (0, 0, [])
+            pos = [(q, r, px + side, py) for q, r, px, py in pos]
+            if not cw:
+                cw, ch, pos = X.fit(total, w, h)
             if cw:
                 ry = X.ry_of(cw)
                 _, _, rows, region = X.shape(ry)
@@ -617,16 +775,20 @@ class HivePage(U.Page):
             cv.put(x + max((w - len(msg)) // 2, 0), ay, msg, p["muted"])
         if self.error:
             cv.put(x + 1, ay, short(self.error, w - 2), p["red"])
-        for c in cells:
-            self.draw_cell(ui, cv, c)
+        if self.art_form() is not None:
+            self.draw_art(ui, cv, cells)
+        else:
+            for c in cells:
+                self.draw_cell(ui, cv, c)
         agent = self.selected_agent()
         if self.open and agent is not None:
             self.popover(ui, cv, agent, next((c for c in cells if c["id"] == agent.pane), None))
 
     def popover_height(self, agent, W):
-        """(H, fixed rows) of the popover at width W: borders, state+cwd, pending dialog, error,
-        separator, note+input+buttons, plus up to PEEK_LINES screen lines."""
-        fixed = 2 + 2 + len(self.pending_block(agent, W - 4)) + (1 if agent.error else 0) + 1 + 3
+        """(H, fixed rows) of the popover at width W: borders and a padding row under the title
+        and above the bottom border, state+cwd, pending dialog, error, separator,
+        note+input+buttons, plus up to PEEK_LINES screen lines."""
+        fixed = 2 + 2 + 2 + len(self.pending_block(agent, W - 4)) + (1 if agent.error else 0) + 1 + 3
         return min(fixed + PEEK_LINES, self.area[3]), fixed
 
     def place(self, agent, cell):
@@ -634,7 +796,7 @@ class HivePage(U.Page):
         cells at full width, else below or above it (a row of tiles); otherwise it sits beside the
         selected cell, covering neighbours but never that cell."""
         ax, ay, aw, ah = self.area
-        wide = aw if aw < 44 else min(max(44, aw * 42 // 100), 64)
+        wide = aw if aw < POP_MIN_W else min(max(POP_MIN_W, aw * 42 // 100), POP_MAX_W)
         if cell is None:
             return place_popover(self.area, (ax + aw // 2, ay + ah // 2, 1, 1), [wide], self.popover_height(agent, wide)[0])
         left = min(d["x"] for d in self.cells)
@@ -667,7 +829,8 @@ class HivePage(U.Page):
         cv.fill(x, y, w, 1, bg=p["base"])
         full = "  ".join(f"{GLYPH[s]} {WORD[s]} {counts[s]}" for s in STATES)
         away = sum(1 for a in self.agents if self.elsewhere(a))
-        right = (f"{len(self.agents)} agents" + (f" ({away} in other tabs · g gathers)" if away else "") + " · "
+        n = len(self.agents)
+        right = (f"{n} agent{'' if n == 1 else 's'}" + (f" ({away} in other tabs · g gathers)" if away else "") + " · "
                  + ("tiles" if self.mode == "tile" or self.fallback else "hex"))
         use_full = len(full) + len(right) + 4 <= w
         cx = x + 1
@@ -686,17 +849,123 @@ class HivePage(U.Page):
         n = str(agent.num or agent.pane)
         return f"{agent.tab_index}·{n}" if len({a.tab for a in self.agents}) > 1 else n
 
-    def draw_cell(self, ui, cv, c):
-        p = ui.pal
-        selected = c["id"] == self.sel
+    def look(self, p, c):
+        """(agent, fill, text colour, lines) of a cell before selection and hover: glyph and
+        number, then the folder; on tall cells (hexes h >= 8, tiles h >= 5) glyph, number and
+        folder each a line."""
         agent = self.by_pane.get(c["pane"]) if c["kind"] == "agent" else None
+        tall = c["h"] >= (8 if c["rows"] is not None else 5)
         if agent is not None:
             fill, fg = state_fill(p, agent.state)
             glyph, number, label = GLYPH.get(agent.state, "·"), self.number(agent), folder(agent.cwd)
-            lines = [f"{glyph} {number}", label]
+            lines = [glyph, number, label] if tall else [f"{glyph} {number}", label]
         else:
             fill, fg = p["pill"], p["accent"]
-            lines = ["+", "new"]
+            lines = ["+", "new", ""] if tall else ["+", "new"]
+        return agent, fill, fg, lines
+
+    def art_form(self):
+        """The form the image cells take in the last layout: ('hex', ry), ('tile', tw, th), or
+        None for block characters (no images, or tiles of 1-2 rows: their text rows touch the
+        tile's edges, so text holes would show through the gap)."""
+        if not self.images:
+            return None
+        if self.ry is not None:
+            return ("hex", self.ry)
+        if self.tile and self.tile[0] and self.tile[1] > 2:
+            return ("tile",) + tuple(self.tile)
+        return None
+
+    def cell_at(self, x, y):
+        """The cell whose click area holds the character (x, y), or None."""
+        for c in self.cells:
+            if c["region"] is not None:
+                i = y - c["y"]
+                if 0 <= i < len(c["region"]) and c["region"][i][0] <= x - c["x"] < c["region"][i][1]:
+                    return c
+            elif c["x"] - 1 <= x < c["x"] + c["w"] + 1 and c["y"] <= y < c["y"] + c["h"]:
+                return c
+        return None
+
+    def hovered(self, ui):
+        """Id of the cell under the pointer (not when the popover covers that spot), or None."""
+        pt = getattr(ui, "pointer", None)
+        if pt is None or ui.modal:
+            return None
+        r = self.pop_rect
+        if r and r[0] <= pt[0] < r[0] + r[2] and r[1] <= pt[1] < r[1] + r[3]:
+            return None
+        c = self.cell_at(*pt)
+        return c["id"] if c else None
+
+    def click_at(self, ui):
+        """Click on an image hex: the cell under the pointer, else (a gap) closes the popover."""
+        c = self.cell_at(*ui.pointer) if ui.pointer else None
+        if c is None:
+            self.close_popover()
+        else:
+            self.click(ui, c)
+
+    def draw_art(self, ui, cv, cells):
+        """The cells as one set of images: fill in the state colour, a continuous ring around the
+        selected cell, the hovered one lighter; glyph, number and folder stay terminal text,
+        written into holes of the image on the same fill colour."""
+        if not cells:
+            return
+        p = ui.pal
+        cw, ch = self.cell_px or U.cell_pixels()
+        form = self.art_form()
+        if form[0] == "hex":
+            spans = X.text_spans(form[1], cw, ch, art_metrics(cw, ch)[3])
+        else:
+            spans = ((1, form[1] - 1),) * form[2]
+        agent = self.selected_agent()
+        cut = None
+        if self.open and agent is not None:
+            cut = self.pop_rect = self.place(agent, next((c for c in cells if c["id"] == agent.pane), None))
+        self.hover = self.hovered(ui)
+        items, holes, texts = [], [], []
+        for c in cells:
+            agent, fill, fg, lines = self.look(p, c)
+            if self.hover == c["id"]:
+                fill = U.mix(fill, p["bright"], HOVER_LIGHT)
+            ring = p["bright"] if c["id"] == self.sel else None
+            edge = U.mix(p["pill"], p["accent"], 0.35) if agent is None else None
+            items.append((form, c["x"], c["y"], fill, ring, edge))
+            start = (c["h"] - len(lines)) // 2
+            if len(lines) == 3 and not all(spans[start + k] for k, t in enumerate(lines) if t):
+                lines = [f"{lines[0]} {lines[1]}", lines[2]] if agent is not None else ["+", "new"]
+                start = (c["h"] - len(lines)) // 2
+            for k, text in enumerate(lines):
+                span = spans[start + k] if 0 <= start + k < len(spans) else None
+                if not span or not text:
+                    continue
+                text = short(text, span[1] - span[0])
+                tw = U.text_width(text)
+                tx, ty = c["x"] + span[0] + (span[1] - span[0] - tw) // 2, c["y"] + start + k
+                holes.append((tx, ty, tw, 1))
+                texts.append((tx, ty, text, fg, fill, BOLD if k == 0 or len(lines) == 3 and k == 1 else 0))
+            # one region per box with a dispatcher: the frame shades one-row regions on hover,
+            # which would show through the image's edges; the boxes overlap, click_at decides
+            gx = 0 if form[0] == "hex" else 1  # a tile's click area takes the gap columns too
+            cv.hit(c["x"] - gx, c["y"], c["w"] + 2 * gx, c["h"], lambda b: self.click_at(ui))
+        ax, ay, aw, ah = self.area
+        x0 = max(min(c["x"] for c in cells) - 1, ax)
+        x1 = min(max(c["x"] + c["w"] for c in cells) + 1, ax + aw)
+        y0 = max(min(c["y"] for c in cells) - 1, ay)
+        y1 = min(max(c["y"] + c["h"] for c in cells) + 1, ay + ah)
+        band = max(form[1] if form[0] == "hex" else X.tile_pitch(form[1], form[2])[1], 2)
+        for strip in self.art.strips(items, (x0, y0, x1 - x0, y1 - y0), cw, ch, tuple(holes), cut, band=band):
+            cv.image(*strip)
+        for tx, ty, text, fg, bg, attrs in texts:
+            cv.put(tx, ty, text, fg, bg, attrs)
+
+    def draw_cell(self, ui, cv, c):
+        p = ui.pal
+        selected = c["id"] == self.sel
+        agent, fill, fg, lines = self.look(p, c)
+        if agent is not None:
+            glyph, number, label = GLYPH.get(agent.state, "·"), self.number(agent), folder(agent.cwd)
         halo = p["bright"]
         if selected:
             fill = U.mix(fill, halo, 0.22)
@@ -724,10 +993,6 @@ class HivePage(U.Page):
                             cv.put(c["x"] + xx, c["y"] + i, "▀", halo, fill)
                         elif not below or not below[0] <= xx < below[1]:
                             cv.put(c["x"] + xx, c["y"] + i, "▄", halo, fill)
-            if agent is not None and c["h"] >= 8:
-                lines = [glyph, number, label]
-            elif agent is None and c["h"] >= 8:
-                lines = ["+", "new", ""]
             start = (c["h"] - len(lines)) // 2
             for k, text in enumerate(lines):
                 i = start + k
@@ -800,12 +1065,12 @@ class HivePage(U.Page):
         bg, edge = p["surface"], state_color(p, agent.state)
         cv.hit(x, y, W, H, lambda b: None)
         cv.fill(x, y, W, H, bg=bg)
-        cv.put(x, y, "┌" + "─" * (W - 2) + "┐", edge, bg)
+        cv.put(x, y, "╭" + "─" * (W - 2) + "╮", edge, bg)
         for yy in range(y + 1, y + H - 1):
             cv.put(x, yy, "│", edge, bg)
             cv.put(x + W - 1, yy, "│", edge, bg)
-        cv.put(x, y + H - 1, "└" + "─" * (W - 2) + "┘", edge, bg)
-        name = agent.title or folder(agent.cwd) or "agent"
+        cv.put(x, y + H - 1, "╰" + "─" * (W - 2) + "╯", edge, bg)
+        name = calm_title(agent.title) or folder(agent.cwd) or "agent"
         mark = f" ⇥ tab {agent.tab_index} " if self.elsewhere(agent) else ""
         head = clip(f" {GLYPH.get(agent.state, '·')} {self.number(agent)} · {' '.join(name.split())} ", W - 8 - len(mark))
         cv.put(x + 2, y, head, p["bright"], bg, BOLD)
@@ -815,17 +1080,18 @@ class HivePage(U.Page):
         cv.put(x + W - 1 - len(close), y, close, p["muted"], bg)
         cv.hit(x + W - 1 - len(close), y, len(close), 1, lambda b: self.close_popover())
         ix, iw = x + 2, W - 4
-        row = y + 1
+        row = y + 2  # one row of padding under the title, like the card's 1-cell sides
         age = human_age(self.now() - agent.since) if agent.since else ""
         state_text = f"{GLYPH.get(agent.state, '·')} {WORD.get(agent.state, agent.state)}"
         cv.put(ix, row, state_text, edge, bg, BOLD)
         rest = " · ".join(t for t in (age, agent.reason) if t)
         cv.put(ix + len(state_text), row, clip(" · " + " ".join(rest.split()) if rest else "", iw - len(state_text)), p["text"], bg)
         row += 1
-        meta = tilde(agent.cwd)
-        tail = " ".join(t for t in (agent.profile, f"pane {agent.pane}") if t)
+        # The title names the agent by its number; the internal pane id would read as another one.
+        meta = U.home_path(agent.cwd)
+        tail = agent.profile or ""
         room = iw - len(tail) - 1
-        cv.put(ix, row, (meta if len(meta) <= room else "…" + meta[-(room - 1):]) if room > 4 else "", p["muted"], bg)
+        cv.put(ix, row, U.fit_text(meta, room, "path") if room > 4 else "", p["muted"], bg)
         cv.put(ix + iw - len(tail), row, tail, p["dim"], bg)
         row += 1
         for item in pend:
@@ -834,19 +1100,20 @@ class HivePage(U.Page):
             else:
                 bx = ix
                 for label, cid in item[1]:
-                    bx += ui.button(cv, bx, row, label, lambda b, cid=cid: self.answer(ui, agent, cid), accent=True) + 1
+                    bx += U.chip(cv, p, bx, row, label, kind="primary", bg=bg,
+                                 hit=lambda b, cid=cid: self.answer(ui, agent, cid)) + 1
             row += 1
         if agent.error:
             cv.put(ix, row, short("! " + str(agent.error), iw), p["red"], bg)
             row += 1
-        cv.put(ix, row, "─" * iw, p["border"], bg)
+        cv.put(ix, row, "─" * iw, U.rule_color(p, bg), bg)
         cv.put(ix + 2, row, " screen ", p["dim"], bg)
         row += 1
         lines = self.peeked[1] if self.peeked[0] == agent.pane else []
         for k, line in enumerate(lines[-S:] if S else []):
             cv.put(ix, row + k, screen_line(line, iw), p["text"], bg)
         # bottom block: note, prompt, buttons (anchored to the bottom edge)
-        note_y, input_y, btn_y = y + H - 4, y + H - 3, y + H - 2
+        note_y, input_y, btn_y = y + H - 5, y + H - 4, y + H - 3
         enabled = self.prompt_enabled(agent)
         if agent.state == "attention" and (agent.pending or {}).get("kind") == "plan_review":
             note = "Prompt off: answer the plan review above"
@@ -875,6 +1142,7 @@ class HivePage(U.Page):
         else:
             cv.put(ix, input_y, "› " + short(text or "prompt disabled", iw - 2), p["dim"], field, DIM)
         bx = ix
-        bx += ui.button(cv, bx, btn_y, "Jump", lambda b: self.jump(ui, agent), accent=True) + 1
-        bx += ui.button(cv, bx, btn_y, "Ack", lambda b: self.ack(ui, agent), enabled=agent.state == "done") + 1
-        ui.button(cv, bx, btn_y, "Delete", lambda b: self.delete(ui, agent))
+        bx += U.chip(cv, p, bx, btn_y, "Jump", kind="primary", bg=bg, hit=lambda b: self.jump(ui, agent)) + 1
+        bx += U.chip(cv, p, bx, btn_y, "Ack", kind="button" if agent.state == "done" else "disabled", bg=bg,
+                     hit=lambda b: self.ack(ui, agent)) + 1
+        U.chip(cv, p, bx, btn_y, "Delete", kind="button", bg=bg, hit=lambda b: self.delete(ui, agent))

@@ -222,13 +222,15 @@ return function(config, wezterm)
 
   -- Richest first; the caller takes the first tier that fits its cell budget. bar =
   -- cells of the slim progress line after the percentage, amount = the absolute size
-  -- after it, only = labels kept.
+  -- after it, only = labels kept. The narrowest keeps the CPU chip alone, which the header
+  -- never drops.
   local TIERS = {
     { bar = 6, amount = true },
     { amount = true },
     { bar = 5 },
     {},
     { only = { CPU = true, RAM = true } },
+    { only = { CPU = true } },
   }
 
   -- Items of one metric on the pill: muted label, the percentage in its state colour,
@@ -308,10 +310,14 @@ return function(config, wezterm)
     return out
   end
 
-  -- Width of the narrowest tier, so the header can keep room for it.
+  -- Width of the narrowest tier with something to show, so the header can keep room for it.
   function api.min_width()
     refresh()
-    return cached(TIERS[#TIERS]).w
+    for i = #TIERS, 1, -1 do
+      local w = cached(TIERS[i]).w
+      if w > 0 then return w end
+    end
+    return 0
   end
 
   function api.text(opts)

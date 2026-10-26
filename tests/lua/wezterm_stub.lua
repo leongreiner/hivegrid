@@ -1,7 +1,9 @@
 -- Fake `wezterm` module for tests/lua: loaded by `require 'wezterm'` (run.lua preloads it)
 -- and recreated by every T.fresh(). Real API names behave like WezTerm's; everything a
 -- test inspects or scripts lives under wezterm.stub (recorders, hooks) and wezterm.fake
--- (window/tab/pane builders).
+-- (window/tab/pane builders). Helpers: stub.on_child (script child processes),
+-- stub.call/emit (events), stub.perform (run an action), stub.key (binding lookup, last
+-- wins like WezTerm), stub.run_timers. tests/lua/fakemux.lua models `wezterm cli`.
 local T = require 'tests.lua.t'
 
 local wezterm = {}
@@ -94,6 +96,16 @@ function stub.perform(action, window, pane, ...)
     return
   end
   return window:perform_action(action, pane)
+end
+
+-- The action WezTerm would run for key/mods in a list of bindings (config.keys or a key
+-- table): like WezTerm's map, a later entry for the same combination wins.
+function stub.key(list, key, mods)
+  local found
+  for _, b in ipairs(list or {}) do
+    if b.key == key and (b.mods or 'NONE') == (mods or 'NONE') then found = b.action end
+  end
+  return found
 end
 
 -- JSON --------------------------------------------------------------------------------
@@ -317,8 +329,7 @@ end
 function wezterm.format(items)
   local out = {}
   for _, it in ipairs(items) do
-    if it == 'ResetAttributes' then
-    elseif it == 'ClickEnd' then
+    if it == 'ClickEnd' then
       if not stub.fork then error('format: unknown FormatItem ClickEnd') end
     elseif type(it) == 'table' then
       local k = next(it)
@@ -329,7 +340,7 @@ function wezterm.format(items)
       elseif not (k == 'Foreground' or k == 'Background' or k == 'Attribute') then
         error('format: unknown FormatItem ' .. tostring(k))
       end
-    else
+    elseif it ~= 'ResetAttributes' then
       error('format: unknown FormatItem ' .. tostring(it))
     end
   end
@@ -396,6 +407,28 @@ function stub.run_timers(max)
     ran = ran + 1
   end
   return ran
+end
+
+-- The Hivegrid picker (config/picker.lua) the last ShowOverlayCommand of `window` opened:
+-- { spec = the decoded request, args, answer = function(id) }. answer(id) replies like
+-- bin/hivegrid_picker.py (user var hivegrid_pick from the overlay pane; id nil = closed
+-- without a choice) and runs the timers, so the caller's callback has run on return.
+function stub.picker(window)
+  local last
+  for _, a in ipairs(window.actions) do
+    if a.action.kind == 'ShowOverlayCommand' then last = a.action end
+  end
+  assert(last, 'no picker overlay was opened')
+  local spec = wezterm.json_parse(last.args.set_environment_variables.HIVEGRID_PICKER_SPEC)
+  local overlay = wezterm.fake.pane {}
+  return {
+    spec = spec, args = last.args,
+    answer = function(id)
+      wezterm.emit('user-var-changed', window, overlay, 'hivegrid_pick',
+        wezterm.json_encode { request = spec.request, id = id })
+      stub.run_timers()
+    end,
+  }
 end
 
 -- Mux -----------------------------------------------------------------------------

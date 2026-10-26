@@ -108,17 +108,21 @@ function Mux:geometry(id)
   end
 end
 
--- Pushes the model of the first tab into the GUI tab (panes_with_info and panes()).
+-- Pushes the model into the GUI side: the first tab's panes_with_info/panes(), and every
+-- pane's get_dimensions() (cols, viewport_rows), wherever it is.
 function Mux:sync()
-  local t = self.tabs[1]
-  local rows = {}
-  for _, p in ipairs(self:panes(t)) do
-    rows[#rows + 1] = {
-      id = p.id, left = p.left, top = p.top, width = p.width, height = p.height,
-      active = p.id == t.active, zoomed = p.id == t.zoomed,
-    }
+  for i, t in ipairs(self.tabs) do
+    local rows = {}
+    for _, p in ipairs(self:panes(t)) do
+      rows[#rows + 1] = {
+        id = p.id, left = p.left, top = p.top, width = p.width, height = p.height,
+        active = p.id == t.active, zoomed = p.id == t.zoomed,
+      }
+      local pane = self.wz.mux.get_pane(p.id) or self.wz.fake.pane { id = p.id }
+      pane.o.dims = { cols = p.width, viewport_rows = p.height, scrollback_rows = p.height, physical_top = 0 }
+    end
+    if i == 1 then self.tab:set_rows(rows) end
   end
-  self.tab:set_rows(rows)
 end
 
 -- Removes leaf `id` from its tab: the sibling takes the parent's place and space.
@@ -151,8 +155,8 @@ function Mux:kill(id)
 end
 
 -- Splits `target`, putting pane `id` (moved from wherever it is, or a new pane) right of
--- or below it with `percent` of the space.
-function Mux:split(target, dir, percent, id)
+-- or below it with `cells` cells or `percent` of the space (default 50).
+function Mux:split(target, dir, percent, id, cells)
   if not self:tab_of(target) or target == id then return false end
   if id then
     if self:tab_of(id) and not self:remove(id) then return false end
@@ -163,7 +167,7 @@ function Mux:split(target, dir, percent, id)
   local t = self:tab_of(target)
   local g = self:geometry(target)
   local dim = dir == 'h' and g.width or g.height
-  local new = math.max(1, dim * (percent or 50) // 100)
+  local new = math.max(1, cells or dim * (percent or 50) // 100)
   local first = dim - new - 1
   if first < 1 then
     self:new_tab(M.leaf(id)) -- WezTerm refuses the split; the moved pane is not lost
@@ -180,6 +184,21 @@ function Mux:split(target, dir, percent, id)
   leaf.id = nil
   leaf.dir, leaf.first, leaf.a, leaf.b = dir, first, M.leaf(target), M.leaf(id)
   return true, id
+end
+
+-- A new pane `cols` wide left of `target` (how sidebar.lua docks the explorer view: a
+-- leaf split of the leftmost grid pane). Returns the new pane id.
+function Mux:insert_left(target, cols)
+  local t = self:tab_of(target)
+  local chain = path_to(t.root, target)
+  local parent = chain[#chain]
+  local leaf = not parent and t.root or (parent.a.id == target and parent.a or parent.b)
+  self.next_pane = self.next_pane + 1
+  local id = self.next_pane
+  leaf.id = nil
+  leaf.dir, leaf.first, leaf.a, leaf.b = 'h', cols, M.leaf(id), M.leaf(target)
+  self:sync()
+  return id
 end
 
 function Mux:adjust(pane_id, dir, amount)
@@ -217,7 +236,11 @@ function Mux:exec(args)
   self.log[#self.log + 1] = args
   if self.fail(args) then return false, '', 'injected failure' end
   local cmd = args[1]
-  local id = tonumber(opt(args, '--pane-id'))
+  local function num(name)
+    local v = opt(args, name)
+    return v and tonumber(v)
+  end
+  local id = num('--pane-id')
   local ok, out = true, ''
   if cmd == 'list' then
     local list = {}
@@ -236,7 +259,7 @@ function Mux:exec(args)
     ok = t ~= nil
     if t then t.active = id end
   elseif cmd == 'adjust-pane-size' then
-    ok = self:adjust(id, args[#args], tonumber(opt(args, '--amount')) or 1)
+    ok = self:adjust(id, args[#args], num('--amount') or 1)
   elseif cmd == 'zoom-pane' then
     local t = self:tab_of(id)
     ok = t ~= nil
@@ -250,7 +273,7 @@ function Mux:exec(args)
   elseif cmd == 'split-pane' then
     local dir = has(args, '--bottom') and 'v' or 'h'
     local new
-    ok, new = self:split(id, dir, tonumber(opt(args, '--percent')), tonumber(opt(args, '--move-pane-id')))
+    ok, new = self:split(id, dir, num('--percent'), num('--move-pane-id'), num('--cells'))
     out = ok and (tostring(new) .. '\n') or ''
   elseif cmd == 'activate-tab' then
     ok = true

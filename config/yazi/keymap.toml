@@ -2,11 +2,14 @@
 # default (close the tab, i.e. quit) would kill the sidebar instead of copying.
 # q and Q close the explorer through WezTerm (plugins/hivegrid.yazi) so the keyboard
 # returns to the grid pane; a plain quit would leave it on the bar. T is the keyboard twin
-# of a double click: a terminal in the hovered folder (a file's folder).
+# of a double click: a terminal in the hovered folder (a file's folder). Enter and o enter a
+# folder, or open text files in $EDITOR in a new grid pane instead of the narrow sidebar.
 [mgr]
 prepend_keymap = [
 	{ on = "<C-c>", run = "copy path", desc = "Copy the path of the hovered or selected entries" },
 	{ on = "q", run = "plugin hivegrid close", desc = "Close the explorer" },
 	{ on = "Q", run = "plugin hivegrid close", desc = "Close the explorer" },
 	{ on = "T", run = "plugin hivegrid open", desc = "Terminal in the hovered folder" },
+	{ on = "<Enter>", run = "plugin hivegrid edit", desc = "Enter the folder / edit in a grid pane" },
+	{ on = "o", run = "plugin hivegrid edit", desc = "Enter the folder / edit in a grid pane" },
 ]

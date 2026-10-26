@@ -297,5 +297,189 @@ class SplitReadTest(unittest.TestCase):
         self.assertEqual(ui.next_events(0.1), [key("Escape")])
 
 
+PAL = U.DEFAULT_PAL
+
+
+def canvas(w, h=6):
+    return U.Canvas(w, h, PAL["text"], PAL["surface"])
+
+
+class FitTest(unittest.TestCase):
+    def test_fit_path_keeps_the_repository_name(self):
+        self.assertEqual(U.fit_path("a/reference/unitree_ros2", 30), "a/reference/unitree_ros2")
+        self.assertEqual(U.fit_path("g1-workspace/reference/unitree_ros2", 26), "…/reference/unitree_ros2")
+        self.assertEqual(U.fit_path("g1-workspace/reference/unitree_ros2", 14), "…/unitree_ros2")
+        self.assertEqual(U.fit_path("g1-workspace/reference/unitree_ros2", 8), "unitree…")
+
+    def test_fit_tail_keeps_the_end_and_counts_cells(self):
+        self.assertEqual(U.fit_tail("~/work/deep/dir", 8), "…eep/dir")
+        self.assertEqual(U.fit_tail("short", 8), "short")
+        self.assertEqual(U.text_width(U.fit_tail("ab" + WIDE * 4, 6)), 5)  # a wide char never straddles
+        self.assertEqual(U.fit_text("abcdef", 0), "")
+
+    def test_home_path(self):
+        home = os.path.expanduser("~")
+        self.assertEqual(U.home_path(home + "/Projects/x/"), "~/Projects/x")
+        self.assertEqual(U.home_path(home), "~")
+        self.assertEqual(U.home_path(home + "x/y"), home + "x/y")  # a sibling of home is not home
+        self.assertEqual(U.home_path("/"), "/")
+
+
+class FooterTest(unittest.TestCase):
+    HINTS = [("↵", "open"), ("r", "rescan"), ("q", "close")]
+
+    def test_pairs_drop_from_the_end_when_narrow(self):
+        self.assertEqual(U.footer_fit(self.HINTS, 25), self.HINTS)  # exactly "↵ open  r rescan  q close"
+        self.assertEqual(U.footer_fit(self.HINTS, 24), self.HINTS[:2])
+        self.assertEqual(U.footer_fit(self.HINTS, 5), [])
+        self.assertEqual(U.footer_fit("1-9 jump  q close", 9), [("1-9", "jump")])
+
+    def test_footer_draws_keys_and_labels_in_their_colours(self):
+        cv = canvas(30)
+        U.footer(cv, PAL, self.HINTS)
+        self.assertEqual(text(cv, 5), " ↵ open  r rescan  q close    ")
+        self.assertEqual(cv.cells[5][1][1], PAL["text"])  # the key
+        self.assertEqual(cv.cells[5][3][1], PAL["muted"])  # its label
+
+    def test_right_text_keeps_its_place_and_two_cells_gap(self):
+        cv = canvas(24)
+        U.footer(cv, PAL, self.HINTS, right=("3/40", PAL["muted"]))
+        self.assertEqual(text(cv, 5), " ↵ open  r rescan  3/40 ")
+        cv = canvas(6)
+        U.footer(cv, PAL, self.HINTS, right=("too wide", PAL["muted"]))  # does not fit at all: dropped
+        self.assertEqual(text(cv, 5).strip(), "")
+
+
+class TitleRowTest(unittest.TestCase):
+    def test_crumb_shrinks_then_right_segments_drop_from_the_end(self):
+        right = [("●1", PAL["red"]), ("●4", PAL["amber"])]
+        cv = canvas(40)
+        t = U.title_row(cv, PAL, "Git", "~/Projects/hivegrid", right)
+        self.assertEqual(text(cv, 0), " ⬡ Git · ~/Projects/hivegrid      ●1 ●4 ")
+        self.assertEqual((t.left, t.right, t.body), (28, 34, 2))
+        cv = canvas(28)
+        U.title_row(cv, PAL, "Git", "~/Projects/hivegrid", right)
+        self.assertEqual(text(cv, 0), " ⬡ Git · …/hivegrid   ●1 ●4 ")
+        cv = canvas(22)
+        U.title_row(cv, PAL, "Git", "~/Projects/hivegrid", right)
+        self.assertEqual(text(cv, 0), " ⬡ Git · hivegrid  ●1 ")
+
+    def test_rule_is_readable_on_the_row_background(self):
+        cv = canvas(20)
+        U.title_row(cv, PAL, "Overview")
+        self.assertEqual(text(cv, 1), "─" * 20)
+        fg, bg = cv.cells[1][5][1:3]
+        self.assertEqual(bg, PAL["surface"])
+        self.assertEqual(fg, U.mix(PAL["surface"], PAL["edge_hi"], 0.45))
+
+    def test_chips_sit_at_the_right_edge_with_regions(self):
+        cv = canvas(30)
+        U.title_row(cv, PAL, "Overview", right=[("?2", PAL["violet"])],
+                    chips=[U.Chip("⊞", key="arrange"), U.Chip("▦", key="equalize")])
+        self.assertEqual(text(cv, 0), " ⬡ Overview        ?2  ⊞   ▦  ")
+        self.assertEqual((cv.key_at(23, 0), cv.key_at(27, 0), cv.key_at(25, 0)), ("arrange", "equalize", None))
+
+
+class ListRowTest(unittest.TestCase):
+    def test_columns_and_selection_marker(self):
+        cv = canvas(30)
+        row = U.list_row(cv, PAL, 2, lines=2, selected=True, glyph="↻", glyph_color=PAL["accent"], num=3,
+                         name="hivegrid", right="working 2m", sub="writing tests")
+        self.assertEqual(text(cv, 2), "▎ ↻ 3 hivegrid     working 2m ")
+        self.assertEqual(text(cv, 3), "▎     writing tests           ")
+        self.assertEqual(cv.cells[2][0][1], PAL["accent"])  # the marker
+        self.assertEqual({c[2] for c in cv.cells[2] + cv.cells[3]}, {PAL["raised"]})  # the slab, both lines
+        self.assertEqual(cv.cells[2][6][1:], (PAL["bright"], PAL["raised"], U.BOLD))
+        self.assertEqual(cv.cells[2][4][1], PAL["accent"])  # the selected row's number
+        self.assertEqual(row, U.Row(PAL["raised"], 6, 29))
+
+    def test_unselected_row_has_no_marker_and_hover_tints(self):
+        cv = canvas(30)
+        U.list_row(cv, PAL, 0, glyph="·", num=1, name="idle", hover=1.0)
+        self.assertEqual(text(cv, 0)[0], " ")
+        self.assertEqual(cv.cells[0][10][2], U.mix(PAL["surface"], PAL["raised"], U.HOVER_BLEND))
+        self.assertEqual(cv.cells[0][6][3], 0)  # not bold
+
+    def test_name_ellipsis_and_right_text_dropped_before_the_name_vanishes(self):
+        cv = canvas(20)
+        U.list_row(cv, PAL, 0, glyph="·", num=1, name="a-very-long-name", right="idle 3m")
+        self.assertEqual(text(cv, 0), "  · 1 a-ve… idle 3m ")
+        cv = canvas(16)  # the name would get 3 cells: the right text goes
+        U.list_row(cv, PAL, 0, glyph="·", num=1, name="a-very-long-name", right="idle 3m")
+        self.assertEqual(text(cv, 0), "  · 1 a-very-l… ")
+
+    def test_optional_columns_and_path_fit(self):
+        cv = canvas(24)
+        row = U.list_row(cv, PAL, 0, name="g1-workspace/reference/unitree_ros2", name_fit="path")
+        self.assertEqual(row.name_x, 2)
+        self.assertEqual(text(cv, 0).rstrip(), "  …/unitree_ros2")
+
+    def test_action_takes_the_right_end_with_its_own_region(self):
+        cv = canvas(30)
+        row = U.list_row(cv, PAL, 0, selected=True, glyph="·", num=1, name="beta", right="idle 3m",
+                         key=6, action=U.Action("✕", key=("x", 6)))
+        self.assertEqual(text(cv, 0), "▎ · 1 beta          idle 3m ✕ ")
+        self.assertEqual((cv.key_at(28, 0), cv.key_at(20, 0)), (("x", 6), 6))
+        self.assertEqual(row.end, 27)
+
+
+class ChipTest(unittest.TestCase):
+    def test_kinds(self):
+        cv = canvas(40)
+        x = 0
+        for kind, sel in (("tab", True), ("tab", False), ("button", False), ("primary", False), ("disabled", False)):
+            x += U.chip(cv, PAL, x, 0, "Ab", kind=kind, selected=sel, hit=lambda b: None) + 1
+        self.assertEqual(text(cv, 0)[:20], " Ab   Ab   Ab   Ab  ")
+        styles = [cv.cells[0][i][1:] for i in (1, 6, 11, 16, 21)]
+        self.assertEqual(styles[0], (PAL["bright"], PAL["raised"], U.BOLD))
+        self.assertEqual(styles[1], (PAL["muted"], PAL["surface"], 0))
+        self.assertEqual(styles[2], (PAL["bright"], PAL["raised"], 0))
+        self.assertEqual(styles[3], (PAL["deep"], PAL["accent"], U.BOLD))
+        self.assertEqual(styles[4], (PAL["dim"], PAL["pill"], 0))
+        self.assertIsNone(cv.hit_at(21, 0))  # disabled: not clickable
+        self.assertEqual(U.chip(cv, PAL, 0, 2, "Ab", round=True), U.chip_width("Ab", round=True))
+        self.assertEqual(text(cv, 2)[:6], U.CAP_L + " Ab " + U.CAP_R)
+
+
+class StateTableTest(unittest.TestCase):
+    def test_states_match_the_design_table(self):
+        want = {"working": ("↻", "accent"), "busy": ("◔", "amber"), "attention": ("?", "violet"),
+                "done": ("✓", "green"), "idle": ("·", "grey"), "exited": ("○", "muted"), "bell": ("!", "red"),
+                "shell": ("›", "dim")}
+        for kind, (glyph, color) in want.items():
+            self.assertEqual((U.STATES[kind].glyph, U.STATES[kind].color), (glyph, color), kind)
+        self.assertEqual(U.STATES["attention"].label, "needs you")
+        self.assertEqual(U.state_style(PAL, "nonsense")[0], "·")
+        self.assertIn(U.state_style(PAL, "working", now=0.0)[0], U.SPINNER)
+
+    def test_lua_twin_has_the_same_table(self):
+        with open(os.path.join(BIN, "..", "config", "theme.lua"), encoding="utf-8") as f:
+            lua = f.read()
+        rows = dict((k, (g, t, c, int(r))) for k, g, t, c, r in
+                    re.findall(r"(\w+) = \{ '([^']+)', '([^']+)', '(\w+)', (\d+) \}", lua))
+        self.assertEqual(rows, {k: tuple(s) for k, s in U.STATES.items()})
+
+
+class HoverTest(unittest.TestCase):
+    def test_fade_in_out_and_pointer_shape(self):
+        h = U.Hover()
+        self.assertTrue(h.set("a", now=10.0))  # nothing -> something: the hand pointer
+        self.assertFalse(h.set("b", now=10.0))  # still a hand
+        h.advance(10.0 + U.FADE_IN / 2)
+        self.assertEqual(h.levels(), {"b": 0.5})
+        self.assertFalse(h.advance(11.0))
+        self.assertTrue(h.set(None, now=20.0))
+        self.assertTrue(h.advance(20.0 + U.FADE_OUT / 2))
+        self.assertFalse(h.advance(21.0))
+        self.assertEqual(h.levels(), {})
+
+
+class ContentBoxTest(unittest.TestCase):
+    def test_capped_and_centred(self):
+        self.assertEqual(U.content_box(80), (1, 78))
+        self.assertEqual(U.content_box(240), (65, 110))
+        self.assertEqual(U.content_box(1), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

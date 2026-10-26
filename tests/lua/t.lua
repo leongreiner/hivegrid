@@ -1,12 +1,14 @@
 -- Minimal test API for tests/lua (run by tests/lua/run.lua; no globals).
 --   local T = require 'tests.lua.t'
 --   T.test('name', function(wz) ... end)   -- wz: a fresh wezterm stub (T.fresh() ran first)
+--   T.xfail('name', 'reason', fn)   -- known bug: must fail until fixed, then becomes T.test
 --   T.eq(actual, expected[, msg])  deep compare, reports the first differing path
 --   T.ok(v[, msg])   T.near(a, b[, eps, msg])   T.raises(fn[, lua_pattern]) -> message
 --   T.fresh() -> new stub: drops every module loaded since startup (config modules and
 --     wezterm), resets env overrides, the clock and gives HOME/XDG dirs fresh temp dirs
 --   T.setenv(k, v)  overrides os.getenv (v = nil -> unset)      T.clock(epoch | nil)
 --   T.tmpdir() -> new empty dir     T.write(path, text)   T.read(path)   T.root, T.sandbox
+--   T.render(format_items) -> { { ch, fg, bg, bold }, ... } per drawn code point
 local T = { tests = {}, root = '.', sandbox = nil, _env = {}, _now = nil, _baseline = nil }
 
 local real_getenv, real_time = os.getenv, os.time
@@ -81,6 +83,12 @@ function T.fresh()
 end
 
 -- Registration --------------------------------------------------------------
+
+-- A known bug its owner will fix: counted as an expected failure while it fails, reported
+-- as a failure once it passes (then turn it into T.test).
+function T.xfail(name, reason, fn)
+  T.tests[#T.tests + 1] = { file = T._file, name = name, fn = fn, xfail = reason }
+end
 
 function T.test(name, fn)
   T.tests[#T.tests + 1] = { file = T._file, name = name, fn = fn }

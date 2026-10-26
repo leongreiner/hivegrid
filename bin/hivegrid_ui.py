@@ -2,6 +2,7 @@
 output with truecolor, SGR mouse input, modal dialogs, inline images (iTerm2 protocol, rendered with
 PIL when available) and braille charts as the image-free fallback. Standard library only."""
 import base64
+import collections
 import datetime
 import fcntl
 import io
@@ -23,7 +24,8 @@ BOLD, DIM, REV, UL = 1, 2, 4, 8
 TRUECOLOR = os.environ.get("COLORTERM", "") in ("truecolor", "24bit") or os.environ.get("TERM", "").endswith("-direct")
 
 
-def _rgb(h):
+def rgb(h):
+    """'#rrggbb' -> (r, g, b)."""
     return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
 
 
@@ -33,15 +35,15 @@ def _to256(r, g, b):
 
 
 def sgr_color(h, bgnd):
-    r, g, b = _rgb(h)
+    r, g, b = rgb(h)
     if TRUECOLOR:
         return f"{48 if bgnd else 38};2;{r};{g};{b}"
     return f"{48 if bgnd else 38};5;{_to256(r, g, b)}"
 
 
 def mix(a, b, t):
-    ra, ga, ba = _rgb(a)
-    rb, gb, bb = _rgb(b)
+    ra, ga, ba = rgb(a)
+    rb, gb, bb = rgb(b)
     return "#%02x%02x%02x" % (round(ra + (rb - ra) * t), round(ga + (gb - ga) * t), round(ba + (bb - ba) * t))
 
 
@@ -407,10 +409,11 @@ def runs_of(pts, gap=None):
 
 
 def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%", ymin=0.0, title=None,
-                   since=None, marker_label=None, text_px=11, gap=None):
+                   since=None, marker_label=None, text_px=11, gap=None, since_label=None):
     """series: [{'pts': [(t, v)], 'color', 'label'}]; markers: [(t, color)] vertical dotted lines,
-    named `marker_label` in the legend; the plot left of `since` is shaded as having no data and
-    a line breaks where samples are more than `gap` apart.
+    named `marker_label` in the legend; the plot left of `since` is shaded as having no data
+    (named `since_label` inside the shaded span when it fits there, never over the data) and a
+    line breaks where samples are more than `gap` apart.
     Text is `text_px` high (pass ~0.7 of the cell height so it matches the terminal font) and
     the margins follow it. Drawn at 2x and scaled down for smooth lines. -> PNG bytes."""
     S = 2
@@ -441,6 +444,12 @@ def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%
         d.line([left, y, left + pw, y], fill=pal["border"], width=S)
         label = f"{ymin + ysp * frac:.0f}{unit}"
         d.text((left - 4 * K, y), label, fill=pal["muted"], font=f, anchor="rm")
+    if since_label and since is not None and since > x0:
+        nx = px(min(since, x1))
+        tw = d.textlength(since_label, font=f)
+        if nx - left >= tw + 16 * K:
+            cx, cy = (left + nx) / 2, top + ph * 0.375  # between two grid lines
+            d.text((cx, cy), since_label, fill=pal["dim"], font=f, anchor="mm")
     for t, label in time_ticks(x0, x1, min(8, int(pw // (110 * K)))):
         x = px(t)
         d.line([x, top + ph, x, top + ph + 3 * K], fill=pal["muted"], width=S)
@@ -504,7 +513,7 @@ def sparkline_png(width, height, values, color, pal, label, value_text, ymax=100
             prev = v
         fill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         fd = ImageDraw.Draw(fill)
-        r, g, b = _rgb(color)
+        r, g, b = rgb(color)
         for pts in runs:
             if len(pts) >= 2:
                 fd.polygon(pts + [(pts[-1][0], bottom), (pts[0][0], bottom)], fill=(r, g, b, 70))
@@ -556,6 +565,389 @@ def braille_chart(cols, rows, series, x0, x1, ymax, ymin=0.0, gap=None):
             if len(pts) == 1:
                 plot(pts[0][0], pts[0][1], s["color"])
     return [[(chr(0x2800 + dots[r][c]) if dots[r][c] else " ", owner[r][c]) for c in range(cols)] for r in range(rows)]
+
+
+# ---- design components ----------------------------------------------------------------
+# The one look of every Hivegrid TUI (DesignAudit §4): the full-tab panels (UI / Page), the
+# docked programs (overview dock, git view) and the picker all draw these into a Canvas, so a
+# title row, a footer, a list row or a chip looks and behaves the same everywhere.
+
+
+class State(collections.namedtuple("State", "glyph label color rank")):
+    """An agent state: glyph, the word shown for it, palette key of its colour, sort rank
+    (1 = needs the eye most)."""
+
+
+# The state table, shared with config/theme.lua (theme.STATES): keep both in step.
+STATES = {
+    "attention": State("?", "needs you", "violet", 1),
+    "bell": State("!", "bell", "red", 2),
+    "done": State("✓", "done", "green", 3),
+    "busy": State("◔", "busy", "amber", 4),
+    "working": State("↻", "working", "accent", 5),
+    "idle": State("·", "idle", "grey", 6),
+    "exited": State("○", "exited", "muted", 7),
+    "other": State("›", "running", "dim", 8),
+    "shell": State("›", "shell", "dim", 9),
+}
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # drawn instead of ↻ while something runs, at 8 frames a second
+
+# The Navy palette (config/theme.lua M.P): what a program draws with before it knows the theme.
+DEFAULT_PAL = {
+    "deep": "#070d19", "base": "#0b1220", "surface": "#111b30", "pill": "#15244a", "raised": "#1d3a70",
+    "track": "#1f2d4d", "border": "#1e2a45", "edge_hi": "#4a6fb0", "edge_lo": "#0c1630", "text": "#c9d6ee",
+    "bright": "#eaf1ff", "muted": "#8a9cc2", "dim": "#7487ad", "accent": "#4f9dff", "cyan": "#38bdf8",
+    "green": "#34d399", "amber": "#fbbf24", "red": "#f87171", "violet": "#a78bfa", "grey": "#8190ad",
+}
+
+# Hover: what the pointer is over fades HOVER_BLEND of the way toward `raised` in FADE_IN seconds
+# and back in FADE_OUT, drawn in STEPS shades, a frame every FRAME seconds while a fade runs.
+HOVER_BLEND, FADE_IN, FADE_OUT, STEPS, FRAME = 0.45, 0.15, 0.20, 8, 1 / 30
+TITLE_GLYPH = "⬡"
+MARKER = "▎"  # the selection marker at the left edge of a selected row
+CAP_L, CAP_R = "\ue0b6", "\ue0b4"  # rounded chip ends (WezTerm draws these itself)
+CONTENT_MAX = 110  # columns of content on a wide panel; the rest is margin
+STATUS_COLORS = {"ok": "green", "warn": "amber", "error": "red"}
+STRIPE = 0.16  # dense lists (no blank between rows): every second row this share from bg to raised
+
+
+def state_style(pal, kind, now=None):
+    """(glyph, label, colour) of state `kind` (unknown kinds read as idle). With `now` a
+    working state shows the spinner frame of that moment instead of ↻."""
+    s = STATES.get(kind) or STATES["idle"]
+    glyph = SPINNER[int(now * 8) % len(SPINNER)] if now is not None and kind == "working" else s.glyph
+    return glyph, s.label, pal.get(s.color) or DEFAULT_PAL[s.color]
+
+
+def rule_color(pal, bg):
+    """Colour of title-row and table rules on background `bg` (T3): readable on every surface."""
+    return mix(bg, pal["edge_hi"], 0.45)
+
+
+def hover_bg(pal, bg, level):
+    """`bg` faded toward `raised` by a hover at level 0..1."""
+    return mix(bg, pal["raised"], HOVER_BLEND * level) if level else bg
+
+
+def fit_tail(text, w, ellipsis="…"):
+    """`text` cut from the left to at most `w` cells: "…end of it"."""
+    if text_width(text) <= w:
+        return text
+    if w <= text_width(ellipsis):
+        return fit_cells(text, w, ellipsis)
+    out, n = [], text_width(ellipsis)
+    for c in reversed(text):
+        if n + char_width(c) > w:
+            break
+        out.append(c)
+        n += char_width(c)
+    return ellipsis + "".join(reversed(out))
+
+
+def fit_path(text, w):
+    """A path shortened from the left by whole components so its last part stays readable:
+    g1-workspace/reference/unitree_ros2 -> …/reference/unitree_ros2; the last part alone is cut
+    at its end."""
+    if text_width(text) <= w:
+        return text
+    parts = text.split("/")
+    for k in range(1, len(parts)):
+        short = "…/" + "/".join(parts[k:])
+        if text_width(short) <= w:
+            return short
+    return fit_cells(parts[-1], w)
+
+
+def fit_text(text, w, how="end"):
+    """`text` fitted into `w` cells: how='end' cuts the end, 'start' the start, 'path' whole path
+    components from the start."""
+    if w <= 0:
+        return ""
+    return fit_path(text, w) if how == "path" else fit_tail(text, w) if how == "start" else fit_cells(text, w)
+
+
+def home_path(path):
+    """`path` with the home directory as ~ and without a trailing slash (but "/" stays)."""
+    path = str(path or "")
+    if len(path) > 1:
+        path = path.rstrip("/") or "/"
+    home = os.path.expanduser("~").rstrip("/")
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+Title = collections.namedtuple("Title", "left right body")
+
+
+class Chip(collections.namedtuple("Chip", "label hit key hover kind selected round")):
+    """A chip for title_row(chips=...); fields as chip()'s arguments."""
+
+
+Chip.__new__.__defaults__ = (None, None, 0.0, "button", False, False)
+
+
+def title_row(cv, pal, title, crumb="", right=(), *, chips=(), x=0, y=0, w=None, bg=None, rule_bg=None,
+              reserve=0, crumb_fit="path", rule=True):
+    """The title row (§4.2 rule 1) at row y over x..x+w: " ⬡ Title" in accent bold, " · crumb" in
+    muted, then `right` segments [(text, colour)] right-aligned 1 cell apart, then `chips`
+    [Chip] (left to right, 1 cell apart) at the right edge; 1 cell of padding is always kept, and
+    `reserve` more cells are left free for anything the caller draws there. Row y+1 is the rule in
+    rule_color on `rule_bg` (default `bg`). When narrow the crumb shrinks down to 8 cells
+    (crumb_fit: 'path', 'start' or 'end'), then right segments drop from the end (list them
+    most important first). -> Title(
+    left=column after the crumb, right=column where the right segments start, body=first row
+    under the title)."""
+    w = cv.w - x if w is None else w
+    bg = bg or pal["surface"]
+    end = x + w
+    cv.fill(x, y, w, 1, bg=bg)
+    lx = x + 1 + cv.put(x + 1, y, f"{TITLE_GLYPH} {title}", pal["accent"], bg, BOLD)
+    sep = " · "
+    right = [(t, c) for t, c in right if t]
+    limit = end - 1 - reserve
+    if chips:
+        limit -= sum(chip_width(c.label, c.round) + 1 for c in chips) - 1
+        cx = limit
+        for c in chips:
+            cx += chip(cv, pal, cx, y, c.label, kind=c.kind, selected=c.selected, hover=c.hover, bg=bg,
+                       hit=c.hit, key=c.key, round=c.round) + 1
+        limit -= 1
+
+    def right_w(segs):
+        return sum(text_width(t) + 1 for t, _ in segs) - 1 if segs else 0
+    # Two cells between the title (or crumb) and the right group (§4.2 rule 8).
+    while right and (limit - right_w(right) - 2) - lx - (len(sep) + min(8, text_width(crumb)) if crumb else 0) < 0:
+        right = right[:-1]
+    rx = limit - right_w(right)
+    if crumb:
+        room = (rx - 2 if right else limit) - lx - len(sep)
+        if room > 0:
+            lx += cv.put(lx, y, sep, pal["muted"], bg)
+            lx += cv.put(lx, y, fit_text(crumb, room, crumb_fit), pal["muted"], bg)
+    cx = rx
+    for t, c in right:
+        cx += cv.put(cx, y, t, c, bg) + 1
+    if not rule:
+        return Title(lx, rx if right else limit, y + 1)
+    rb = rule_bg or bg
+    cv.fill(x, y + 1, w, 1, bg=rb, fg=rule_color(pal, rb), ch="─")
+    return Title(lx, rx if right else limit, y + 2)
+
+
+def hint_pairs(hints):
+    """Key hints as [(key, label)] from a list of pairs or the string form "key label  key label"."""
+    if isinstance(hints, str):
+        return [tuple(pair.partition(" ")[::2]) for pair in hints.split("  ") if pair.strip()]
+    return [(k, label) for k, label in hints]
+
+
+def footer_fit(hints, width):
+    """The leading hint pairs that fit `width` cells: two cells between pairs, a pair is
+    "key label"; pairs drop from the end."""
+    out, used = [], 0
+    for key, label in hint_pairs(hints):
+        need = text_width(key) + (1 + text_width(label) if label else 0) + (2 if out else 0)
+        if used + need > width:
+            break
+        out.append((key, label))
+        used += need
+    return out
+
+
+def footer(cv, pal, hints, *, x=1, y=None, w=None, bg=None, right=None):
+    """The footer (§4.2 rule 6) on row y (default the last): key in `text`, label in `muted`, two
+    cells between pairs, pairs dropped from the end when narrow. `right` = (text, colour) sits
+    right-aligned (a position, a note) and keeps 2 cells from the hints; it goes when it does not
+    fit at all. Draws over x..x+w (default 1 cell of padding each side); -> column after the hints."""
+    y = cv.h - 1 if y is None else y
+    w = cv.w - 2 * x if w is None else w
+    bg = bg or pal["surface"]
+    end = x + w
+    limit = w
+    if right and right[0] and text_width(right[0]) <= w:
+        rw = text_width(right[0])
+        cv.put(end - rw, y, right[0], right[1], bg)
+        limit = w - rw - 2
+    for k, (key, label) in enumerate(footer_fit(hints, limit)):
+        x += 2 if k else 0
+        x += cv.put(x, y, key, pal["text"], bg)
+        if label:
+            x += cv.put(x, y, " " + label, pal["muted"], bg)
+    return x
+
+
+def status_line(cv, pal, y, text, level="ok", *, x=1, w=None, bg=None):
+    """A status message (the row above the footer): green ok, amber warn, red error."""
+    w = cv.w - 2 * x if w is None else w
+    cv.put(x, y, fit_cells(text, w), pal[STATUS_COLORS.get(level, level)], bg)
+
+
+Row = collections.namedtuple("Row", "bg name_x end")
+
+
+class Action(collections.namedtuple("Action", "label hit key hover color")):
+    """A row action for list_row(action=...): `label` (a glyph like ✕), hit(button), hover key,
+    hover level 0..1, and the palette colour it lights up in (default accent)."""
+
+
+Action.__new__.__defaults__ = (None, None, 0.0, None)
+
+
+def list_row(cv, pal, y, *, x=0, w=None, lines=1, selected=False, hover=0.0, bg=None,
+             glyph=None, glyph_color=None, num=None, num_w=1, num_color=None,
+             name="", name_color=None, name_attrs=None, name_fit="end",
+             right="", right_color=None, sub="", sub_color=None, sub_fit="end", hit=None, key=None, action=None):
+    """A list row (§4.2 rules 3-4) of `lines` rows at y over x..x+w. Selected: `raised` slab, the
+    ▎ marker at x in accent, bright bold name, the number in accent (num_color, when given, wins
+    always: a mark such as a CI result keeps its colour); hover (0..1): the slab
+    fades toward `raised`. Columns: glyph at x+2 (bold; glyph=None leaves the column out), number
+    at x+4 (`num_w` cells; num=None leaves it out; any short mark fits there), the name after
+    them, `right` right-aligned with 1 cell of padding (dropped when the name would get fewer
+    than 4 cells), `sub` on the second line at the name column. hit(button) and `key` register
+    the whole row as a click/hover region. `action` (an Action; pass it only on the selected or
+    hovered row, §4.2 rule 5) is " label " at the right end of the first line with its own
+    region, `right` moves left of it. -> Row(bg, name_x, end): end is the column the content
+    stops before, for callers that draw their own columns."""
+    w = cv.w - x if w is None else w
+    bg = bg or pal["surface"]
+    slab = pal["raised"] if selected else hover_bg(pal, bg, hover)
+    end = x + w - 1
+    cv.fill(x, y, w, lines, bg=slab)
+    if selected:
+        cv.fill(x, y, 1, lines, fg=pal["accent"], ch=MARKER)
+    if hit is not None or key is not None:
+        cv.hit(x, y, w, lines, hit or (lambda button: None), key=key)
+    if action is not None:
+        aw = text_width(action.label) + 2
+        ax = x + w - aw
+        lit = pal.get(action.color or "accent", pal["accent"])
+        cv.put(ax, y, f" {action.label} ", mix(pal["muted"], pal["bright"], action.hover),
+               mix(slab, lit, 0.45 * action.hover), BOLD)
+        if action.hit is not None or action.key is not None:
+            cv.hit(ax, y, aw, 1, action.hit or (lambda button: None), key=action.key)
+        end = ax
+    nx = x + 2
+    if glyph is not None:
+        cv.put(nx, y, glyph, glyph_color or pal["muted"], slab, BOLD)
+        nx += 2
+    if num is not None:
+        cv.put(nx, y, str(num), num_color or (pal["accent"] if selected else pal["muted"]), slab, BOLD)
+        nx += num_w + 1
+    rw = text_width(right) if right else 0
+    if rw and end - nx - rw - 1 < 4:
+        rw = 0
+    if rw:
+        cv.put(end - rw, y, right, right_color or pal["dim"], slab)
+    attrs = (BOLD if selected else 0) if name_attrs is None else name_attrs
+    room = end - nx - (rw + 1 if rw else 0)
+    cv.put(nx, y, fit_text(name, room, name_fit), pal["bright"] if selected else name_color or pal["text"], slab, attrs)
+    if sub and lines > 1:
+        cv.put(nx, y + 1, fit_text(sub, x + w - 1 - nx, sub_fit), sub_color or pal["muted"], slab)
+    return Row(slab, nx, end)
+
+
+def chip_width(label, round=False):
+    return text_width(label) + 2 + (2 if round else 0)
+
+
+def chip(cv, pal, x, y, label, *, kind="tab", selected=False, hover=0.0, bg=None, hit=None, key=None, round=False):
+    """A chip " label " (§4.2 rules 2 and 5) on background `bg`; -> its width. kind 'tab':
+    selected = raised + bright bold, else muted with a hover fade toward raised. 'button':
+    neutral, bright on raised (hover toward accent). 'primary': deep bold on accent. 'disabled':
+    dim on pill, not clickable. round=True adds rounded ends (one cell each). hit(button) and
+    `key` make the whole chip a click/hover region."""
+    bg = bg or pal["surface"]
+    attrs = 0
+    if kind == "primary":
+        body, fg, attrs = mix(pal["accent"], pal["bright"], 0.25 * hover), pal["deep"], BOLD
+    elif kind == "button":
+        body, fg = mix(pal["raised"], pal["accent"], HOVER_BLEND * hover), pal["bright"]
+    elif kind == "disabled":
+        body, fg, hit, key = pal["pill"], pal["dim"], None, None
+    elif selected:
+        body, fg, attrs = pal["raised"], pal["bright"], BOLD
+    else:
+        body, fg = hover_bg(pal, bg, hover), pal["muted"]
+    width = chip_width(label, round)
+    cx = x
+    if round:
+        cx += cv.put(cx, y, CAP_L, body, bg)
+    cx += cv.put(cx, y, f" {label} ", fg, body, attrs)
+    if round:
+        cv.put(cx, y, CAP_R, body, bg)
+    if hit is not None or key is not None:
+        cv.hit(x, y, width, 1, hit or (lambda button: None), key=key)
+    return width
+
+
+def empty_state(cv, pal, x, y, w, headline, text="", *, bg=None):
+    """An empty or error state (§4.2 rule 10): headline in `text`, then the explanation in muted,
+    wrapped (never cut). -> the row after it."""
+    cv.put(x, y, fit_cells(headline, w), pal["text"], bg)
+    y += 1
+    for line in textwrap.wrap(text, max(w, 1)) if text else ():
+        cv.put(x, y, line, pal["muted"], bg)
+        y += 1
+    return y
+
+
+def content_box(w, cap=CONTENT_MAX, pad=1):
+    """(x, width) of content capped at `cap` columns and centred in `w`, at least `pad` from
+    each side (§4.2 rule 8)."""
+    width = max(min(cap, w - 2 * pad), 0)
+    return (w - width) // 2, width
+
+
+def pointer_shape(on):
+    """OSC 22: the hand pointer over something clickable, the default elsewhere."""
+    return "\x1b]22;" + ("pointer" if on else "") + "\x07"
+
+
+class Hover:
+    """The hover fades of a program: what the pointer is over (`key`) fades in over FADE_IN, what
+    it left fades out over FADE_OUT. set() on every pointer report, advance() before each
+    frame; levels() gives the fade per key in STEPS shades for the components' `hover`."""
+
+    def __init__(self):
+        self.key = None
+        self.fades = {}  # key -> level 0..1 of everything hovered or still fading out
+        self.clock = None  # time of the last step; None while no fade runs
+
+    def set(self, key, now=None):
+        """The pointer is over `key` (None: nothing). -> True when the pointer shape changes
+        between hand and default (write pointer_shape(key is not None))."""
+        if key == self.key:
+            return False
+        prior, self.key = self.key, key
+        if self.clock is None:
+            self.clock = time.monotonic() if now is None else now
+        return (prior is None) != (key is None)
+
+    def advance(self, now):
+        """Moves every fade on by the time since the last step; -> True while one still runs."""
+        dt = 0.0 if self.clock is None else max(now - self.clock, 0.0)
+        busy = False
+        for key in set(self.fades) | ({self.key} - {None}):
+            target = 1.0 if key == self.key else 0.0
+            level = self.fades.get(key, 0.0)
+            if level < target:
+                level = min(target, level + dt / FADE_IN)
+            elif level > target:
+                level = max(target, level - dt / FADE_OUT)
+            if level:
+                self.fades[key] = level
+            else:
+                self.fades.pop(key, None)
+            busy = busy or level != target
+        self.clock = now if busy else None
+        return busy
+
+    def levels(self):
+        return {k: round(v * STEPS) / STEPS for k, v in self.fades.items()}
+
+    def reset(self):
+        self.key, self.fades, self.clock = None, {}, None
 
 
 # ---- UI -----------------------------------------------------------------------------
@@ -732,7 +1124,7 @@ class UI:
         self.model, self.pages, self.active = model, pages, active
         self.modal = None
         self.message, self.message_error = "", False
-        self.fd = sys.stdin.fileno()
+        self.fd = None  # the tty, from run(): drawing (--dump, tests) needs none
         self.out = sys.stdout
         self.cv = None
         self.dirty = True
@@ -776,15 +1168,10 @@ class UI:
             time.sleep(0.15)
 
     # widgets ----------------------------------------------------------------
-    def button(self, cv, x, y, label, fn, accent=False, enabled=True):
-        p = self.pal
-        text = f" {label} "
-        bg = p["accent"] if accent and enabled else p["raised"]
-        fg = p["deep"] if accent and enabled else (p["bright"] if enabled else p["dim"])
-        cv.put(x, y, text, fg, bg, BOLD if accent else 0)
-        if enabled:
-            cv.hit(x, y, len(text), 1, fn)
-        return len(text)
+    def button(self, cv, x, y, label, fn, accent=False, enabled=True, bg=None):
+        """A chip button (§4.2 rule 5): primary with `accent`, neutral, or disabled. -> its width."""
+        kind = "disabled" if not enabled else "primary" if accent else "button"
+        return chip(cv, self.pal, x, y, label, kind=kind, bg=bg or self.pal["base"], hit=fn if enabled else None)
 
     def swatch(self, cv, x, y, color, w=3):
         cv.put(x, y, " " * w, None, color)
@@ -805,26 +1192,27 @@ class UI:
         cols, rows = self.size
         p = self.pal
         cv = Canvas(cols, rows, p["text"], p["base"])
-        cv.fill(0, 0, cols, 1, bg=p["deep"])
-        x = 1 + cv.put(1, 0, "⬡ Hivegrid", p["accent"], p["deep"], BOLD) + 2
-        for i, pg in enumerate(self.pages):
-            label = f" {pg.title} "
-            sel = i == self.active
-            cv.put(x, 0, label, p["bright"] if sel else p["muted"], p["raised"] if sel else p["deep"], BOLD if sel else 0)
-            cv.hit(x, 0, len(label), 1, lambda b, i=i: self.switch(i))
-            x += len(label) + 1
+        # Title row (§4.2 rule 1) on deep with the page tabs as chips after the brand, then
+        # "● unsaved" + the primary Save + ✕ at the right; the rule sits on the body background.
         close = " ✕ "
+        right = len(close) + (19 if self.model.dirty else 0)
+        t = title_row(cv, p, "Hivegrid", x=0, y=0, w=cols, bg=p["deep"], rule_bg=p["base"], reserve=right)
+        x = t.left + 2
+        for i, pg in enumerate(self.pages):
+            x += chip(cv, p, x, 0, pg.title, kind="tab", selected=i == self.active, bg=p["deep"],
+                      hit=lambda b, i=i: self.switch(i)) + 1
         cv.put(cols - len(close), 0, close, p["muted"], p["deep"])
         cv.hit(cols - len(close), 0, len(close), 1, lambda b: self.quit())
         if self.model.dirty:
-            sx = cols - len(close) - 8
-            self.button(cv, sx, 0, "Save", lambda b: self.save(), accent=True)
-            cv.put(sx - 10, 0, "* unsaved", p["amber"], p["deep"])
-        cv.fill(0, 1, cols, 1, bg=p["base"], fg=p["border"], ch="─")
-        self.page().render(self, cv, 0, 2, cols, rows - 4)
-        msg_color = p["red"] if self.message_error else p["green"]
-        cv.put(1, rows - 2, self.message[:cols - 2], msg_color, p["base"])
-        self.hint_line(cv, 1, rows - 1, self.page().hints(), cols - 2)
+            sx = cols - len(close) - 1 - chip_width("Save")
+            self.button(cv, sx, 0, "Save", lambda b: self.save(), accent=True, bg=p["deep"])
+            cv.put(sx - 11, 0, "● unsaved", p["amber"], p["deep"])
+        # A page may return the (x, w) of its content column: the status and footer rows then
+        # line up with the content (§4.2 rule 8) instead of sitting at the far left.
+        col = self.page().render(self, cv, 0, t.body, cols, rows - 2 - t.body)
+        fx, fw = (col[0] + 2, col[1] - 4) if col else (1, cols - 2)
+        status_line(cv, p, rows - 2, self.message, "error" if self.message_error else "ok", x=fx, w=max(fw, 1), bg=p["base"])
+        footer(cv, p, self.page().hints(), x=fx, y=rows - 1, w=max(fw, 1), bg=p["base"])
         if self.modal:
             self.modal.render(self, cv)
         self.cv = cv
@@ -832,18 +1220,20 @@ class UI:
             # Regions move when the page changes under a still pointer: re-find the hover.
             self.set_hover(self.region_at(*self.pointer))
         hx, hy, hw, hh = self.hover or (0, 0, 0, 0)
-        if hh == 1:  # one-row regions (buttons, tabs, rows) take the lighter shade
+        if hh == 1:  # one-row regions (chips, buttons, rows) fade toward raised (§4.2 rule 4)
             row = cv.cells[hy] if 0 <= hy < cv.h else []
             for i in range(max(hx, 0), min(hx + hw, cv.w)):
                 ch, fg, bg, attrs = row[i]
-                row[i] = (ch, fg, mix(bg, p["bright"], 0.14), attrs)
+                row[i] = (ch, fg, self.hover_shade(bg), attrs)
         probe = os.environ.get("HIVEGRID_PANEL_DEBUG")
         if probe:
             self._probe(probe, cv)
-        buf = ["\x1b[?25l", cv.render()]
+        # Synchronized output (2026): the terminal shows the frame whole, images included.
+        buf = ["\x1b[?2026h\x1b[?25l", cv.render()]
         if not self.modal:
             for x, y, w, h, png in cv.images:
                 buf.append(f"\x1b[{y + 1};{x + 1}H" + iterm_image(png, w, h))
+        buf.append("\x1b[?2026l")
         self.out.write("".join(buf))
         self.out.flush()
         self.dirty = False
@@ -863,20 +1253,16 @@ class UI:
         ok, message = self.model.save()
         self.say(message, not ok)
 
-    def hint_line(self, cv, x, y, text, width):
-        """Key hints "key label  key label": the key in text colour, its label muted, so the keys
-        stand out when scanning the line."""
+    def hover_shade(self, bg):
+        """The hovered look of a cell with background `bg`, as the components draw a hover at
+        full level: the primary button lightens, raised (buttons, the selection) leans toward
+        the accent, anything else fades toward raised."""
         p = self.pal
-        end = x + width
-        for k, pair in enumerate(text.split("  ")):
-            if not pair:
-                continue
-            key, _, label = pair.partition(" ")
-            if k:
-                x += 2
-            x += cv.put(x, y, key[:max(end - x, 0)], p["text"], p["base"])
-            if label:
-                x += cv.put(x, y, (" " + label)[:max(end - x, 0)], p["muted"], p["base"])
+        if bg == p["accent"]:
+            return mix(bg, p["bright"], 0.25)
+        if bg == p["raised"]:
+            return mix(bg, p["accent"], 0.25)
+        return hover_bg(p, bg, 1.0)
 
     def quit(self):
         if self.model.dirty and not isinstance(self.modal, ConfirmModal):
@@ -969,6 +1355,7 @@ class UI:
         return decode(data)
 
     def run(self):
+        self.fd = sys.stdin.fileno()
         old = termios.tcgetattr(self.fd)
         try:
             tty.setraw(self.fd)
@@ -1008,12 +1395,19 @@ class UI:
             self.out.flush()
 
 
+# From this many columns a panel uses its wide layout (two panes, a side column, centred
+# content): a 1920 px window and up at the default font. Narrower windows get one column.
+WIDE_COLS = 170
+
+
 class Page:
     """A panel. Subclasses draw into the canvas region they are given and register click regions."""
 
     title = "Page"
 
     def render(self, ui, cv, x, y, w, h):
+        """Draws the page into x, y, w, h. May return (x, w) of its content column, which the
+        frame lines the status and footer rows up with; None keeps them at the left edge."""
         pass
 
     def key(self, ui, mods, key):

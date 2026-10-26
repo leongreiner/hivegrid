@@ -5,7 +5,8 @@
 -- The dock is bin/hivegrid-overview. This module writes the rows (agentstatus.overview) to
 -- $XDG_RUNTIME_DIR/hivegrid-overview-<dock pane id>.json whenever they change and the dock
 -- only draws them. A click on a row reaches us as the user var hivegrid_overview_goto and
--- focuses that pane; the ▦ button as hivegrid_overview_equalize (layouts.equalize).
+-- focuses that pane; the ▦ button as hivegrid_overview_equalize (layouts.equalize); a row's ✕
+-- or the title row's ✕ as hivegrid_overview_close (closes that grid pane or the whole tab).
 -- The dock pane is registered in wezterm.GLOBAL.overview[tab id] = { pane, last } (last =
 -- the grid pane that was active most recently), which sidebar.is_dock reads so the rest of
 -- the config leaves it out of the grid. It closes itself when no grid pane is left.
@@ -19,7 +20,11 @@ local P = theme.P
 return function(config, wezterm, as, sb, layouts)
   local RUNTIME = os.getenv('XDG_RUNTIME_DIR') or '/tmp'
   local BIN = wezterm.home_dir .. '/.local/bin/hivegrid-overview'
-  local MIN_COLS, FRACTION, MIN_TOTAL = 28, 0.18, 70
+  -- Width: 18% of the window, 30 to 48 columns (a narrow window keeps room for the grid, a
+  -- wide one no oversized dock), at most a third of the window. A width the user dragged the
+  -- dock to wins and scales with the window instead. On the Hivegrid build an open dock follows
+  -- window resizes (its user var hivegrid_fixed_width keeps it out of the grid's rescaling).
+  local MIN_COLS, MAX_COLS, FRACTION, MIN_TOTAL = 30, 48, 0.18, 70
   local TOP_LEVEL = theme.has_click -- true exactly on the Hivegrid build
 
   local function records() return wezterm.GLOBAL.overview or {} end
@@ -76,7 +81,8 @@ return function(config, wezterm, as, sb, layouts)
     return out
   end
 
-  local PAL = { 'deep', 'base', 'surface', 'text', 'bright', 'muted', 'dim', 'accent', 'raised', 'border' }
+  local PAL = { 'deep', 'base', 'surface', 'pill', 'raised', 'track', 'border', 'edge_hi', 'edge_lo', 'text',
+    'bright', 'muted', 'dim', 'accent', 'cyan', 'green', 'amber', 'red', 'violet', 'grey' }
   local written = {} -- dock pane id -> last JSON written
 
   -- Writes the rows when they changed (atomically, the dock may read at any moment).
@@ -105,7 +111,7 @@ return function(config, wezterm, as, sb, layouts)
   end
 
   local function toast(window, text)
-    window:toast_notification('Hivegrid overview', text, nil, 3000)
+    window:toast_notification('Hivegrid', text, nil, 3000)
   end
 
   -- Tabs whose dock the user closed: wezterm.GLOBAL.overview_off[tab id] = true.
@@ -127,9 +133,58 @@ return function(config, wezterm, as, sb, layouts)
     return hi - lo <= 3
   end
 
-  local function hide(window, cli, tab_id, rec, infos, from)
+  local function total_of(infos)
+    local total = 0
+    for _, i in ipairs(infos) do total = math.max(total, i.left + i.width) end
+    return total
+  end
+
+  -- The dock's width in a window `total` columns wide (see MIN_COLS above). A dragged width is
+  -- wezterm.GLOBAL.overview_width, set at a window overview_width_of columns wide.
+  local function target_width(total)
+    local w, of = wezterm.GLOBAL.overview_width, wezterm.GLOBAL.overview_width_of
+    local want
+    if w and of and of > 0 then
+      want = math.floor(w * total / of + 0.5)
+    else
+      want = w or math.min(MAX_COLS, math.floor(total * FRACTION))
+    end
+    return math.min(math.max(MIN_COLS, want), math.max(MIN_COLS, math.floor(total / 3)))
+  end
+
+  local function pane_set(infos)
+    local ids = {}
+    for _, i in ipairs(infos) do ids[#ids + 1] = i.pane:pane_id() end
+    table.sort(ids)
+    return table.concat(ids, ',')
+  end
+
+  -- Every status tick: learns a divider drag (the dock's width changed while the window and
+  -- the set of panes stayed), and on the Hivegrid build brings the dock back to its width for
+  -- a resized window. The first tick after opening only records what it sees.
+  local function fit_width(mtab, rec, infos)
     local dock = exists(infos, rec.pane)
-    if dock then wezterm.GLOBAL.overview_width = dock.width end
+    if not dock or wezterm.GLOBAL.layout_busy then return end
+    local total, panes = total_of(infos), pane_set(infos)
+    local width = dock.width
+    if rec.total == total and rec.panes == panes and rec.w and width ~= rec.w then
+      wezterm.GLOBAL.overview_width, wezterm.GLOBAL.overview_width_of = width, total
+    elseif TOP_LEVEL and rec.total and rec.total ~= total then
+      local want = target_width(total)
+      if want ~= width then
+        sb.make_cli(dock.pane)('adjust-pane-size', '--pane-id', rec.pane, '--amount', math.abs(want - width),
+          want > width and 'Left' or 'Right')
+        local now = exists(mtab:panes_with_info(), rec.pane)
+        width = now and now.width or width
+      end
+    end
+    if rec.w ~= width or rec.total ~= total or rec.panes ~= panes then
+      rec.w, rec.total, rec.panes = width, total, panes
+      save(mtab:tab_id(), rec)
+    end
+  end
+
+  local function hide(window, cli, tab_id, rec, infos, from)
     local was_even = TOP_LEVEL and even(grid_panes(infos))
     cli('kill-pane', '--pane-id', rec.pane)
     local back = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last)
@@ -146,8 +201,7 @@ return function(config, wezterm, as, sb, layouts)
   local function show(window, mtab, infos, cli, from, quiet)
     local grid = grid_panes(infos)
     if #grid == 0 then return end
-    local total, anchor = 0, nil
-    for _, i in ipairs(infos) do total = math.max(total, i.left + i.width) end
+    local total, anchor = total_of(infos), nil
     if total < MIN_TOTAL then
       if not quiet then toast(window, 'The window is too narrow for the overview') end
       return
@@ -160,10 +214,7 @@ return function(config, wezterm, as, sb, layouts)
       if not anchor or right > a_right or (right == a_right and i.top < anchor.top) then anchor = i end
     end
     if TOP_LEVEL then anchor = active or grid[1] end
-    -- A remembered width can be tiny (the window was narrow when the dock closed): never
-    -- narrower than MIN_COLS, and no more than a third of the window unless that is less.
-    local width = math.min(math.max(MIN_COLS, wezterm.GLOBAL.overview_width or math.floor(total * FRACTION)),
-      math.max(MIN_COLS, math.floor(total / 3)))
+    local width = target_width(total)
     local was_even = TOP_LEVEL and even(grid)
     local args = { 'split-pane', '--right', '--cells', width, '--pane-id', anchor.pane:pane_id() }
     if TOP_LEVEL then args[#args + 1] = '--top-level' end
@@ -264,6 +315,7 @@ return function(config, wezterm, as, sb, layouts)
             rec.even = ev
             save(tab_id, rec)
           end
+          fit_width(mtab, rec, infos)
           publish(window, mtab, rec)
         end
       end
@@ -272,11 +324,58 @@ return function(config, wezterm, as, sb, layouts)
     if active and not load(active:tab_id()) then auto_open(window, active) end
   end)
 
+  -- Closing from the dock (user var hivegrid_overview_close, "pane:<id>:<focus>" or "tab").
+  -- The dock asks first where work would be lost (bin/hivegrid-overview close_need); by the
+  -- time a request arrives the user has agreed. Only a grid pane of the dock's own tab can be
+  -- closed this way: the bar, the sidebar view and the dock itself never. The close runs
+  -- through the Lua API (CloseCurrentPane on the target made active; a `wezterm cli` call
+  -- from this handler can wait on the GUI). Closing the last grid pane closes the tab.
+  -- Afterwards the grid pane used last is the closed one's neighbour in reading order if it
+  -- was the closed one, and the keyboard goes back to the dock (focus "dock": closed with the
+  -- keyboard, so x can close the next row) or to that grid pane (focus "grid": a click).
+  local function close_tab(window, mtab, rec)
+    if window:active_tab():tab_id() ~= mtab:tab_id() then return end
+    written[rec.pane] = nil
+    drop(mtab:tab_id(), rec)
+    window:perform_action(wezterm.action.CloseCurrentTab { confirm = false }, window:active_pane())
+  end
+
+  local function close_pane(window, mtab, rec, id, focus)
+    if window:active_tab():tab_id() ~= mtab:tab_id() or sb.is_dock(id) then return end
+    local infos = mtab:panes_with_info()
+    local target = exists(infos, id)
+    if not target then return end
+    if #grid_panes(infos) <= 1 then return close_tab(window, mtab, rec) end
+    local rows = as.overview(window, mtab:tab_id())
+    local after = rec.last
+    if after == id or not (after and exists(infos, after)) or sb.is_dock(after) then
+      after = nil
+      for k, r in ipairs(rows) do
+        if r.id == id then
+          local n = rows[k + 1] or rows[k - 1]
+          after = n and n.id
+        end
+      end
+    end
+    rec.last = after
+    save(mtab:tab_id(), rec)
+    local land = exists(infos, focus == 'grid' and after or rec.pane) or exists(infos, after)
+    local close = wezterm.action.CloseCurrentPane { confirm = false }
+    target.pane:activate()
+    if land then
+      -- Pane indexes after the close: those behind the closed pane move up by one.
+      local index = land.index - (land.index > target.index and 1 or 0)
+      close = wezterm.action.Multiple { close, wezterm.action.ActivatePaneByIndex(index) }
+    end
+    window:perform_action(close, target.pane)
+  end
+
   -- Requests from the dock, which must come from the dock pane of its own tab: a click on a
-  -- row (or its digit) focuses that grid pane, the grid buttons equalize or arrange the panes.
+  -- row (or its digit) focuses that grid pane, the grid buttons equalize or arrange the panes,
+  -- the close buttons close a grid pane or the tab.
   wezterm.on('user-var-changed', function(window, pane, name, value)
     if name ~= 'hivegrid_overview_goto' and name ~= 'hivegrid_overview_equalize'
-        and name ~= 'hivegrid_overview_arrange' then
+        and name ~= 'hivegrid_overview_arrange' and name ~= 'hivegrid_overview_close' then
       return
     end
     local tab = pane:tab()
@@ -288,6 +387,16 @@ return function(config, wezterm, as, sb, layouts)
     end
     if name == 'hivegrid_overview_arrange' then
       layouts.arrange(window, pane)
+      return
+    end
+    if name == 'hivegrid_overview_close' then
+      local v = tostring(value)
+      local cid, focus = v:match('^pane:(%d+):(%a+)')
+      if cid then
+        close_pane(window, tab, rec, tonumber(cid), focus)
+      elseif v:match('^tab:') or v == 'tab' then
+        close_tab(window, tab, rec)
+      end
       return
     end
     local id = tonumber(tostring(value):match('^(%d+)'))

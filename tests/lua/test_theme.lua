@@ -100,14 +100,25 @@ end)
 
 -- Line ------------------------------------------------------------------------------
 
+-- The segments as one cell per character: { ch, color }.
 local function line(pct, cells)
   local th = require 'theme'
-  return T.render(th.line(pct, cells, '#ff0000', '#333333'))
+  local out = {}
+  for _, seg in ipairs(th.line(pct, cells, '#ff0000', '#333333')) do
+    for _, c in utf8.codes(seg.text) do out[#out + 1] = { ch = utf8.char(c), fg = seg.color } end
+  end
+  return out
+end
+
+local function line_chars(cells)
+  local s = ''
+  for _, c in ipairs(cells) do s = s .. c.ch end
+  return s
 end
 
 T.test('line: halves, full and track add up to `cells`', function()
   local cells = line(50, 5) -- 5 halves: 2 full, 1 half, 2 track
-  T.eq(chars(cells), '━━╸━━')
+  T.eq(line_chars(cells), '━━╸━━')
   T.eq(fgs(cells), { '#ff0000', '#ff0000', '#ff0000', '#333333', '#333333' })
   for _, pct in ipairs { -10, 0, 1, 49, 50, 99, 100, 180 } do
     T.eq(#line(pct, 6), 6, 'pct ' .. pct)
@@ -118,7 +129,7 @@ T.test('line: clamps out-of-range and shows any non-zero usage', function()
   T.eq(fgs(line(-3, 4)), rep('#333333', 4))
   T.eq(fgs(line(100, 4)), rep('#ff0000', 4))
   T.eq(fgs(line(400, 4)), rep('#ff0000', 4))
-  T.eq(chars(line(1, 10)), '╸' .. string.rep('━', 9))
+  T.eq(line_chars(line(1, 10)), '╸' .. string.rep('━', 9))
   T.eq(line(1, 10)[1].fg, '#ff0000')
 end)
 

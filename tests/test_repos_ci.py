@@ -106,12 +106,20 @@ class Operation(unittest.TestCase):
             self.assertEqual((st["op"], st["conflicts"]), ("merging", 1))
 
 
-class Fit(unittest.TestCase):
-    def test_fit_path_keeps_the_repository_name(self):
-        self.assertEqual(G.fit_path("a/reference/unitree_ros2", 30), "a/reference/unitree_ros2")
-        self.assertEqual(G.fit_path("g1-workspace/reference/unitree_ros2", 26), "…/reference/unitree_ros2")
-        self.assertEqual(G.fit_path("g1-workspace/reference/unitree_ros2", 14), "…/unitree_ros2")
-        self.assertEqual(G.fit_path("g1-workspace/reference/unitree_ros2", 8), "unitree…")
+class Layout(unittest.TestCase):
+    """Rows of the git view: two lines and a blank when every repository fits, else two lines."""
+
+    def view(self, n, rows, truncated=False):
+        v = G.View.__new__(G.View)
+        v.repos = [R.Repo(f"/r{i}", f"r{i}") for i in range(n)]
+        v.truncated, v.size = truncated, (40, rows)
+        return v
+
+    def test_blank_line_between_rows_only_when_all_fit(self):
+        self.assertEqual((self.view(4, 14).pitch(), self.view(4, 14).page()), (3, 4))  # 11 rows = 4 * 3 - 1
+        self.assertEqual((self.view(4, 13).pitch(), self.view(4, 13).page()), (2, 5))
+        self.assertEqual(self.view(4, 14, truncated=True).pitch(), 2)  # the scan note takes a row
+        self.assertEqual(self.view(30, 13).page(), 5)
 
 
 class CiCadence(unittest.TestCase):

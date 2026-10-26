@@ -36,8 +36,11 @@ import tty
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
+# The hover fade (HOVER_BLEND of the way to `raised`, FADE_IN / FADE_OUT seconds, STEPS shades, a
+# frame every FRAME seconds) is the shared one of every Hivegrid TUI.
 from hivegrid_ui import (  # noqa: E402
-    cell_pixels, decode, images_enabled, iterm_image, mix, sgr_color, split_complete,
+    FADE_IN, FADE_OUT, FRAME, HOVER_BLEND, STEPS, cell_pixels, decode, images_enabled, iterm_image,
+    mix, sgr_color, split_complete,
 )
 
 try:
@@ -54,12 +57,9 @@ BUTTONS = ("files", "git", "overview", "settings")
 GLYPHS = {"files": "\uf07c", "git": "\ue725", "overview": "\uf0ca", "settings": "\uf013"}
 FONT_NAME = "SymbolsNerdFontMono-Regular.ttf"
 SS = 4  # supersampling of the button shapes
-STEPS = 8  # shades between rest and full hover: at most this many icon images per button
-HOVER_BLEND = 0.45  # share of the way from surface to raised that the hovered background reaches
-FADE_IN, FADE_OUT = 0.15, 0.20  # seconds from rest to full hover and back
-FRAME = 1 / 30  # seconds between frames while a fade runs
 IDLE = 0.3  # seconds between looks at the state files while nothing animates
 THEME_POLL = 1.0  # seconds between looks at the saved theme
+SETTLE = 0.06  # seconds a new pane size must hold before the bar repaints for it
 FONT_DIRS = (
     os.environ.get("HIVEGRID_ICON_FONT_DIR", ""),
     os.path.expanduser("~/.local/share/hivegrid"),
@@ -94,16 +94,34 @@ def state_path():
 
 
 def read_state(path):
-    """(open view or None, dock open) from the state file and its .ov flag."""
-    view = None
+    """(open view or None, dock open, gear nudge) from the state file "<open|closed> <view>
+    [nudge]" and its .ov flag. The nudge (pixels, from the config) is how much farther the
+    window edge is below the last row than above the first: the window padding differs and the
+    rows leave a few pixels over at the bottom."""
+    view, nudge = None, 0
     try:
         with open(path, encoding="utf-8") as f:
             parts = f.read().split()
         if len(parts) >= 2 and parts[0] == "open":
             view = parts[1]
+        if len(parts) >= 3 and parts[2].lstrip("-").isdigit():
+            nudge = int(parts[2])
     except OSError:
         pass
-    return view, os.path.exists(path + ".ov")
+    return view, os.path.exists(path + ".ov"), nudge
+
+
+def drop_stale(path, now, age=5.0):
+    """Removes the state file and the dock flag when they are older than this bar (by more than
+    `age` seconds): left behind by an earlier WezTerm whose pane had the same id (ids restart at
+    0), they would highlight a view or dock that is not open. The config writes them only after
+    the bar pane exists, so a fresh one is never older than the bar."""
+    for p in (path, path + ".ov"):
+        try:
+            if os.path.getmtime(p) < now - age:
+                os.remove(p)
+        except OSError:
+            pass
 
 
 class Bar:
@@ -121,6 +139,11 @@ class Bar:
         self.icons = {}
         self.theme = ThemeWatch() if ThemeWatch else None
         self.theme_at = 0.0  # time of the last look at the saved theme
+        self.geom = None  # (rows, cols, cell width, cell height) as painted
+        self.pending = None  # a new geometry waiting to hold for SETTLE
+        self.pending_at = 0.0
+        self.dirty = True  # repaint everything on the next frame
+        self.winch = False  # a SIGWINCH came since the last pass
 
     def restyle(self, now):
         """Takes the saved theme's colours (a Save in the settings panel) at most once a second;
@@ -176,21 +199,40 @@ class Bar:
             self.icons[key] = buf.getvalue()
         return self.icons[key]
 
+    def gear_png(self, hot, step, cw, ch, cols, nudge):
+        """The settings button moved `nudge` pixels down (up when negative, at most a row), on
+        an image 5 rows tall from the row above it to the bottom row, so that the space below
+        it matches the space above the first button."""
+        key = ("gear", hot, step, cw, ch, cols, nudge)
+        if key not in self.icons:
+            img = Image.new("RGBA", (cols * cw, 5 * ch), (0, 0, 0, 0))
+            img.paste(Image.open(io.BytesIO(self.button_png("settings", hot, step, cw, ch, cols))), (0, ch + nudge))
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            self.icons[key] = buf.getvalue()
+        return self.icons[key]
+
     def shade(self, name, state):
         """(open, step) of a button: an open view's button keeps its highlight whatever the
         pointer does, the others follow their fade."""
-        view, dock = state
+        view, dock = state[:2]
         hot = (view == name) or (name == "overview" and dock)
         return hot, (STEPS if hot else round(self.level[name] * STEPS))
 
-    def button(self, name, top, cols, cw, ch, hot, step):
-        """Escape sequences that paint one button: three rows and its icon."""
+    def button(self, name, top, cols, cw, ch, hot, step, nudge=0):
+        """Escape sequences that paint one button: three rows and its icon. The settings button
+        spans 5 rows when the row above it is free, its chip `nudge` pixels lower (gear_png)."""
         e = "\x1b"
         if self.font_path and cols > 1:
-            buf = [f"{e}[{top + y + 1};1H{e}[0;{sgr_color(self.c['surface'], True)}m{' ' * cols}" for y in range(3)]
-            png = self.button_png(name, hot, step, cw, ch, cols)
+            tall = name == "settings" and top > tops(0)["overview"] + 4
+            first, n = (top - 1, 5) if tall else (top, 3)
+            buf = [f"{e}[{first + y + 1};1H{e}[0;{sgr_color(self.c['surface'], True)}m{' ' * cols}" for y in range(n)]
+            if tall:
+                png = self.gear_png(hot, step, cw, ch, cols, max(-ch, min(ch, nudge)))
+            else:
+                png = self.button_png(name, hot, step, cw, ch, cols)
             # doNotMoveCursor keeps the next row's cursor move independent of the image.
-            buf.append(f"{e}[{top + 1};1H" + iterm_image(png, cols, 3).replace(
+            buf.append(f"{e}[{first + 1};1H" + iterm_image(png, cols, n).replace(
                 "inline=1;", "inline=1;doNotMoveCursor=1;", 1))
             return "".join(buf)
         # Text fallback: the cells carry the shade, the open button a left stripe.
@@ -209,17 +251,18 @@ class Bar:
         )
         return "".join(buf)
 
-    def draw(self, rows, cols, state, full):
+    def draw(self, rows, cols, state, full, cell=None):
         """Paints what differs from the screen: every button when `full` (start, resize), else
         the buttons whose highlight or fade shade changed."""
         e = "\x1b"
         if full:
             self.drawn.clear()
-        todo = [(n, t, self.shade(n, state)) for n, t in tops(rows).items()]
+        nudge = state[2] if len(state) > 2 else 0
+        todo = [(n, t, self.shade(n, state) + ((nudge,) if n == "settings" else ())) for n, t in tops(rows).items()]
         todo = [x for x in todo if self.drawn.get(x[0]) != x[2]]
         if not todo:
             return
-        cw, ch = cell_pixels(self.out.fileno())
+        cw, ch = cell or cell_pixels(self.out.fileno())
         buf = [f"{e}[0m{e}[{sgr_color(self.c['surface'], True)}m{e}[2J"] if full else []
         for name, top, shade in todo:
             self.drawn[name] = shade
@@ -276,9 +319,35 @@ class Bar:
         if action == "press" and button == "left" and name:
             self.click(name)
 
+    def measure(self):
+        """(rows, cols, cell width, cell height) of the pane now."""
+        try:
+            size = os.get_terminal_size(self.out.fileno())
+            cols, rows = size.columns, size.lines
+        except OSError:
+            cols, rows = 5, 24
+        return (rows, cols, *cell_pixels(self.out.fileno()))
+
+    def wait_for(self, geom, now, resized=False):
+        """Seconds to wait before painting the pane at `geom` (0: paint now). After a resize
+        (`resized`: a SIGWINCH came, or the measured geometry differs) the whole bar is painted
+        once the size held for SETTLE seconds: a pane resized twice in a row (the sidebar widens
+        the bar to split the view off it, then it is 5 columns again) is painted once, at its
+        final size, and is painted even when that size is the old one, because WezTerm rewraps
+        the screen on each resize and loses the images. The first geometry is painted at once."""
+        if resized or geom != (self.pending or self.geom):
+            self.pending, self.pending_at = geom, now
+        if self.pending is None:
+            return 0.0
+        left = SETTLE - (now - self.pending_at)
+        if self.geom is not None and left > 0:
+            return left
+        self.geom, self.pending = geom, None
+        self.dirty = True
+        return 0.0
+
     def run(self):
         old = termios.tcgetattr(self.fd)
-        resized = {"v": True}
         try:
             tty.setraw(self.fd)
             self.out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
@@ -294,24 +363,26 @@ class Bar:
             self.out.write("".join(f"\x1b]1337;SetUserVar={var}={one}\x07" for var in (
                 "hivegrid_bar", "hivegrid_no_focus", "hivegrid_no_dim", "hivegrid_fixed_width")))
             self.out.flush()
-            signal.signal(signal.SIGWINCH, lambda *_: resized.update(v=True))
+            # SIGWINCH is only noted (a flag read on the next pass) and interrupts the wait;
+            # the pass also compares the geometry (rows, columns, cell pixels) with the painted
+            # one, so a resize is never missed, not even one that lands while a frame is drawn.
+            signal.signal(signal.SIGWINCH, lambda *_: setattr(self, "winch", True))
             path = state_path()
+            drop_stale(path, time.time())
             pending = b""  # an escape sequence the last read cut off
             while self.running:
-                try:
-                    size = os.get_terminal_size(self.out.fileno())
-                    cols, rows = size.columns, size.lines
-                except OSError:
-                    cols, rows = 5, 24
-                state = read_state(path)
                 now = time.monotonic()
                 if self.restyle(now):
-                    resized["v"] = True
+                    self.dirty = True
+                resized, self.winch = self.winch, False
+                rows, cols, cw, ch = geom = self.measure()
+                wait = self.wait_for(geom, now, resized)
                 busy = self.advance(now)
-                self.draw(rows, cols, state, resized["v"])
-                resized["v"] = False
+                if not wait:
+                    self.draw(rows, cols, read_state(path), self.dirty, (cw, ch))
+                    self.dirty = False
                 try:
-                    ready, _, _ = select.select([self.fd], [], [], FRAME if busy else IDLE)
+                    ready, _, _ = select.select([self.fd], [], [], wait or (FRAME if busy else IDLE))
                 except InterruptedError:
                     continue
                 if ready:

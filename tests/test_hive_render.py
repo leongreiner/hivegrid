@@ -7,6 +7,9 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
+# The block-character cells unless a test asks for image cells (images=True): the result must
+# not depend on the terminal the tests run in.
+os.environ["HIVEGRID_NO_IMAGES"] = "1"
 import hivegrid_hex as X  # noqa: E402
 import hivegrid_hive as HV  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
@@ -826,7 +829,7 @@ class Mouse(Base):
         self.page.focus = False
         self.draw()
         x, y, w, h = self.page.pop_rect
-        self.ui.handle(click(x + 5, y + h - 3))
+        self.ui.handle(click(x + 5, y + h - 4))  # the prompt line: above the buttons and the padding row
         self.assertTrue(self.page.focus)
 
 
@@ -941,7 +944,7 @@ class RealCore(unittest.TestCase):
             def __getattr__(s, name):
                 fn = getattr(A, name)
                 kw = {"collect": {"run": run, "now": lambda: NOW, "fg": {}}}.get(name, {"run": run} if name in (
-                    "peek", "send_prompt", "jump", "spawn_agent", "delete_agent") else {})
+                    "peek", "send_prompt", "jump", "spawn_agent", "delete_agent", "origin", "gather") else {})
                 return lambda *a, **k: fn(*a, **{**kw, **k})
 
         self.page = HV.HivePage(FakeModel(), core=Core(), now=lambda: NOW, background=lambda f: f())
@@ -969,6 +972,186 @@ class RealCore(unittest.TestCase):
         sends = [c for c in self.calls if c[0] == "send-text"]
         self.assertEqual(sends[0], ("send-text", "--pane-id", "7", "--", "hi"))
         self.assertEqual(sends[1], ("send-text", "--pane-id", "7", "--no-paste", "\r"))
+
+
+@unittest.skipUnless(HV.Image is not None, "PIL not installed")
+class ImageCells(Base):
+    """The anti-aliased image cells (HivePage images=True) with a fixed cell size."""
+
+    CW, CH = 8, 17
+
+    def make(self, agents=None, size=(160, 50)):
+        self.core = FakeCore(seven() if agents is None else agents)
+        self.page = HV.HivePage(FakeModel(), core=self.core, now=lambda: NOW, background=lambda f: f(),
+                                images=True, cell_px=(self.CW, self.CH))
+        self.ui = FakeUI(self.page)
+        self.size = size
+        self.page.on_show(self.ui)
+        self.draw()
+        return self.page
+
+    def screen(self):
+        """The frame's images composited into one RGBA picture of the whole canvas."""
+        from PIL import Image
+        cv = self.ui.cv
+        img = Image.new("RGBA", (cv.w * self.CW, cv.h * self.CH), (0, 0, 0, 0))
+        for x, y, w, h, png in cv.images:
+            part = Image.open(io.BytesIO(png)).convert("RGBA")
+            self.assertEqual(part.size, (w * self.CW, h * self.CH))  # 1:1, nothing stretched
+            img.alpha_composite(part, (x * self.CW, y * self.CH))
+        return img
+
+    def text_cells(self):
+        """(x, y, bg) of every non-blank character inside a cell's box."""
+        out = []
+        for c in self.page.cells:
+            for yy in range(c["y"], c["y"] + c["h"]):
+                for xx in range(c["x"], c["x"] + c["w"]):
+                    ch, fg, bg, _ = self.ui.cv.cells[yy][xx]
+                    if ch.strip():
+                        out.append((xx, yy, bg))
+        return out
+
+    def test_cells_are_images_with_text_in_holes_on_the_same_fill(self):
+        self.make()
+        self.assertEqual(self.page.art_form(), ("hex", self.page.ry))
+        self.assertTrue(self.ui.cv.images)
+        img = self.screen()
+        cells = self.text_cells()
+        self.assertTrue(cells)
+        for x, y, bg in cells:
+            # the image is transparent over the text...
+            self.assertEqual(img.getpixel((x * self.CW + self.CW // 2, y * self.CH + self.CH // 2))[3], 0)
+            # ...and the fill right beside the text has the text's background colour, opaque
+            left = img.getpixel((x * self.CW - 1, y * self.CH + self.CH // 2))
+            if left[3]:
+                self.assertEqual(left[:3] + (255,), U.rgb(bg) + (255,), (x, y))
+        # the glyph, number and folder are still text
+        body = "\n".join(text_of(self.ui))
+        for st in ("↻", "◔", "✓", "?"):
+            self.assertIn(st, body)
+        self.assertIn("proj3", body)
+
+    def test_selection_ring_goes_round_the_cell_continuously(self):
+        self.make()
+        self.page.select(12, open=False)
+        self.draw()
+        img = self.screen()
+        c = self.cell(12)
+        poly = X.hex_polygon(self.page.ry, self.CW, self.CH)
+        gap, rw, sep, _ = HV.art_metrics(self.CW, self.CH)
+        ring = X.inset(poly, gap - sep - rw / 2)  # the middle of the ring
+        bright = U.rgb(self.ui.pal["bright"])
+        for i in range(6):  # sample along every edge of the ring
+            (x0, y0), (x1, y1) = ring[i], ring[(i + 1) % 6]
+            for t in (0.25, 0.5, 0.75):
+                px = c["x"] * self.CW + x0 + (x1 - x0) * t
+                py = c["y"] * self.CH + y0 + (y1 - y0) * t
+                r, g, b, a = img.getpixel((int(px), int(py)))
+                self.assertGreater(a, 200, (i, t))
+                self.assertLess(max(abs(r - bright[0]), abs(g - bright[1]), abs(b - bright[2])), 60, (i, t))
+
+    def test_frames_are_cached_and_a_hover_re_encodes_only_its_strips(self):
+        self.make()
+        art = self.page.art
+        first = art.encoded
+        self.draw()
+        self.assertEqual(art.encoded, first, "an unchanged frame encodes nothing")
+        strips = len(self.ui.cv.images)
+        c = self.cell(11)
+        self.ui.pointer = (int(c["cx"]), int(c["cy"]))
+        self.assertTrue(self.page.tick(self.ui), "the hover asks for a frame")
+        self.draw()
+        self.assertEqual(self.page.hover, 11)
+        touched = [s for s in self.ui.cv.images if s[1] < c["y"] + c["h"] + 1 and s[1] + s[3] > c["y"] - 1]
+        self.assertLessEqual(art.encoded - first, len(touched))
+        self.assertLess(len(touched), strips)
+        self.assertFalse(self.page.tick(self.ui), "a still pointer asks for nothing")
+        # leaving and coming back reuses the cached strips
+        self.ui.pointer = None
+        self.page.tick(self.ui)
+        self.draw()
+        n = art.encoded
+        self.ui.pointer = (int(c["cx"]), int(c["cy"]))
+        self.draw()
+        self.assertEqual(art.encoded, n)
+
+    def test_hover_lightens_the_fill_and_the_text_background_alike(self):
+        self.make()
+        c = self.cell(13)
+        mine = lambda: {bg for x, y, bg in self.text_cells() if (self.page.cell_at(x, y) or {}).get("id") == 13}
+        plain = mine()
+        self.ui.pointer = (int(c["cx"]), int(c["cy"]))
+        self.draw()
+        self.assertEqual(len(plain), 1)
+        self.assertEqual(mine(), {U.mix(next(iter(plain)), self.ui.pal["bright"], HV.HOVER_LIGHT)})
+
+    def test_clicks_reach_the_cell_under_the_pointer_and_gaps_close(self):
+        self.make()
+        for c in list(self.page.cells):
+            if c["kind"] != "agent":
+                continue
+            self.ui.handle(click(int(c["cx"]), int(c["cy"])))
+            self.assertEqual(self.page.sel, c["id"])
+            self.assertTrue(self.page.open)
+            self.draw()
+            self.ui.handle(key("Escape"))
+            self.draw()
+        # a click in the corner of a box that belongs to no cell closes the popover
+        self.page.select(10)
+        self.draw()
+        corner = next((x, y) for c in self.page.cells for y in range(c["y"], c["y"] + c["h"])
+                      for x in range(c["x"], c["x"] + c["w"]) if self.page.cell_at(x, y) is None)
+        self.ui.handle(click(*corner))
+        self.assertFalse(self.page.open)
+
+    def test_popover_is_cut_out_of_the_image(self):
+        self.make()
+        self.page.select(10)
+        self.draw()
+        x, y, w, h = self.page.pop_rect
+        img = self.screen()
+        for yy in range(y, y + h):
+            for xx in (x, x + w // 2, x + w - 1):
+                self.assertEqual(img.getpixel((xx * self.CW + 3, yy * self.CH + 3))[3], 0)
+
+    def test_big_window_leaves_room_for_the_popover_beside_the_cells(self):
+        for size in ((160, 50), (233, 55), (318, 80)):
+            self.make(size=size)
+            self.page.select(10)
+            self.draw()
+            x, y, w, h = self.page.pop_rect
+            for c in self.page.cells:
+                self.assertTrue(x >= c["x"] + c["w"] or x + w <= c["x"], (size, c["id"]))
+
+    def test_smallest_hex_keeps_room_for_glyph_and_number(self):
+        """'↻ 12' needs 4 cells: the smallest hex size gives two text rows that wide."""
+        for cw, ch in ((8, 17), (10, 21), (7, 15)):
+            spans = [s for s in X.text_spans(X.MIN_RY, cw, ch, HV.art_metrics(cw, ch)[3]) if s]
+            self.assertGreaterEqual(len(spans), 2, (cw, ch))
+            self.assertGreaterEqual(min(b - a for a, b in spans), 4, (cw, ch))
+
+    def test_tiles_use_images_only_when_they_have_gap_rows(self):
+        self.make()
+        self.send(key("t"))
+        self.assertEqual(self.page.art_form()[0], "tile")
+        self.assertTrue(self.ui.cv.images)
+        many = [Agent(pane=100 + i, cwd=f"/w/p{i}") for i in range(60)]
+        self.make(agents=many, size=(60, 20))
+        self.send(key("t"))
+        self.assertLessEqual(self.page.tile[1], 2)
+        self.assertIsNone(self.page.art_form())
+        self.assertEqual(self.ui.cv.images, [])
+
+    def test_no_images_means_block_cells(self):
+        self.core = FakeCore(seven())
+        page = HV.HivePage(FakeModel(), core=self.core, now=lambda: NOW, background=lambda f: f(), images=False)
+        self.ui = FakeUI(page)
+        self.ui.size = (160, 50)
+        page.on_show(self.ui)
+        self.ui.draw()
+        self.assertIsNone(page.art_form())
+        self.assertEqual(self.ui.cv.images, [])
 
 
 if __name__ == "__main__":

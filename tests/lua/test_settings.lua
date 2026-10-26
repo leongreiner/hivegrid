@@ -25,10 +25,10 @@ end
 
 -- Theme ---------------------------------------------------------------------------
 
-T.test('malformed JSON falls back to defaults everywhere', function(wz)
+T.test('malformed JSON falls back to defaults everywhere', function()
   for _, text in ipairs { '{"theme": {"palette": {"accent": "#ffffff"}', 'not json', '"a string"', '42', '' } do
     T.fresh()
-    wz = require 'wezterm'
+    local wz = require 'wezterm'
     local S = load(wz, text)
     T.eq(S.theme_palette(), {}, text)
     T.eq(S.theme_terminal(), {}, text)

@@ -102,17 +102,78 @@ T.test('LEADER+o splits the top-right grid pane at 18% of the window and keeps t
   T.ok(type(doc.pal) == 'table' and doc.pal.accent, 'palette for the dock')
 end)
 
-T.test('a remembered width is clamped to at least 28 columns and at most a third of the window', function(wz)
+T.test('a remembered width is clamped to at least 30 columns and at most a third of the window', function(wz)
   local rows, a = two_wide(wz)
   local win, tab, calls, config = setup(wz, rows)
   wz.GLOBAL.overview_width = 5
   press(wz, config, win, a)
-  T.eq(splits(calls)[1][4], '28')
+  T.eq(splits(calls)[1][4], '30')
   wz.GLOBAL.overview = nil
   wz.GLOBAL.overview_width = 150
   press(wz, config, win, a)
   T.eq(splits(calls)[2][4], '66')
   T.ok(rec(wz, tab), 'opened')
+end)
+
+T.test('the default width is 18% of the window, 30 to 48 columns', function(wz)
+  for _, c in ipairs { { 160, '30' }, { 233, '41' }, { 320, '48' } } do
+    local a, b = wz.fake.pane { id = 1 }, wz.fake.pane { id = 2 }
+    local half = c[1] // 2
+    local win, _, calls, config = setup(wz, {
+      { pane = a, left = 0, width = half - 1, active = true }, { pane = b, left = half, width = c[1] - half },
+    })
+    press(wz, config, win, a)
+    T.eq(splits(calls)[1][4], c[2], c[1] .. ' columns')
+    wz.GLOBAL.overview = nil
+  end
+end)
+
+T.test('a dragged width scales with the window it is opened in', function(wz)
+  local rows, a = two_wide(wz) -- 200 columns
+  local win, _, calls, config = setup(wz, rows)
+  wz.GLOBAL.overview_width, wz.GLOBAL.overview_width_of = 30, 100
+  press(wz, config, win, a)
+  T.eq(splits(calls)[1][4], '60')
+end)
+
+T.test('a divider drag on the open dock is learned; a resize or a new pane is not a drag', function(wz)
+  local rows, a = two_wide(wz, { { id = 77, left = 161, width = 39 } })
+  local win, tab = setup(wz, rows)
+  wz.GLOBAL.overview = { [tostring(tab:tab_id())] = { pane = 77, last = 1 } }
+  tick(wz, win) -- the first tick records what it sees
+  T.eq(wz.GLOBAL.overview_width, nil)
+  tab:set_rows {
+    { pane = a, left = 0, width = 99, active = true }, { id = 2, left = 100, width = 55 },
+    { id = 77, left = 156, width = 44 },
+  }
+  tick(wz, win)
+  T.eq({ wz.GLOBAL.overview_width, wz.GLOBAL.overview_width_of }, { 44, 200 })
+  tab:set_rows {
+    { pane = a, left = 0, width = 99, active = true }, { id = 2, left = 100, width = 100 },
+    { id = 77, left = 201, width = 50 },
+  }
+  tick(wz, win) -- the window grew: not a drag
+  T.eq(wz.GLOBAL.overview_width, 44)
+end)
+
+T.test('the Hivegrid build brings an open dock to its width when the window is resized', function(wz)
+  local rows, a = two_wide(wz, { { id = 77, left = 161, width = 36 } })
+  local win, tab, calls = setup(wz, rows, { fork = true })
+  wz.GLOBAL.overview = { [tostring(tab:tab_id())] = { pane = 77, last = 1 } }
+  tick(wz, win)
+  T.eq(#calls.cli, 0, 'nothing to do at the size it opened with')
+  tab:set_rows { -- 320 columns: the dock kept 36 (fixed width), the grid took the rest
+    { pane = a, left = 0, width = 141, active = true }, { id = 2, left = 142, width = 141 },
+    { id = 77, left = 284, width = 36 },
+  }
+  tick(wz, win)
+  T.eq(calls.cli[#calls.cli], { 'adjust-pane-size', '--pane-id', '77', '--amount', '12', 'Left' })
+  tab:set_rows { -- 160 columns
+    { pane = a, left = 0, width = 61, active = true }, { id = 2, left = 62, width = 61 },
+    { id = 77, left = 124, width = 36 },
+  }
+  tick(wz, win)
+  T.eq(calls.cli[#calls.cli], { 'adjust-pane-size', '--pane-id', '77', '--amount', '6', 'Right' })
 end)
 
 T.test('a window too narrow for the dock gets a toast and no split', function(wz)
@@ -168,7 +229,7 @@ end)
 
 -- Closing -----------------------------------------------------------------------------------
 
-T.test('LEADER+o again closes the dock, remembers its width and keeps it closed', function(wz)
+T.test('LEADER+o again closes the dock and keeps it closed', function(wz)
   local rows, a = two_wide(wz)
   local win, tab, calls, config = setup(wz, rows)
   press(wz, config, win, a)
@@ -178,7 +239,7 @@ T.test('LEADER+o again closes the dock, remembers its width and keeps it closed'
   }
   press(wz, config, win, a)
   T.eq(calls.cli[#calls.cli], { 'kill-pane', '--pane-id', '77' })
-  T.eq(wz.GLOBAL.overview_width, 39)
+  T.eq(wz.GLOBAL.overview_width, nil, 'closing is not a drag: the next one opens at the default')
   T.eq(rec(wz, tab), nil)
   T.eq(T.read(state_file(77)), nil, 'state file removed')
   tab:set_rows(two_wide(wz))
@@ -319,4 +380,100 @@ T.test('the dock grid buttons equalize or arrange; the same request from elsewhe
   wz.emit('user-var-changed', win, a, 'hivegrid_overview_equalize', '1')
   wz.emit('user-var-changed', win, a, 'hivegrid_overview_arrange', '1')
   T.eq({ calls.equalize, calls.arrange }, { { 77 }, { 77 } })
+end)
+
+-- Closing from the dock ------------------------------------------------------------------------
+
+-- Bar 5, grid panes 1 2 3 side by side, dock 77 (pane indexes 0..4); the dock used pane `last`.
+local function close_setup(wz, last)
+  local bar = wz.fake.pane { id = 5 }
+  local win, tab = setup(wz, {
+    { pane = bar, left = 0, width = 5 }, { id = 1, left = 6, width = 50 }, { id = 2, left = 57, width = 50 },
+    { id = 3, left = 108, width = 50 }, { id = 77, left = 159, width = 41, active = true },
+  })
+  local key = tostring(tab:tab_id())
+  wz.GLOBAL.overview = { [key] = { pane = 77, last = last } }
+  wz.GLOBAL.sidebar = { [key] = { handle = 5 } }
+  local dock = wz.mux.get_pane(77)
+  return win, tab, dock, function(value, from)
+    wz.emit('user-var-changed', win, from or dock, 'hivegrid_overview_close', value)
+  end
+end
+
+local act = { close = { kind = 'CloseCurrentPane', args = { confirm = false } } }
+local function close_then(index)
+  return { kind = 'Multiple', args = { act.close, { kind = 'ActivatePaneByIndex', args = index } } }
+end
+
+T.test('x in the dock closes the pane used last; it hands over to its neighbour, keys stay in the dock', function(wz)
+  local win, tab, _, close = close_setup(wz, 2)
+  close('pane:2:dock:7')
+  T.eq(wz.stub.activations, { 2 }, 'the target is made the active pane, then closed')
+  T.eq(#win.actions, 1)
+  T.eq(win.actions[1].action, close_then(3), 'the dock (index 4) is index 3 after the close')
+  T.eq(win.actions[1].pane:pane_id(), 2)
+  T.eq(rec(wz, tab).last, 3, 'the next pane in reading order is the one used last now')
+end)
+
+T.test('a click on a row ✕ closes another pane and gives the keyboard to the pane used last', function(wz)
+  local win, tab, _, close = close_setup(wz, 1)
+  close('pane:3:grid:8')
+  T.eq(win.actions[1].action, close_then(1))
+  T.eq(rec(wz, tab).last, 1)
+end)
+
+T.test('closing the last pane in reading order hands over to the one before it', function(wz)
+  local win, tab, _, close = close_setup(wz, 3)
+  close('pane:3:grid:9')
+  T.eq(rec(wz, tab).last, 2)
+  T.eq(win.actions[1].action, close_then(2))
+end)
+
+T.test('the bar, the dock, another tab and requests from elsewhere are never closed', function(wz)
+  local win, _, _, close = close_setup(wz, 1)
+  local other = wz.fake.tab { panes = { { id = 30 } } }
+  win.tabs[2] = other
+  other._window = win
+  close('pane:5:dock:1') -- the sidebar bar
+  close('pane:77:dock:2') -- the dock itself
+  close('pane:30:dock:3') -- another tab
+  close('pane:999:dock:4') -- gone
+  close('garbage')
+  close('pane:1:dock:5', wz.mux.get_pane(1)) -- not from the dock
+  close('tab:6', wz.mux.get_pane(2))
+  T.eq(win.actions, {})
+  T.eq(wz.stub.activations, {})
+end)
+
+T.test('closing the only grid pane closes the tab with its bar and dock', function(wz)
+  local bar = wz.fake.pane { id = 5 }
+  local win, tab = setup(wz, {
+    { pane = bar, left = 0, width = 5 }, { id = 1, left = 6, width = 150 }, { id = 77, left = 157, width = 43, active = true },
+  })
+  local key = tostring(tab:tab_id())
+  wz.GLOBAL.overview = { [key] = { pane = 77, last = 1 } }
+  wz.GLOBAL.sidebar = { [key] = { handle = 5 } }
+  wz.emit('user-var-changed', win, wz.mux.get_pane(77), 'hivegrid_overview_close', 'pane:1:dock:1')
+  T.eq(win.actions[1].action, { kind = 'CloseCurrentTab', args = { confirm = false } })
+  T.eq(rec(wz, tab), nil, 'the dock record goes with the tab')
+end)
+
+T.test('the title row ✕ closes the whole tab', function(wz)
+  local win, tab, _, close = close_setup(wz, 1)
+  close('tab:4')
+  T.eq(#win.actions, 1)
+  T.eq(win.actions[1].action, { kind = 'CloseCurrentTab', args = { confirm = false } })
+  T.eq(rec(wz, tab), nil)
+end)
+
+T.test('a close request for a tab that is not the active one is ignored', function(wz)
+  local win, tab, _, close = close_setup(wz, 1)
+  local other = wz.fake.tab { panes = { { id = 30 } } }
+  win.tabs[2] = other
+  other._window = win
+  win.active = 2
+  close('tab:5')
+  close('pane:2:dock:6')
+  T.eq(win.actions, {})
+  T.ok(rec(wz, tab), 'dock kept')
 end)

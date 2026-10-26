@@ -46,7 +46,6 @@
 local wezterm = require 'wezterm'
 local panemap = require 'panemap'
 local theme = require 'theme'
-local P = theme.P
 
 local QUIET_SECS = 3 -- no screen change for this long => not working (heuristic)
 local RUN_SECS = 6 -- continuous change this long => working, marker or not
@@ -57,18 +56,8 @@ local LINES = 16 -- bottom screen rows inspected per pane
 local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
 local AGENTS = { omp = true, claude = true, codex = true, gemini = true, aider = true, opencode = true }
 
--- Glyphs and colours match the hive (bin/hivegrid_hive.py GLYPH / WORD / state_color).
-local STATES = {
-  attention = { color = P.violet, glyph = '?', text = 'needs you', rank = 1 },
-  bell = { color = P.red, glyph = '!', text = 'bell', rank = 2 },
-  done = { color = P.green, glyph = '✓', text = 'done', rank = 3 },
-  busy = { color = P.amber, glyph = '◔', text = 'busy', rank = 4 },
-  working = { color = P.accent, glyph = '↻', text = 'working', rank = 5 },
-  idle = { color = P.grey, glyph = '·', text = 'idle', rank = 6 },
-  exited = { color = P.muted, glyph = '○', text = 'exited', rank = 7 },
-  other = { color = P.dim, glyph = '›', text = 'running', rank = 8 },
-  shell = { color = P.dim, glyph = '›', text = 'shell', rank = 9 },
-}
+-- The one state table (theme.STATES, twin of bin/hivegrid_ui.py STATES): glyph, text, colour.
+local STATES = theme.STATES
 
 -- The omp extension's state files (ext/hivegrid-agent-state.ts; bin/hivegrid_agents.py reads
 -- the same ones).
@@ -467,11 +456,11 @@ local function state_text(s, st)
 end
 
 -- Rows for the overview dock, one per grid pane of tab `tab_id` in reading order:
--- { id, num, kind, glyph, text, color, name, title, reason, proc, since, active, zoomed }.
+-- { id, num, kind, glyph, text, color, name, cwd, title, reason, proc, since, active, zoomed }.
 -- `kind` is the state key (see STATES; 'idle' when nothing is known), `since` the epoch
--- second it last changed, `name` the pane's directory, `title` omp's session title (or the
--- pane title of another program), `reason` the extension's detail ('bash: npm test (12s)',
--- '1 background job', 'plan review', ...) or nil.
+-- second it last changed, `name` the pane directory's basename and `cwd` the whole path (~ for
+-- home), `title` omp's session title (or the pane title of another program), `reason` the
+-- extension's detail ('bash: npm test (12s)', '1 background job', 'plan review', ...) or nil.
 function api.overview(window, tab_id)
   for _, t in ipairs(scan(window)) do
     if t.id == tab_id then
@@ -484,7 +473,7 @@ function api.overview(window, tab_id)
         if name == '' then name = st.cwd or '' end
         rows[#rows + 1] = {
           id = e.pane:pane_id(), num = e.num, kind = kind, glyph = s.glyph, text = state_text(s, st),
-          color = s.color, name = name, title = st.heading or '', reason = st.reason, proc = st.proc or '',
+          color = s.color, name = name, cwd = st.cwd or '', title = st.heading or '', reason = st.reason, proc = st.proc or '',
           since = st.since, active = e.info.is_active, zoomed = e.info.is_zoomed,
         }
       end
@@ -495,53 +484,56 @@ function api.overview(window, tab_id)
   return {}
 end
 
--- InputSelector over every pane in the window: "<glyph> state  cwd  title". In one tab the
--- selector's own keys 1-9 are the dock's digits; across tabs a row names its tab only, so the
--- key in front of it stays the one handle.
+-- How long ago an epoch second was: 40s, 2m, 3h, 2d.
+local function age(since)
+  if type(since) ~= 'number' then return '' end
+  local d = math.max(0, math.floor(now_s() - since))
+  if d < 60 then return d .. 's' end
+  if d < 3600 then return d // 60 .. 'm' end
+  if d < 86400 then return d // 3600 .. 'h' end
+  return d // 86400 .. 'd'
+end
+
+-- The Hivegrid picker over every pane in the window (picker.lua): glyph, number, directory,
+-- state, omp's session title, age. In one tab the digits are the dock's; across tabs a row
+-- names its tab (cyan, the secondary identifier) and the digits pick the n-th row shown.
+-- The most urgent other pane (needs you, bell, done) starts selected, else this one.
 local function pick(window, pane)
   local list = scan(window, true)
   local multi = #list > 1
-  local choices = {}
+  local rows, count, best, best_rank, here_id = {}, 0, nil, 4, nil
   for ti, t in ipairs(list) do
     local entries = {}
     for _, e in ipairs(t.entries) do entries[#entries + 1] = e end
     table.sort(entries, function(a, b) return a.num < b.num end)
     for _, e in ipairs(entries) do
-      local s = STATES[e.st.kind or 'idle']
-      local text = state_text(s, e.st)
+      count = count + 1
+      local kind = e.st.kind or 'idle'
+      local s = STATES[kind]
+      local id = tostring(e.pane:pane_id())
       local here = e.pane:pane_id() == pane:pane_id()
-      local title = e.st.heading or ''
-      choices[#choices + 1] = {
-        id = tostring(e.pane:pane_id()),
-        label = wezterm.format {
-          { Foreground = { Color = P.muted } },
-          { Text = multi and ('tab ' .. ti .. ' · ') or '' },
-          { Foreground = { Color = s.color } },
-          { Text = s.glyph .. ' ' .. text .. string.rep(' ', math.max(10 - utf8.len(text), 1)) },
-          { Foreground = { Color = P.text } },
-          { Text = (e.st.cwd ~= '' and e.st.cwd or e.st.label or '') },
-          { Foreground = { Color = P.muted } },
-          { Text = (title ~= '' and ('  ' .. title) or '') .. (here and '  (here)' or '') },
-        },
+      local name = basename(e.st.cwd or '')
+      if name == '' then name = e.st.cwd or e.st.label or '' end
+      local cols = { { text = name } }
+      if multi then cols[#cols + 1] = { text = 'tab ' .. ti, color = 'cyan' } end
+      cols[#cols + 1] = { text = state_text(s, e.st), color = s.key or s.color }
+      cols[#cols + 1] = { text = e.st.heading or '', color = 'muted' }
+      rows[#rows + 1] = {
+        id = id, key = (not multi) and tostring(e.num) or nil, glyph = s.glyph, color = s.key or s.color,
+        cols = cols, meta = here and 'here' or age(e.st.since), meta_color = here and 'accent' or 'dim',
       }
+      if here then here_id = id end
+      if not here and (s.rank or 9) < best_rank then best, best_rank = id, s.rank end
     end
   end
-  window:perform_action(
-    wezterm.action.InputSelector {
-      title = 'Agents',
-      description = 'Type its key or / to filter, Enter = go, Esc = cancel',
-      fuzzy_description = 'Agent: ',
-      -- WezTerm's default alphabet: one key per row up to 34 rows; in a single tab the
-      -- keys 1-9 are the agents' own digits.
-      choices = choices,
-      action = wezterm.action_callback(function(_, _, id)
-        if not id then return end
-        local target = wezterm.mux.get_pane(tonumber(id))
-        if target then target:activate() end
-      end),
-    },
-    pane
-  )
+  require('picker').open(window, pane, {
+    title = 'Go to agent',
+    crumb = (multi and (#list .. ' tabs · ') or '') .. count .. (count == 1 and ' pane' or ' panes'),
+    verb = 'go', selected = best or here_id, rows = rows, empty = 'No panes in this window',
+  }, function(_, _, id)
+    local target = wezterm.mux.get_pane(tonumber(id))
+    if target then target:activate() end
+  end)
 end
 api.picker = wezterm.action_callback(pick)
 

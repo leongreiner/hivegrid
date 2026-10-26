@@ -5,6 +5,7 @@ local theme = require 'theme'
 local P = theme.P
 local T = theme.T
 local S = require('settings')(config, wezterm)
+local picker = require 'picker'
 
 -- A binding from settings.json (see settings.lua), `default` when the file has none.
 local function bound(name, default, action)
@@ -214,21 +215,66 @@ end
 -- How the right status gives up width: { 'tier', group, tier } takes a group to a
 -- narrower tier (a tier that is not narrower than the current one is skipped), { 'drop',
 -- group } removes it. The system group keeps its amounts (tier 2) until the quota group
--- is down to its compact tiers. The mode pill is never dropped.
+-- is down to its compact tiers, and its last tier, the CPU chip alone, is never dropped.
+-- The mode and zoom pills are never dropped; their key hints go before any group would.
 local PLAN = {
   { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'tier', 'B', 4 },
   { 'tier', 'C', 3 }, { 'tier', 'C', 4 }, { 'tier', 'B', 5 }, { 'tier', 'C', 5 },
-  { 'drop', 'C' }, { 'drop', 'B' },
+  { 'tier', 'C', 6 }, { 'drop', 'B' },
 }
 
--- The pill shown while a key table is active, so a modal key never acts unseen.
--- Broadcast types into every pane and is the one in red.
+-- The pill shown while a key table is active, so a modal key never acts unseen, with the
+-- table's keys beside it while there is room. One mode colour (amber); broadcast types into
+-- every pane and is the one in red. Hints read like a footer: key, then what it does.
 local MODES = {
-  broadcast = { 'BROADCAST', theme.lerp(P.red, P.deep, 0.3) },
-  resize = { 'RESIZE', P.raised },
-  pane = { 'PANE', P.raised },
-  omp_account = { 'ACCOUNT 1-9', P.raised },
+  broadcast = { 'BROADCAST', P.red, { { 'LEADER+b', 'stop' } } },
+  resize = { 'RESIZE', P.amber, { { 'hjkl', 'resize' }, { 'Esc', 'done' } } },
+  pane = { 'PANE', P.amber, {
+    { 'g', 'go' }, { 's', 'swap' }, { 'r', 'rotate' }, { 'x', 'close' },
+    { 'Esc', 'done' },
+  } },
+  omp_account = { 'ACCOUNT', P.amber, { { '1-9', 'start omp' }, { 'Esc', 'cancel' } } },
 }
+
+-- Footer-style key hints on the header band: key in text, what it does in muted.
+local function hint_items(pairs_)
+  local items = {}
+  for i, h in ipairs(pairs_) do
+    items[#items + 1] = { Foreground = { Color = P.text } }
+    items[#items + 1] = { Text = (i > 1 and '  ' or '') .. h[1] }
+    items[#items + 1] = { Foreground = { Color = P.muted } }
+    items[#items + 1] = { Text = ' ' .. h[2] }
+  end
+  return items
+end
+
+-- The lead pills: the active key table's mode, then ZOOM while the tab has a zoomed pane
+-- (any pane: on the Hivegrid build the focus may sit on a chrome pane beside it). Returns
+-- the full version (with key hints) and the compact one.
+local function lead_pills(window)
+  local full, compact = {}, {}
+  local mode = MODES[window:active_key_table() or '']
+  if mode then
+    local pill = theme.pill({
+      { Foreground = { Color = P.deep } }, { Attribute = { Intensity = 'Bold' } }, { Text = mode[1] },
+    }, mode[2])
+    compact[#compact + 1] = pill
+    full[#full + 1] = theme.extend(theme.extend({}, pill), theme.extend({ { Text = ' ' } }, hint_items(mode[3])))
+  end
+  local zoomed = false
+  local tab = window:active_tab()
+  for _, info in ipairs(tab and tab:panes_with_info() or {}) do
+    zoomed = zoomed or info.is_zoomed
+  end
+  if zoomed then
+    local pill = theme.click('zoom', theme.pill({
+      { Foreground = { Color = P.bright } }, { Attribute = { Intensity = 'Bold' } }, { Text = 'ZOOM' },
+    }, P.raised))
+    compact[#compact + 1] = pill
+    full[#full + 1] = theme.extend(theme.extend({}, pill), theme.extend({ { Text = ' ' } }, hint_items { { 'Alt+z', 'unzoom' } }))
+  end
+  return full, compact
+end
 
 -- Right side of the header, in the cells the tabs leave over: [mode] B (Claude quota),
 -- C (system stats). Every group has tiers; PLAN says which one narrows first.
@@ -260,27 +306,16 @@ wezterm.on('update-status', function(window)
   cq.refresh_if_due(window)
 
   -- Up to three visual groups: brand (left status), then right to left of the tabs
-  --   [broadcast]   B: quota   C: system
+  --   [mode] [zoom]   B: quota   C: system
   -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
   -- groups fit the free cells. Agent states live in the overview dock, not here.
   local groups = {
     B = { tiers = cq.visible() and cq.tiers(cq.active(window)) or {} },
     C = { tiers = ss.visible() and ss.tiers() or {} },
   }
-  local lead = {}
-  local mode = MODES[window:active_key_table() or '']
-  if mode then
-    lead[#lead + 1] = theme.pill({
-      { Foreground = { Color = P.bright } }, { Attribute = { Intensity = 'Bold' } },
-      { Text = mode[1] },
-    }, mode[2])
-  end
   sb.sync(window)
-  local lead_w = 0
-  for _, it in ipairs(lead) do lead_w = lead_w + theme.width(it) + 1 end
 
-  for _, g in pairs(groups) do g.tier = 1 end
-  local function needed()
+  local function needed(lead_w)
     local w = lead_w
     for _, g in pairs(groups) do
       local t = g.tiers[g.tier]
@@ -288,15 +323,33 @@ wezterm.on('update-status', function(window)
     end
     return w
   end
-  for _, step in ipairs(PLAN) do
-    if needed() <= avail then break end
-    local g = groups[step[2]]
-    if step[1] == 'tier' then
-      local cur, to = g.tiers[g.tier], g.tiers[step[3]]
-      if to and (not cur or to.w < cur.w) then g.tier = step[3] end
-    elseif step[1] == 'drop' then
-      g.tier = math.huge
+  -- Runs PLAN from the richest tiers for a lead `lead_w` cells wide; true when it fits
+  -- without dropping a group.
+  local function plan(lead_w)
+    for _, g in pairs(groups) do g.tier = 1 end
+    local dropped = false
+    for _, step in ipairs(PLAN) do
+      if needed(lead_w) <= avail then break end
+      local g = groups[step[2]]
+      if step[1] == 'tier' then
+        local cur, to = g.tiers[g.tier], g.tiers[step[3]]
+        if to and (not cur or to.w < cur.w) then g.tier = step[3] end
+      elseif step[1] == 'drop' then
+        g.tier, dropped = math.huge, true
+      end
     end
+    return not dropped and needed(lead_w) <= avail
+  end
+  local function width_of(list)
+    local w = 0
+    for _, it in ipairs(list) do w = w + theme.width(it) + 1 end
+    return w
+  end
+  local full, compact = lead_pills(window)
+  local lead = full
+  if not plan(width_of(full)) and #compact > 0 then
+    lead = compact
+    plan(width_of(compact))
   end
 
   local items = {}
@@ -340,7 +393,8 @@ local function hive_action() return panel_action('hive') end
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
 -- Left click: start/switch omp (quota pill). Right click on a quota pill or a click on the
--- system group opens the matching panel; the logo (id 'brand') opens the agent hive.
+-- system group opens the matching panel; the logo (id 'brand') opens the agent hive; the
+-- ZOOM pill unzooms.
 wezterm.on('status-click', function(window, pane, id, button)
   if button ~= 'Left' and button ~= 'Right' then return end
   local account = id:match('^quota:(.+)$')
@@ -354,6 +408,8 @@ wezterm.on('status-click', function(window, pane, id, button)
     window:perform_action(panel_action('monitor'), pane)
   elseif id == 'brand' then
     open_hive(window, pane)
+  elseif id == 'zoom' then
+    window:perform_action(act.TogglePaneZoomState, pane)
   end
 end)
 
@@ -404,22 +460,16 @@ local function plus_menu(window, pane)
       w:perform_action(panel_action(entry[2]), p)
     end }
   end
-  local choices = {}
+  local items = {}
   for i, row in ipairs(rows) do
-    choices[i] = { id = tostring(i), label = wezterm.format {
-      { Text = string.format('%-30s', row[1]) },
-      { Attribute = { Intensity = 'Half' } }, { Text = row[2] },
-    } }
+    items[i] = { id = tostring(i), cols = { { text = row[1] } }, meta = row[2] }
   end
-  window:perform_action(act.InputSelector {
-    title = 'Hivegrid',
-    description = 'Enter, click or the row number opens it. Esc closes.',
-    choices = choices,
-    action = wezterm.action_callback(function(w, p, id)
-      local row = id and rows[tonumber(id)]
-      if row then row[3](w, p) end
-    end),
-  }, pane)
+  picker.open(window, pane, {
+    title = 'Hivegrid', crumb = 'new tab or panel', verb = 'open', rows = items,
+  }, function(w, p, id)
+    local row = rows[tonumber(id)]
+    if row then row[3](w, p) end
+  end)
 end
 
 wezterm.on('new-tab-button-click', function(window, pane, button)
@@ -496,7 +546,9 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     -- The hive panel asks for the regular equalize after it spawned, moved or removed
     -- agent panes; the value is the pane id that should keep the keyboard focus.
     local id = tonumber(tostring(value):match('^(%d+)'))
-    layouts.equalize(window, (id and wezterm.mux.get_pane(id)) or pane)
+    -- The hive is an overlay, which is no pane of the mux: when the pane it names is gone
+    -- (it was just closed), the tab's own active pane stands in.
+    layouts.equalize(window, (id and wezterm.mux.get_pane(id)) or window:active_tab():active_pane())
     return
   end
   if name ~= 'hivegrid_capture' then return end

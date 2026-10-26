@@ -107,8 +107,18 @@ if palette then
   hg.tty_write('\27]11;' .. palette.surface .. '\27\\')
   hg.set_var('hivegrid_no_dim', '1')
 end
-local TITLE = ' ⬡ Files · '
-local TITLE_W = utf8.len(TITLE)
+local TITLE, SEP = ' ⬡ Files', ' · '
+local TITLE_W = utf8.len(TITLE .. SEP)
+
+-- `a` moved `t` of the way toward `b` (#rrggbb), like hivegrid_ui.mix.
+local function mix(a, b, t)
+  local out = '#'
+  for i = 2, 6, 2 do
+    local x, y = tonumber(a:sub(i, i + 1), 16), tonumber(b:sub(i, i + 1), 16)
+    out = out .. string.format('%02x', math.floor(x + (y - x) * t + 0.5))
+  end
+  return out
+end
 
 function Root:layout()
   self._chunks = ui.Layout()
@@ -122,23 +132,32 @@ function Root:layout()
     :split(self._area)
 end
 
--- The title's cells come off the room the path may take (it is cut from the left).
+-- The title row of every Hivegrid view (hivegrid_ui.title_row): " ⬡ Files" in accent bold,
+-- " · <path>" in muted (yazi already writes ~ for home and no trailing slash). The title's
+-- cells come off the room the path may take (it is cut from the left).
 local cwd = Header.cwd
 function Header:cwd()
   self._right_width = self._right_width + TITLE_W
   local span = cwd(self)
   self._right_width = self._right_width - TITLE_W
   if span == '' then return span end
-  return ui.Line { ui.Span(TITLE):style(th.mgr.cwd), span }
+  if not palette then return ui.Line { ui.Span(TITLE .. SEP):style(th.mgr.cwd), span } end
+  return ui.Line {
+    ui.Span(TITLE):style(ui.Style():fg(palette.accent):bold()),
+    ui.Span(SEP):style(ui.Style():fg(palette.muted)),
+    span:style(ui.Style():fg(palette.muted)),
+  }
 end
 
+-- The rule under it in the shared rule colour (hivegrid_ui.rule_color: 45% of the way from
+-- the background to edge_hi), the same as the git view's and the dock's.
 local header_redraw = Header.redraw
 function Header:redraw()
   local out = header_redraw(self)
   if palette then
     local a = self._area
     out[#out + 1] = ui.Line(string.rep('─', a.w)):area(a { y = a.y + 1, h = 1 })
-      :style(ui.Style():fg(palette.border))
+      :style(ui.Style():fg(mix(palette.surface, palette.edge_hi, 0.45)))
   end
   return out
 end

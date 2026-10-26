@@ -4,12 +4,13 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from collections import deque
 from pathlib import Path
 
 import hivegrid_ui as U
-from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome
+from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome, state_dir
 from hivegrid_settings_core import (
     BINDINGS, PRESETS, VERSION, about_info, find_wezterm, cache_dir, check_binding, discover_accounts, effective_keys, format_combo,
     merge_accounts, normalize, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
@@ -105,6 +106,7 @@ class SettingsPage(U.Page):
         model.accounts = stored if stored is not None else merge_accounts(None, discover_accounts())
         model.baseline = model.snapshot()
         self.found = []
+        self.two_pane = False  # set by render: the wide layout (section list, list + detail)
         self.rescan(None, quiet=True)
 
     # data ---------------------------------------------------------------------
@@ -150,7 +152,7 @@ class SettingsPage(U.Page):
             0: "↑↓ choose  Enter use  [/] accent  a custom accent  s save  ←→ section  q close",
             1: "↑↓ choose  Enter change  r reset  R reset all  s save  ←→ section  q close",
             2: "↑↓ choose  Space show/hide  e rename  p profile  d remove  a add  c rescan  s save  ←→ section  q close",
-            3: "←→ section  F1-F5 panels  q close",
+            3: "↑↓/←→ section  F1-F5 panels  q close",
         }[self.sub]
 
     def changed(self, ui, text):
@@ -202,6 +204,9 @@ class SettingsPage(U.Page):
                 self.reset_all(ui)
         elif self.sub == 2:
             self.accounts_key(ui, key)
+        elif key in ("UpArrow", "DownArrow"):
+            # About has no list of its own: ↑↓ walk the sections, so the keyboard never dead-ends.
+            self.sub = max(0, min(len(self.SUBS) - 1, self.sub + (1 if key == "DownArrow" else -1)))
 
     def wheel(self, ui, dy):
         if self.sub in (0, 1, 2):
@@ -353,16 +358,66 @@ class SettingsPage(U.Page):
         self.changed(ui, f"added {a['label']}")
 
     # drawing ------------------------------------------------------------------
+    SUB_W = 24  # the section list of the wide layout
+    CONTENT_W = (120, 160)  # the content column of the wide layout: from 120 up to 160 columns
+
+    def wide(self, w):
+        return w >= U.WIDE_COLS
+
+    def content_w(self, w):
+        """Content width of the wide layout: 3/5 of what the section list leaves, within
+        CONTENT_W, so a 2560 px window gets a larger preview and detail panes."""
+        lo, hi = self.CONTENT_W
+        return max(lo, min(hi, (w - self.SUB_W - 5) * 3 // 5))
+
     def render(self, ui, cv, x, y, w, h):
         p = ui.pal
-        pos = x + 2
+        draw = getattr(self, "draw_" + self.SUBS[self.sub].lower())
+        self.two_pane = self.wide(w)
+        if not self.two_pane:
+            pos = x + 2  # the section strip (§4.2 rule 2, second level)
+            for i, name in enumerate(self.SUBS):
+                pos += U.chip(cv, p, pos, y, name, selected=i == self.sub, bg=p["base"],
+                              hit=lambda b, i=i: setattr(self, "sub", i)) + 1
+            draw(ui, cv, x, y + 2, w, h - 2)
+            return None
+        # Wide: the section list, a separator, then the content (content_w); the whole
+        # composition is centred, and the status and footer rows line up with it. The content's
+        # selection marker column sits 1 cell right of the separator.
+        cw = self.content_w(w)
+        lx, tw = U.content_box(w, self.SUB_W + 5 + cw)
+        lx += x
+        sep = lx + self.SUB_W + 1
+        self.draw_sections(ui, cv, lx, y, h)
+        cv.fill(sep, y, 1, h, fg=p["border"], ch="│")
+        draw(ui, cv, sep + 2, y, cw + 4, h)
+        return lx - 2, tw + 4
+
+    def section_meta(self, i):
+        """(text, colour key) at the right of section i in the list: what it holds at a glance,
+        amber with a ● while it has unsaved edits."""
+        saved = json.loads(self.model.baseline)
+        name = self.SUBS[i]
+        if name == "Theme":
+            text, dirty = PRESETS[self.model.theme["preset"]]["name"].replace("Hivegrid ", ""), self.model.theme != saved[0]
+        elif name == "Keys":
+            n = sum(self.model.keys[k] != normalize(BINDINGS[k][1]) for k in BINDINGS)
+            text, dirty = (f"{n} changed" if n else f"{len(BINDINGS)}"), self.model.keys != saved[1]
+        elif name == "Accounts":
+            text = str(len(self.model.accounts)) + (f" · {len(self.found)} new" if self.found else "")
+            dirty = self.model.accounts != saved[2]
+        else:
+            text, dirty = f"v{VERSION}", False
+        return ("● " + text, "amber") if dirty else (text, "dim")
+
+    def draw_sections(self, ui, cv, x, y, h):
+        p = ui.pal
+        cv.put(x + 2, y, "Settings", p["muted"], None, BOLD)
         for i, name in enumerate(self.SUBS):
-            label = f" {name} "
-            sel = i == self.sub
-            cv.put(pos, y, label, p["bright"] if sel else p["muted"], p["raised"] if sel else p["base"], BOLD if sel else 0)
-            cv.hit(pos, y, len(label), 1, lambda b, i=i: setattr(self, "sub", i))
-            pos += len(label) + 1
-        getattr(self, "draw_" + self.SUBS[self.sub].lower())(ui, cv, x, y + 2, w, h - 2)
+            meta, colour = self.section_meta(i)
+            U.list_row(cv, p, y + 2 + i, x=x, w=self.SUB_W, selected=i == self.sub, bg=p["base"], name=name,
+                       right=meta, right_color=p[colour], hit=lambda b, i=i: setattr(self, "sub", i))
+        cv.put(x + 2, y + 3 + len(self.SUBS), "←→ or Tab", p["dim"])
 
     CARD_W = 38  # preset cards and the accent block share this width, so their edges line up
 
@@ -382,7 +437,9 @@ class SettingsPage(U.Page):
         px = lx + cw + 6
         pw = min(x + w - 2 - px, 120)
         if pw >= 64:
-            self.draw_preview(ui, cv, px, y, pw, ay + 5 - y)
+            # Two panes on a tall window: a taller preview (its strip then sits under it).
+            ph = max(ay + 5 - y, min(h - 2, 36)) if self.two_pane and h >= 40 else ay + 5 - y
+            self.draw_preview(ui, cv, px, y, pw, ph)
         else:
             self.draw_preview(ui, cv, lx, ay + 6, min(w - 4, 120), max(min(h - (ay + 6 - y), 23), 12))
 
@@ -448,7 +505,7 @@ class SettingsPage(U.Page):
         stats = " CPU 8%  RAM 35% "
         cv.put(x + w - len(stats) - 1, top, stats, t["text"], t["pill"])
         by = top + 1
-        dock_w = 22 if w >= 80 else 0
+        dock_w = 22 if w >= 72 else 0
         cv.fill(x, by, 3, body, bg=t["surface"])
         for k, g in enumerate(("▤", "⑂", "≡")):
             cv.put(x + 1, by + 1 + k * 2, g, t["bright"] if k == 0 else t["dim"], t["raised"] if k == 0 else t["surface"])
@@ -486,6 +543,7 @@ class SettingsPage(U.Page):
             for k, (g, c, label) in enumerate(dock[:max(body - 2, 0)]):
                 bg = t["raised"] if k == 0 else t["surface"]
                 cv.fill(dx, by + 2 + k, dock_w, 1, bg=bg)
+                cv.put(dx, by + 2 + k, "▎" if k == 0 else " ", t["accent"], bg)  # selection marker, as in the real dock
                 cv.put(dx + 1, by + 2 + k, g, c, bg)
                 cv.put(dx + 3, by + 2 + k, label, t["bright"] if k == 0 else t["text"], bg)
         sy = by + body + 1
@@ -496,33 +554,90 @@ class SettingsPage(U.Page):
             for k, c in enumerate(cols):
                 ui.swatch(cv, sx + 7 + k * 3, ry, c, 2)
 
+    def detail_head(self, ui, cv, x, y, w, title):
+        """Title of a detail pane: the name in bright bold over a rule (T3)."""
+        p = ui.pal
+        cv.put(x, y, fit(title, w), p["bright"], None, BOLD)
+        cv.fill(x, y + 1, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+
+    def detail_fields(self, ui, cv, x, y, w, rows, label_w=13):
+        """Label / value rows of a detail pane: [(label, value, colour)]. -> the row after them."""
+        p = ui.pal
+        for k, (label, value, colour) in enumerate(rows):
+            cv.put(x, y + k, label, p["dim"])
+            cv.put(x + label_w, y + k, fit(value, max(w - label_w, 0)), colour)
+        return y + len(rows)
+
+    def table_head(self, ui, cv, x, y, tw, cols):
+        """Column names [(dx, name)] in muted bold, and the rule under them (T3)."""
+        p = ui.pal
+        for dx, name in cols:
+            cv.put(x + dx, y, name, p["muted"], None, BOLD)
+        cv.fill(x, y + 1, tw, 1, fg=U.rule_color(p, p["base"]), ch="─")
+
+    KEYS_TW = 74  # action 34, binding 22, default 16, plus the marker columns
+
     def draw_keys(self, ui, cv, x, y, w, h):
         p = ui.pal
         names = list(BINDINGS)
         cur = self.cursor[1] = max(0, min(self.cursor[1], len(names) - 1))
-        # The row highlight covers the table only; the buttons of the selected row sit right of
-        # it on the page background, where a button reads as one (on the highlight it would not).
-        tw, bx = 80, x + 83
-        cv.put(x + 2, y, f"{'Action':<36}{'Binding':<24}Default", p["muted"], None, BOLD)
-        ui.button(cv, bx, y, "Reset all", lambda b: self.reset_all(ui))
+        tw = self.KEYS_TW
+        bcol, dcol = x + 36, x + 58
+        self.table_head(ui, cv, x, y, tw, ((2, "Action"), (36, "Binding"), (58, "Default")))
         for i, name in enumerate(names):
             row = y + 2 + i
             label, default, _ = BINDINGS[name]
-            value = self.model.keys[name]
-            changed = value != normalize(default)
+            value, dflt = self.model.keys[name], normalize(default)
+            changed = value != dflt
             sel = i == cur
-            bg = p["raised"] if sel else p["base"]
-            cv.fill(x + 1, row, tw, 1, bg=bg)
-            cv.put(x + 2, row, f"{label:<36}", p["bright"] if sel else p["text"], bg)
-            cv.put(x + 38, row, f"{value:<22}", p["accent"] if changed else p["text"], bg, BOLD if changed else 0)
-            cv.put(x + 62, row, normalize(default), p["muted"] if changed else p["dim"], bg)
-            cv.hit(x + 1, row, tw, 1, lambda b, i=i: self.cursor.__setitem__(1, i))
-            cv.hit(x + 38, row, 22, 1, lambda b, n=name, i=i: (self.cursor.__setitem__(1, i), self.change_binding(ui, n)))
-            if sel:
-                bw = ui.button(cv, bx, row, "Change", lambda b, n=name: self.change_binding(ui, n), accent=True)
+            r = U.list_row(cv, p, row, x=x, w=tw, selected=sel, bg=p["base"], name=fit(label, 32),
+                           hit=lambda b, i=i: self.cursor.__setitem__(1, i))
+            # Changed bindings stand out in amber with their default beside them; unchanged rows
+            # show a dim dash rather than repeating the binding.
+            cv.put(bcol, row, fit(value, 20), p["amber"] if changed else (p["bright"] if sel else p["text"]), r.bg,
+                   BOLD if changed else 0)
+            cv.put(dcol, row, fit(dflt, 15) if changed else "—", p["muted"] if changed else p["dim"], r.bg)
+            cv.hit(bcol, row, 20, 1, lambda b, n=name, i=i: (self.cursor.__setitem__(1, i), self.change_binding(ui, n)))
+            if sel and not self.two_pane:
+                # Row actions on the selected row only, beside the table (§4.2 rule 5).
+                bw = ui.button(cv, x + tw + 2, row, "Change", lambda b, n=name: self.change_binding(ui, n), accent=True)
                 if changed:
-                    ui.button(cv, bx + bw + 1, row, "Reset", lambda b, n=name: self.reset_binding(ui, n))
-        cv.put(x + 2, y + 3 + len(names), "Click a binding (or Enter) to record new keys. Save writes settings.json; WezTerm reloads it.", p["muted"])
+                    ui.button(cv, x + tw + 3 + bw, row, "Reset", lambda b, n=name: self.reset_binding(ui, n))
+        note = "Changed bindings are amber; — = same as the default."
+        if self.two_pane:
+            self.draw_key_detail(ui, cv, x + tw + 4, y, w - tw - 6, names[cur])
+        else:
+            ui.button(cv, x + tw + 2, y, "Reset all", lambda b: self.reset_all(ui))
+            note += " Click a binding (or Enter) to record new keys; Save writes settings.json and WezTerm reloads it."
+        for k, line in enumerate(textwrap.wrap(note, max(tw - 2 if self.two_pane else w - 4, 20))):
+            cv.put(x + 2, y + 3 + len(names) + k, line, p["muted"])
+
+    def draw_key_detail(self, ui, cv, x, y, w, name):
+        """The selected binding: what it is, its default, whether it is saved, and its actions."""
+        p = ui.pal
+        label, default, kind = BINDINGS[name]
+        value, dflt = self.model.keys[name], normalize(default)
+        changed = value != dflt
+        saved = json.loads(self.model.baseline)[1].get(name, dflt)
+        if value != saved:
+            state, scol = "not saved yet: Save applies it", p["amber"]
+        else:
+            state, scol = ("changed from the default" if changed else "the default"), p["muted"]
+        self.detail_head(ui, cv, x, y, w, label)
+        ry = self.detail_fields(ui, cv, x, y + 2, w, [
+            ("Binding", value, p["amber"] if changed else p["text"]),
+            ("Default", dflt, p["muted"]),
+            ("Pressed as", "the leader, then one key" if kind == "leader" else "one key combination", p["muted"]),
+            ("State", state, scol),
+        ])
+        bx = x
+        bx += ui.button(cv, bx, ry + 1, "Change", lambda b: self.change_binding(ui, name), accent=True) + 1
+        bx += ui.button(cv, bx, ry + 1, "Reset", lambda b: self.reset_binding(ui, name), enabled=changed) + 1
+        ui.button(cv, bx, ry + 1, "Reset all", lambda b: self.reset_all(ui))
+        text = ("Enter or a click on the binding records new keys; r resets it, R resets all. "
+                "Save writes settings.json and WezTerm reloads it.")
+        for k, line in enumerate(textwrap.wrap(text, max(w, 20))):
+            cv.put(x, ry + 3 + k, line, p["muted"])
 
     def draw_accounts(self, ui, cv, x, y, w, h):
         p = ui.pal
@@ -531,42 +646,83 @@ class SettingsPage(U.Page):
         bx = x + 2
         for label, fn in (("Add", lambda b: self.add_account(ui)), ("Rescan", lambda b: self.rescan(ui))):
             bx += ui.button(cv, bx, y, label, fn) + 1
-        have = bool(accts)
-        for label, fn in (("Rename", lambda b: self.rename(ui, cur)), ("Profile", lambda b: self.pick_profile(ui, cur)),
-                          ("Hide/Show", lambda b: self.toggle_hidden(ui, cur)), ("Remove", lambda b: self.remove(ui, cur))):
-            bx += ui.button(cv, bx, y, label, fn, enabled=have) + 1
-        # Fixed columns shared by the list and the "found" rows; the highlight covers the table only.
-        tw = 100
-        cols = "{:<12}{:<14}{:<28}{:<8}"  # label, profile, dir, source; "Show" is 6 wide before them
-        cv.put(x + 2, y + 2, "Show  " + cols.format("Label", "omp profile", "Config dir", "Source") + "Quota", p["muted"], None, BOLD)
+        if not self.two_pane:  # the wide layout has them in the detail pane
+            have = bool(accts)
+            for label, fn in (("Rename", lambda b: self.rename(ui, cur)), ("Profile", lambda b: self.pick_profile(ui, cur)),
+                              ("Hide/Show", lambda b: self.toggle_hidden(ui, cur)), ("Remove", lambda b: self.remove(ui, cur))):
+                bx += ui.button(cv, bx, y, label, fn, enabled=have) + 1
+        # Fixed columns shared by the list and the "found" rows; the highlight covers the table
+        # only. Two panes: label, profile and quota here, the directory in the detail.
+        if self.two_pane:
+            tw, qx = 68, 38
+            cols = "{:<14}{:<16}"
+            names = ("Label", "omp profile")
+        else:
+            tw, qx = 100, 70
+            cols = "{:<12}{:<14}{:<28}{:<8}"  # label, profile, dir, source
+            names = ("Label", "omp profile", "Config dir", "Source")
+
+        def fields(a):
+            f = [fit(a["label"], 11 if not self.two_pane else 13), fit(a.get("profile") or "(none)", 13 if not self.two_pane else 15)]
+            if not self.two_pane:
+                f += [fit(a["dir"], 27), "auto" if a.get("auto") else "manual"]
+            return cols.format(*f)
+
+        self.table_head(ui, cv, x, y + 2, tw, ((2, "Show"), (8, cols.format(*names)), (qx, "Quota")))
         for i, a in enumerate(accts):
-            row = y + 3 + i
+            row = y + 4 + i
             sel = i == cur
             hidden = bool(a.get("hidden"))
-            bg = p["raised"] if sel else p["base"]
             fgc = p["dim"] if hidden else (p["bright"] if sel else p["text"])
-            cv.fill(x + 1, row, tw, 1, bg=bg)
-            cv.hit(x + 1, row, tw, 1, lambda b, i=i: self.cursor.__setitem__(2, i))
-            cv.put(x + 2, row, "[ ]" if hidden else "[x]", p["dim"] if hidden else p["accent"], bg)
+            r = U.list_row(cv, p, row, x=x, w=tw, selected=sel, bg=p["base"], hit=lambda b, i=i: self.cursor.__setitem__(2, i))
+            cv.put(x + 2, row, "[ ]" if hidden else "[x]", p["dim"] if hidden else p["accent"], r.bg)
             cv.hit(x + 2, row, 3, 1, lambda b, i=i: (self.cursor.__setitem__(2, i), self.toggle_hidden(ui, i)))
-            cv.put(x + 8, row, cols.format(fit(a["label"], 11), fit(a.get("profile") or "(none)", 13), fit(a["dir"], 27),
-                                              "auto" if a.get("auto") else "manual"), fgc, bg)
+            cv.put(x + 8, row, fields(a), fgc, r.bg)
             quota = "hidden" if hidden else quota_state(a["label"])
-            cv.put(x + 70, row, fit(quota, tw - 70), p["amber"] if quota == "login needed" else fgc, bg)
-        row = y + 4 + len(accts)
+            cv.put(x + qx, row, fit(quota, tw - qx - 1), p["amber"] if quota == "login needed" else fgc, r.bg)
+        if self.two_pane and accts:
+            self.draw_account_detail(ui, cv, x + tw + 4, y + 2, w - tw - 6, cur)
+        row = y + 5 + len(accts)
         if self.found:
             cv.put(x + 2, row, "Found on this machine", p["bright"], None, BOLD)
-            cv.put(x + 24, row, "not in the list yet; the header shows them anyway", p["muted"])
+            cv.put(x + 24, row, "not in the list yet" + ("" if self.two_pane else "; the header shows them anyway"), p["muted"])
             for k, a in enumerate(self.found):
                 ry = row + 2 + k
-                cv.put(x + 8, ry, cols.format(fit(a["label"], 11), fit(a.get("profile") or "(none)", 13), fit(a["dir"], 27), "auto"),
-                       p["text"])
-                ui.button(cv, x + 70, ry, "Add", lambda b, k=k: self.add_found(ui, k))
+                cv.put(x + 8, ry, fields(dict(a, auto=True)), p["text"])
+                ui.button(cv, x + qx, ry, "Add", lambda b, k=k: self.add_found(ui, k))
             row += 2 + len(self.found)
         else:
             cv.put(x + 2, row, "Every credentials directory on this machine is in the list.", p["muted"])
             row += 1
-        cv.put(x + 2, row + 1, "omp profiles: " + (", ".join(self.profiles) or "none"), p["dim"])
+        cv.put(x + 2, row + 1, fit("omp profiles: " + (", ".join(self.profiles) or "none"), tw - 2), p["dim"])
+
+    def draw_account_detail(self, ui, cv, x, y, w, i):
+        """The selected account: where it lives, its profile, header visibility, its quota now,
+        and its actions."""
+        p = ui.pal
+        a = self.model.accounts[i]
+        hidden = bool(a.get("hidden"))
+        self.detail_head(ui, cv, x, y, w, a["label"])
+        ry = self.detail_fields(ui, cv, x, y + 2, w, [
+            ("Config dir", a["dir"], p["text"]),
+            ("omp profile", a.get("profile") or "(none)", p["text"] if a.get("profile") else p["dim"]),
+            ("Source", "found on this machine" if a.get("auto") else "added by hand", p["muted"]),
+            ("Header", "hidden" if hidden else "shown", p["dim"] if hidden else p["text"]),
+        ])
+        cv.put(x, ry, "Quota", p["dim"])
+        for line in quota_lines(p, quota_entry(a["label"]), time.time()):
+            pos = x + 13
+            for text, colour, attrs in line:
+                pos += cv.put(pos, ry, fit(text, max(x + w - pos, 0)), colour, None, attrs)
+            ry += 1
+        bx = x
+        for label, fn in (("Rename", lambda b: self.rename(ui, i)), ("Profile", lambda b: self.pick_profile(ui, i)),
+                          ("Show" if hidden else "Hide", lambda b: self.toggle_hidden(ui, i)),
+                          ("Remove", lambda b: self.remove(ui, i))):
+            bx += ui.button(cv, bx, ry + 1, label, fn) + 1
+        text = "Space shows or hides it in the header; e renames, p picks the omp profile, d removes it."
+        for k, line in enumerate(textwrap.wrap(text, max(w, 20))):
+            cv.put(x, ry + 3 + k, line, p["muted"])
 
     def draw_about(self, ui, cv, x, y, w, h):
         p = ui.pal
@@ -684,6 +840,35 @@ def remaining(secs):
     return f"{m}m"
 
 
+def quota_lines(p, e, now):
+    """A cache entry as lines of text segments [(text, colour, attrs)]: `5h 12% resets in 3h10m`,
+    `7d 40% resets in 4d02h`, percentages in the header pill colours, then a non-ok state in
+    amber."""
+    if not e:
+        return [[("no data yet", p["muted"], 0)]]
+    out = []
+    for key, tag in (("five_hour", "5h"), ("seven_day", "7d")):
+        wd = e.get(key)
+        if not (isinstance(wd, dict) and isinstance(wd.get("pct"), (int, float))):
+            continue
+        line = [(tag + " ", p["muted"], 0), (f"{wd['pct']:.0f}% ", quota_color(p, wd["pct"]), BOLD)]
+        if isinstance(wd.get("reset_at"), (int, float)) and wd["reset_at"] > now:
+            line.append(("resets in " + remaining(wd["reset_at"] - now), p["dim"], 0))
+        out.append(line)
+    state = e.get("state", "?")
+    if state != "ok":
+        out.append([({"login": "login needed"}.get(state, state.replace("_", " ")), p["amber"], 0)])
+    return out
+
+
+def quota_segments(p, e, now):
+    """quota_lines on one line, 4 cells between them."""
+    out = []
+    for k, line in enumerate(quota_lines(p, e, now)):
+        out += ([("    ", p["dim"], 0)] if k else []) + line
+    return out
+
+
 class UsagePage(U.Page):
     title = "Usage"
 
@@ -696,6 +881,7 @@ class UsagePage(U.Page):
         self._mtime = None
         self.samples = []
         self._tick_at = 0
+        self._png_key, self._png = None, None  # the last chart image and what it showed
 
     def labels(self):
         return [a["label"] for a in self.model.accounts if not a.get("hidden")]
@@ -747,27 +933,33 @@ class UsagePage(U.Page):
         labels = self.labels()
         if self.account not in labels and labels:
             self.account = labels[0]
+        wide = w >= U.WIDE_COLS
+        col = None
+        if wide:
+            # Wide: the chart beside a table of every account (its quota now; a click picks it),
+            # the two centred within CHART_MAX.
+            ux, uw = U.content_box(w, self.CHART_MAX)
+            ux += x
+            sx = ux + uw - self.SIDE_W
+            self.draw_accounts(ui, cv, sx, y, self.SIDE_W, labels)
+            x, w = ux - 2, uw - self.SIDE_W - 2
+            col = (ux - 2, uw + 4)
         pos = x + 2
-        cv.put(pos, y, "Account", p["muted"])
-        pos += 9
-        for label in labels:
-            text = f" {label} "
-            sel = label == self.account
-            cv.put(pos, y, text, p["deep"] if sel else p["text"], p["accent"] if sel else p["raised"], BOLD if sel else 0)
-            cv.hit(pos, y, len(text), 1, lambda b, label=label: setattr(self, "account", label))
-            pos += len(text) + 1
-        pos = max(pos + 2, x + 2)
+        if not wide:
+            cv.put(pos, y, "Account", p["muted"])
+            pos += 9
+            for label in labels:
+                pos += U.chip(cv, p, pos, y, label, selected=label == self.account, bg=p["base"],
+                              hit=lambda b, label=label: setattr(self, "account", label)) + 1
+            pos = max(pos + 2, x + 2)
         cv.put(pos, y, "Range", p["muted"])
         pos += 7
         for i, (name, _) in enumerate(RANGES):
-            text = f" {name} "
-            sel = i == self.range
-            cv.put(pos, y, text, p["deep"] if sel else p["text"], p["accent"] if sel else p["raised"], BOLD if sel else 0)
-            cv.hit(pos, y, len(text), 1, lambda b, i=i: setattr(self, "range", i))
-            pos += len(text) + 1
+            pos += U.chip(cv, p, pos, y, name, selected=i == self.range, bg=p["base"],
+                          hit=lambda b, i=i: setattr(self, "range", i)) + 1
         if not self.account:
             cv.put(x + 2, y + 2, "No accounts configured: add one in Settings, Accounts.", p["muted"])
-            return
+            return col
         now = self.now()
         span = RANGES[self.range][1]
         series, resets, first = series_for(self.samples, self.account, now - span, self.account_dir())
@@ -777,7 +969,7 @@ class UsagePage(U.Page):
                                      w - 4), p["amber"])
         elif first > now - span * 0.98:
             cv.put(x + 2, y + 3, fit("History starts " + time.strftime("%d %b %H:%M", time.localtime(first))
-                                     + ": nothing is recorded before.", w - 4), p["muted"])
+                                     + ": the shaded span before it is not recorded.", w - 4), p["muted"])
         top = y + 5
         ch_h = max(h - 5, 4)
         ch_w = w - 4
@@ -785,42 +977,70 @@ class UsagePage(U.Page):
         if not (pts5 or pts7):
             if first is not None:
                 cv.put(x + 2, top, f"No samples in the last {RANGES[self.range][0]}: pick a longer range.", p["muted"])
-            return
+            return col
         x0, x1 = now - span, now
         # 5h resets would be a fence at 7d and 30d; 7d resets are drawn at every range.
         markers5 = [(t, p["accent"]) for t in sorted(resets["five_hour"])] if span <= 86400 else []
         markers7 = [(t, p["amber"]) for t in sorted(resets["seven_day"])]
         if U.images_enabled():
             cw, chh = U.cell_pixels()
-            png = U.line_chart_png(
-                ch_w * cw, ch_h * chh,
-                [{"pts": pts7, "color": p["amber"], "label": "7d window"}, {"pts": pts5, "color": p["accent"], "label": "5h window"}],
-                x0, x1, 100.0, p, markers=markers5 + markers7, since=first, marker_label="reset", text_px=chart_text_px(chh),
-                gap=HISTORY_GAP)
-            cv.image(x + 2, top, ch_w, ch_h, png)
+            # The chart is redrawn only when something it shows changes (not on every hover).
+            key = (ch_w, ch_h, cw, chh, self.account, self.range, self._mtime, round(now / 30), json.dumps(p, sort_keys=True))
+            if self._png_key != key:
+                self._png_key = key
+                self._png = U.line_chart_png(
+                    ch_w * cw, ch_h * chh,
+                    [{"pts": pts7, "color": p["amber"], "label": "7d window"}, {"pts": pts5, "color": p["accent"], "label": "5h window"}],
+                    x0, x1, 100.0, p, markers=markers5 + markers7, since=first, marker_label="reset", text_px=chart_text_px(chh),
+                    gap=HISTORY_GAP, since_label="not recorded")
+            cv.image(x + 2, top, ch_w, ch_h, self._png)
         else:
             self.braille(ui, cv, x + 2, top, ch_w, ch_h, (pts5, markers5), (pts7, markers7), x0, x1, first)
+        return col
+
+    CHART_MAX = 220  # chart + account table on a wide window
+    SIDE_W = 44  # the account table beside the chart
+
+    def draw_accounts(self, ui, cv, x, y, w, labels):
+        """The account table of the wide layout: each account's 5h and 7d use and when its 5h
+        window resets (or its state); the shown account is selected, a click shows another."""
+        p = ui.pal
+        now = self.now()
+        for dx, name in ((2, "Account"), (16, "   5h"), (23, "   7d"), (31, "5h resets")):
+            cv.put(x + dx, y, name, p["muted"], None, BOLD)
+        cv.fill(x, y + 1, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        for i, label in enumerate(labels):
+            row = y + 2 + i
+            sel = label == self.account
+            r = U.list_row(cv, p, row, x=x, w=w, selected=sel, bg=p["base"], name=fit(label, 13),
+                           hit=lambda b, label=label: setattr(self, "account", label))
+            e = quota_entry(label) or {}
+            for dx, key in ((16, "five_hour"), (23, "seven_day")):
+                wd = e.get(key)
+                if isinstance(wd, dict) and isinstance(wd.get("pct"), (int, float)):
+                    cv.put(x + dx, row, f"{wd['pct']:.0f}%".rjust(5), quota_color(p, wd["pct"]), r.bg, BOLD)
+            state = e.get("state", "ok") if e else "no data"
+            wd = e.get("five_hour")
+            if state != "ok":
+                text, colour = {"login": "login needed"}.get(state, state.replace("_", " ")), p["amber"]
+            elif isinstance(wd, dict) and isinstance(wd.get("reset_at"), (int, float)) and wd["reset_at"] > now:
+                text, colour = remaining(wd["reset_at"] - now), p["dim"]
+            else:
+                text, colour = "", p["dim"]
+            cv.put(x + 31, row, fit(text, w - 32), colour, r.bg)
+        ny = y + 3 + len(labels)
+        last = max((s["ts"] for s in self.samples if sample_of(s, self.account, self.account_dir())), default=None)
+        if last is not None:
+            cv.put(x + 2, ny, f"{self.account}: last sample {human_age(now - last)} ago", p["dim"])
+            ny += 1
+        cv.put(x + 2, ny, "←→ or a click picks the account", p["dim"])
 
     def draw_now(self, ui, cv, x, y, w, now):
         """`work  5h 12% resets in 3h10m  7d 40% resets in 4d02h`, from the header's cache."""
         p = ui.pal
-        e = quota_entry(self.account)
         pos = x + cv.put(x, y, self.account, p["bright"], None, BOLD) + 3
-        if not e:
-            cv.put(pos, y, "no data yet", p["muted"])
-            return
-        for key, tag in (("five_hour", "5h"), ("seven_day", "7d")):
-            wd = e.get(key)
-            if not (isinstance(wd, dict) and isinstance(wd.get("pct"), (int, float))):
-                continue
-            pos += cv.put(pos, y, tag + " ", p["muted"])
-            pos += cv.put(pos, y, f"{wd['pct']:.0f}%", quota_color(p, wd["pct"]), None, BOLD) + 1
-            if isinstance(wd.get("reset_at"), (int, float)) and wd["reset_at"] > now:
-                pos += cv.put(pos, y, "resets in " + remaining(wd["reset_at"] - now), p["dim"])
-            pos += 4
-        state = e.get("state", "?")
-        if state != "ok":
-            cv.put(pos, y, fit({"login": "login needed"}.get(state, state.replace("_", " ")), max(x + w - pos, 0)), p["amber"])
+        for text, colour, attrs in quota_segments(p, quota_entry(self.account), now):
+            pos += cv.put(pos, y, fit(text, max(x + w - pos, 0)), colour, None, attrs)
 
     def braille(self, ui, cv, x, y, w, h, five, seven, x0, x1, since):
         """The image-free chart: one braille plot per window (name row, plot on the deep plot
@@ -840,7 +1060,10 @@ class UsagePage(U.Page):
                 cv.put(gx + gw - 14, top, "▲ window reset", p["dim"])
             cv.fill(gx, top + 1, gw, gh, bg=p["deep"])
             if since is not None and since > x0:
-                cv.fill(gx, top + 1, min(col(since), gx + gw) - gx, gh, bg=p["base"])
+                sw = min(col(since), gx + gw) - gx
+                cv.fill(gx, top + 1, sw, gh, bg=p["base"])
+                if sw >= 16:  # name the unrecorded span inside it, never over the data
+                    cv.put(gx + (sw - 12) // 2, top + 1 + gh // 2, "not recorded", p["dim"])
             rows = U.braille_chart(gw, gh, [{"pts": pts, "color": color}], x0, x1, 100.0, gap=HISTORY_GAP)
             for r, row in enumerate(rows):
                 for c, (ch, colour) in enumerate(row):
@@ -919,9 +1142,18 @@ def parse_panes(text, fg, home=None):
         if home and (cwd == home or cwd.startswith(home.rstrip("/") + "/")):
             cwd = "~" + cwd[len(home.rstrip("/")):]
         m = re.search(r"--profile[= ](\S+)", args)
+        profile = m.group(1) if m and comm == "omp" else ""
+        if comm == "omp" and not profile:
+            # started without --profile: the hive extension's state file names the one omp chose
+            try:
+                with open(os.path.join(state_dir(), f"{pane.get('pane_id')}.json")) as f:
+                    state = json.load(f)
+                profile = state.get("profile") if isinstance(state, dict) and isinstance(state.get("profile"), str) else ""
+            except (OSError, ValueError):
+                pass
         rows.append({
             "pane": pane.get("pane_id"), "tab": tabs[win][pane.get("tab_id")], "window": windows[win],
-            "proc": comm or "?", "profile": m.group(1) if m and comm == "omp" else "", "cwd": cwd,
+            "proc": comm or "?", "profile": profile, "profile_set": bool(m), "cwd": cwd,
             "title": str(pane.get("title", "")), "age": etimes, "active": bool(pane.get("is_active")),
             "agent": comm in AGENT_PROCS, "idle": comm in SHELLS,
         })
@@ -1008,52 +1240,59 @@ class AgentsPage(U.Page):
     def render(self, ui, cv, x, y, w, h):
         p = ui.pal
         if self.error:
-            cv.put(x + 2, y, self.error, p["amber"])
-            return
+            U.empty_state(cv, p, x + 2, y, w - 4, self.error)
+            return None
         if not self.rows:
-            cv.put(x + 2, y, "No panes besides Hivegrid's own (bar, views, dock, this panel).", p["muted"])
-            return
+            U.empty_state(cv, p, x + 2, y, w - 4, "No panes besides Hivegrid's own.",
+                          "The bar, the sidebar views, the overview dock and this panel are not listed.")
+            return None
         multi = any(r["window"] > 1 for r in self.rows)
         tw = 6 if multi else 4
         rest = max(w - (tw + 7 + 11 + 11 + 9) - 4, 20)
         dw = min(max(rest * 2 // 5, 16), 60)  # directory column: 40% of the free room
         cols = [("tab", tw, ">"), ("pane", 7, ">"), ("process", 11, "<"), ("profile", 11, "<"), ("running", 9, "<"),
-                ("directory", dw + 2, "<"), ("title", rest - dw - 2, "<")]
+                ("directory", dw + 2, "<"), ("title", min(rest - dw - 2, 62), "<")]
+        table = min(w, 2 + sum(c[1] for c in cols))  # the selection slab ends with the table, as in Settings
+        # The table is centred on a wide window (its width is capped by the column caps).
+        if w >= U.WIDE_COLS:
+            x += (w - table) // 2
         pos = x + 2
         for name, width, align in cols:
             cv.put(pos, y, f"{name:{align}{width - 2}}", p["muted"], None, BOLD)
             pos += width
-        self.page_rows = body = max(h - 3, 1)
+        cv.fill(x, y + 1, table, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        self.page_rows = body = max(h - 4, 1)
         self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
         self.top = min(max(self.top, self.cursor - body + 1), self.cursor, max(len(self.rows) - body, 0))
         for i in range(self.top, min(self.top + body, len(self.rows))):
             r = self.rows[i]
-            row = y + 1 + i - self.top
+            row = y + 2 + i - self.top
             sel = i == self.cursor
-            bg = p["raised"] if sel else p["base"]
             text = p["bright"] if sel else p["text"]
-            cv.fill(x, row, w, 1, bg=bg)
+            bg = U.list_row(cv, p, row, x=x, w=table, selected=sel, bg=p["base"],
+                            hit=lambda b, r=r, i=i: (setattr(self, "cursor", i), self.jump(ui, r))).bg
             if r["active"]:
-                cv.put(x, row, "▎", p["accent"], bg)
+                cv.put(x + 1, row, "•", p["accent"], bg, BOLD)
             tab = f"{r['window']}:{r['tab']}" if multi else str(r["tab"])
-            cells = [(tab, text, 0), (str(r["pane"]), p["muted"], 0),
-                     (r["proc"], p["green"] if r["agent"] else (p["dim"] if r["idle"] else text), BOLD if r["agent"] else 0),
-                     (r["profile"], text, 0), (human_age(r["age"]) if r["age"] else "", p["muted"], 0),
-                     (r["cwd"], text, 0), (r["title"], text, 0)]
+            cells = [(tab, text, 0, "end"), (str(r["pane"]), p["muted"], 0, "end"),
+                     (r["proc"], p["green"] if r["agent"] else (p["dim"] if r["idle"] else text), BOLD if r["agent"] else 0, "end"),
+                     (r["profile"], text if r["profile_set"] else p["dim"], 0, "end"),
+                     (human_age(r["age"]) if r["age"] else "", p["muted"], 0, "end"),
+                     (r["cwd"], text, 0, "path"), (r["title"], text, 0, "end")]
             pos = x + 2
-            for (value, colour, attrs), (_, width, align) in zip(cells, cols):
-                value = U.fit_cells(value, width - 2)
+            for (value, colour, attrs, how), (_, width, align) in zip(cells, cols):
+                value = U.fit_text(value, width - 2, how)
                 pad = " " * (width - 2 - U.text_width(value))
                 cv.put(pos, row, pad + value if align == ">" else value, colour, bg, attrs)
                 pos += width
-            cv.hit(x, row, w, 1, lambda b, r=r, i=i: (setattr(self, "cursor", i), self.jump(ui, r)))
         shown = min(body, len(self.rows))
         agents = sum(r["agent"] for r in self.rows)
         ntabs = len({(r["window"], r["tab"]) for r in self.rows})
         more = f"  rows {self.top + 1}-{self.top + shown} of {len(self.rows)}" if len(self.rows) > body else ""
         n = len(self.rows)
-        cv.put(x + 2, y + 2 + shown, f"{n} pane{'s' if n != 1 else ''} in {ntabs} tab{'s' if ntabs != 1 else ''}, {agents} "
-               f"agent{'s' if agents != 1 else ''}{more}   ▎ active pane of its tab", p["dim"])
+        cv.put(x + 2, y + 3 + shown, f"{n} pane{'s' if n != 1 else ''} in {ntabs} tab{'s' if ntabs != 1 else ''}, {agents} "
+               f"agent{'s' if agents != 1 else ''}{more}   • active pane of its tab", p["dim"])
+        return (x, table) if w >= U.WIDE_COLS else None
 
 
 # ---- monitor ------------------------------------------------------------------------
@@ -1207,16 +1446,20 @@ class MonitorPage(U.Page):
     def tick(self, ui):
         return self.sampler.tick()
 
+    MAX_W = 200  # graph width cap on a wide window; the graphs are centred
+
     def render(self, ui, cv, x, y, w, h):
         p = ui.pal
+        col = None
+        if w >= U.WIDE_COLS:
+            ux, uw = U.content_box(w, self.MAX_W)
+            x, w = x + ux - 2, uw + 4
+            col = (x, w)
         cv.put(x + 2, y, "Range", p["muted"])
         pos = x + 9
         for i, (name, _) in enumerate(MON_RANGES):
-            text = f" {name} "
-            sel = i == self.range
-            cv.put(pos, y, text, p["deep"] if sel else p["text"], p["accent"] if sel else p["raised"], BOLD if sel else 0)
-            cv.hit(pos, y, len(text), 1, lambda b, i=i: setattr(self, "range", i))
-            pos += len(text) + 1
+            pos += U.chip(cv, p, pos, y, name, selected=i == self.range, bg=p["base"],
+                          hit=lambda b, i=i: setattr(self, "range", i)) + 1
         gpu = {"nvidia": "nvidia-smi", "jetson": "Jetson gpu.0/load"}.get(self.sampler.gpu_kind)
         cv.put(pos + 2, y, "sampled every second while the panel is open" + (f"; GPU from {gpu}" if gpu else "; no GPU found"),
                p["dim"])
@@ -1247,7 +1490,8 @@ class MonitorPage(U.Page):
                     pts = [(i, v) for i, v in enumerate(vals) if v is not None]
                     rows = U.braille_chart(w - 6, gh - 1, [{"pts": pts, "color": color}], 0, seconds, 100.0)
                     for r, row in enumerate(rows):
-                        for c, (ch, col) in enumerate(row):
+                        for c, (ch, colour) in enumerate(row):
                             if ch != " ":
-                                cv.put(x + 3 + c, gy + 1 + r, ch, col)
+                                cv.put(x + 3 + c, gy + 1 + r, ch, colour)
             gy += gh + 1
+        return col

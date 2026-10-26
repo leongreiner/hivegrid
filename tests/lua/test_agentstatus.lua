@@ -275,7 +275,7 @@ T.test('agents are numbered in reading order with the sidebar and overview dock 
 end)
 
 T.test('Alt+n jumps to the next pane needing you before an earlier idle one', function(wz)
-  local as, config = load()
+  local _, config = load()
   local win = grid2x2(wz, {
     omp(wz, 61, 'π > me'), omp(wz, 62, 'π > idle'), omp(wz, 63, 'π ! ask'), omp(wz, 64, 'π ⠋ busy'),
   }, 1)
@@ -284,7 +284,7 @@ T.test('Alt+n jumps to the next pane needing you before an earlier idle one', fu
 end)
 
 T.test('Alt+n takes the first match after the active pane and wraps around', function(wz)
-  local as, config = load()
+  local _, config = load()
   local win = grid2x2(wz, {
     omp(wz, 65, 'π ! first'), omp(wz, 66, 'π ⠋ w'), omp(wz, 67, 'π > me'), omp(wz, 68, 'π ! second'),
   }, 3)
@@ -298,7 +298,7 @@ T.test('Alt+n takes the first match after the active pane and wraps around', fun
 end)
 
 T.test('Alt+n falls back to an idle agent, then to unseen output, else stays', function(wz)
-  local as, config = load()
+  local _, config = load()
   local jump = binding(config, 'n', 'ALT')
   local win = grid2x2(wz, {
     omp(wz, 71, 'π ⠋ me'), omp(wz, 72, 'π ⠋ w', { unseen = true }), omp(wz, 73, 'π > idle'),
@@ -320,7 +320,7 @@ T.test('Alt+n falls back to an idle agent, then to unseen output, else stays', f
 end)
 
 T.test('Alt+n reaches a pane in another tab', function(wz)
-  local as, config = load()
+  local _, config = load()
   local t1 = wz.fake.tab { panes = { { pane = omp(wz, 75, 'π ⠋ me'), active = true } } }
   local t2 = wz.fake.tab { panes = { { pane = omp(wz, 76, 'π ! there'), active = true } } }
   local win = wz.fake.window { tabs = { t1, t2 } }
@@ -329,7 +329,7 @@ T.test('Alt+n reaches a pane in another tab', function(wz)
 end)
 
 T.test('Alt+] and Alt+[ step through grid panes in reading order, wrapping, skipping the dock', function(wz)
-  local as, config = load()
+  local _, config = load()
   local p = {}
   for id = 81, 85 do p[id] = omp(wz, id, 'π > x') end
   local win, tab = wz.fake.grid({
@@ -358,20 +358,24 @@ T.test('Alt+] and Alt+[ step through grid panes in reading order, wrapping, skip
 end)
 
 T.test('the picker lists panes in reading order and activates the chosen one', function(wz)
-  local as, config = load()
+  local _, config = load()
   local win = grid2x2(wz, {
     omp(wz, 91, 'π > a'), omp(wz, 92, 'π ! b'), omp(wz, 93, 'π ⠋ c'),
   }, 1)
   wz.stub.perform(binding(config, 'g', 'LEADER'), win, wz.mux.get_pane(91))
-  local sel = win.actions[#win.actions].action
-  T.eq(sel.kind, 'InputSelector')
-  local ids = {}
-  for i, c in ipairs(sel.args.choices) do ids[i] = c.id end
+  local pick = wz.stub.picker(win)
+  local ids, keys = {}, {}
+  for i, r in ipairs(pick.spec.rows) do ids[i], keys[i] = r.id, r.key end
   T.eq(ids, { '91', '92', '93' })
-  T.ok(sel.args.choices[2].label:find('b', 1, true), 'row shows the session title')
-  sel.args.action.fn(win, wz.mux.get_pane(91), nil)
+  T.eq(keys, { '1', '2', '3' }, 'in one tab the digits are the dock numbers')
+  local texts = {}
+  for _, c in ipairs(pick.spec.rows[2].cols) do texts[#texts + 1] = c.text end
+  T.ok(table.concat(texts, ' '):find('b', 1, true), 'row shows the session title')
+  T.eq(pick.spec.rows[1].meta, 'here', 'the pane it was opened from is marked')
+  pick.answer(nil)
   T.eq(wz.stub.activations, {}, 'Esc does nothing')
-  sel.args.action.fn(win, wz.mux.get_pane(91), '93')
+  wz.stub.perform(binding(config, 'g', 'LEADER'), win, wz.mux.get_pane(91))
+  wz.stub.picker(win).answer('93')
   T.eq(wz.stub.activations, { 93 })
 end)
 

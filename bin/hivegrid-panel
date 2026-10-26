@@ -2,6 +2,7 @@
 """Hivegrid panels: settings, usage history, agent overview and system monitor in one terminal UI.
 
 Usage: hivegrid-panel [settings|usage|agents|monitor|hive] [options]
+       hivegrid-panel picker [--spec FILE] [--dump COLSxROWS]   (the chooser config/picker.lua opens)
 
 Runs in a terminal (WezTerm overlay or tab); the mouse works, so do the keys: Tab or F1-F4 and
 a click on the tabs switch panels (F5 is the hive, where Tab selects agents), q or Esc closes. The
@@ -31,6 +32,10 @@ PANELS = ["settings", "usage", "agents", "monitor", "hive"]
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["picker"]:
+        # Dispatched before the settings imports: the picker must open at once.
+        import hivegrid_picker
+        return hivegrid_picker.main(argv[1:])
     panel, path, account, rng, history, do_print, dump = "settings", None, None, "24h", None, False, None
     while argv:
         a = argv.pop(0)

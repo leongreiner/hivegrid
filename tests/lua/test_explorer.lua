@@ -41,12 +41,11 @@ T.test('theme.toml: unique sections and keys, every style value well formed', fu
         T.ok(line:match('^  { .* },$'), where)
         for c in line:gmatch('fg = "([^"]*)"') do T.ok(colours[c], 'unknown colour ' .. where) end
       end
-    elseif line == '' or line:match('^#') then
     elseif line:match('^%[[%w_]+%]$') then
       section = line
       T.ok(not sections[section], 'duplicate section ' .. where)
       sections[section], keys = true, {}
-    else
+    elseif line ~= '' and not line:match('^#') then
       local k, v = line:match('^([%w_]+) = (.+)$')
       T.ok(k, 'not a key = value line: ' .. where)
       T.ok(section, 'key before any section: ' .. where)
@@ -98,6 +97,17 @@ T.test('config_home: cache not writable -> the static config', function(wz)
   local home = os.getenv('HOME')
   T.eq(require('explorer').config_home(), home .. '/.config/hivegrid/yazi')
   T.ok(not exists(os.getenv('XDG_CACHE_HOME') .. '/hivegrid/yazi/theme.toml'), 'nothing written')
+end)
+
+T.test('config_home: no static config installed -> still the cache with the theme', function(wz)
+  real_children(wz)
+  local cache = os.getenv('XDG_CACHE_HOME') .. '/hivegrid/yazi'
+  T.write(cache .. '/old.toml', 'stale')
+  local ok, home = pcall(require('explorer').config_home)
+  T.ok(ok, 'config_home raised: ' .. tostring(home))
+  T.eq(home, cache)
+  T.ok(exists(cache .. '/theme.toml'), 'theme generated')
+  T.ok(not exists(cache .. '/old.toml'), 'stale entry dropped')
 end)
 
 T.test('config_home: generated files plus links to every static entry, stale links dropped', function(wz)

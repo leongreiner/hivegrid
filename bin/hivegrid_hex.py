@@ -15,7 +15,8 @@ import math
 
 # Ring walk from the corner (k, 0): SW, W, NW, NE, E, SE; that is clockwise on a y-down screen.
 RING_DIRS = ((-1, 1), (-1, 0), (0, -1), (1, -1), (1, 0), (0, 1))
-MIN_RY, MAX_RY = 3, 8
+# MAX_RY: a few agents in a large window get hexes of up to 26 x 16 cells (big click targets)
+MIN_RY, MAX_RY = 3, 12
 # Hex cells narrower than this (interior columns at the widest row) are not readable: use tiles.
 MIN_INTERIOR = 6
 
@@ -170,6 +171,101 @@ def ry_of(cell_w):
     return ry
 
 
+# ---- pixel geometry (the anti-aliased image cells) -----------------------------------
+#
+# The image of a hex is drawn in pixels around the centre of its character box (pw x H cells of
+# cw x ch px). Its polygon is the lattice's own cell, the one hit_test rounds to: half-width
+# a = pw * cw / 2 (row neighbours touch), top/bottom vertex t = 2/3 of the row pitch from the
+# centre and shoulders b = 1/3 (the rows tile: a lower neighbour's top vertex is this hex's
+# shoulder). The proportions are the same at every size; the vertices may reach a fraction of
+# a row beyond the box. Everything is then inset by half the gap between cells.
+
+
+def hex_extent(ry, cw, ch):
+    """(a, t): half-width and half-height of the hex polygon in pixels."""
+    return pitch(ry) * cw / 2, 2 * ry * ch / 3
+
+
+def hex_polygon(ry, cw, ch):
+    """The six vertices (x, y) in pixels relative to the box top-left of the hex, clockwise from
+    the top vertex (y down)."""
+    pw, h, _, _ = shape(ry)
+    a, t = hex_extent(ry, cw, ch)
+    b = t / 2
+    cx, cy = pw * cw / 2, h * ch / 2
+    return [(cx, cy - t), (cx + a, cy - b), (cx + a, cy + b), (cx, cy + t), (cx - a, cy + b), (cx - a, cy - b)]
+
+
+def _normal(p, q):
+    """Outward unit normal of the edge p -> q of a polygon listed clockwise on a y-down screen."""
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    n = math.hypot(dx, dy) or 1.0
+    return dy / n, -dx / n
+
+
+def inset(poly, d):
+    """The convex polygon with every edge moved inward by d pixels (vertices stay in order)."""
+    n = len(poly)
+    out = []
+    for i in range(n):
+        p0, p1, p2 = poly[i - 1], poly[i], poly[(i + 1) % n]
+        n1, n2 = _normal(p0, p1), _normal(p1, p2)
+        # the vertex moves inward along the bisector by d / cos(half the turn)
+        bx, by = n1[0] + n2[0], n1[1] + n2[1]
+        k = (bx * n1[0] + by * n1[1]) or 1.0
+        out.append((p1[0] - d * bx / k, p1[1] - d * by / k))
+    return out
+
+
+def rounded(poly, r, steps=6):
+    """The outline of the convex polygon with corners rounded at radius r, as a point list."""
+    if r <= 0:
+        return list(poly)
+    core = inset(poly, r)
+    n = len(poly)
+    out = []
+    for i in range(n):
+        n1, n2 = _normal(poly[i - 1], poly[i]), _normal(poly[i], poly[(i + 1) % n])
+        a1, a2 = math.atan2(n1[1], n1[0]), math.atan2(n2[1], n2[0])
+        turn = (a2 - a1 + math.pi) % (2 * math.pi) - math.pi
+        for k in range(steps + 1):
+            ang = a1 + turn * k / steps
+            out.append((core[i][0] + r * math.cos(ang), core[i][1] + r * math.sin(ang)))
+    return out
+
+
+def x_extent(poly, y):
+    """(left, right) of the convex polygon on the horizontal line y, or None when it misses."""
+    xs = []
+    n = len(poly)
+    for i in range(n):
+        (x0, y0), (x1, y1) = poly[i], poly[(i + 1) % n]
+        if y0 == y1:
+            if y == y0:
+                xs += [x0, x1]
+        elif min(y0, y1) <= y <= max(y0, y1):
+            xs.append(x0 + (x1 - x0) * (y - y0) / (y1 - y0))
+    return (min(xs), max(xs)) if xs else None
+
+
+def text_spans(ry, cw, ch, margin):
+    """Per box row, the (x0, x1) cell columns lying wholly inside the hex polygon at least
+    `margin` pixels from its edge (x1 exclusive), or None: where cell text can sit on the flat
+    fill of the image."""
+    pw, h, _, _ = shape(ry)
+    poly = inset(hex_polygon(ry, cw, ch), margin)
+    out = []
+    for i in range(h):
+        top, bottom = x_extent(poly, i * ch), x_extent(poly, (i + 1) * ch)
+        if top is None or bottom is None:
+            out.append(None)
+            continue
+        x0 = math.ceil(max(top[0], bottom[0]) / cw - 1e-9)
+        x1 = math.floor(min(top[1], bottom[1]) / cw + 1e-9)
+        out.append((x0, x1) if x1 > x0 else None)
+    return tuple(out)
+
+
 # ---- plain tiles --------------------------------------------------------------------
 
 # (width, height) of a tile; tiles are separated by one column, and by one row when taller than 2.
@@ -178,6 +274,15 @@ TILE_SIZES = ((22, 5), (18, 4), (14, 3), (11, 3), (9, 2), (7, 2), (5, 1))
 
 def tile_pitch(tw, th):
     return tw + 1, th + (1 if th > 2 else 0)
+
+
+def tile_polygon(tw, th, cw, ch):
+    """The lattice cell of a tile in pixels relative to its box top-left: the box grown by half
+    the gap to its neighbours (one column, and one row when tiles are taller than 2), so an
+    image tile inset by half the gap leaves the same space between tiles as between hexes."""
+    px, py = tile_pitch(tw, th)
+    gx, gy = (px - tw) * cw / 2, (py - th) * ch / 2
+    return [(-gx, -gy), (tw * cw + gx, -gy), (tw * cw + gx, th * ch + gy), (-gx, th * ch + gy)]
 
 
 def fit_tiles(n, width, height):

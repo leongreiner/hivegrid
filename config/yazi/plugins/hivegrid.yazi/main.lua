@@ -6,6 +6,10 @@
 --   plugin hivegrid close   close the explorer the way its bar button does (the user var
 --                           sidebar_click), so the keyboard returns to the grid pane; a plain
 --                           quit leaves it on the bar
+--   plugin hivegrid edit    Enter / o: a folder is entered; text files (the selection, else
+--                           the hovered file) open in $EDITOR in a new grid pane (the user var
+--                           hivegrid_open_file, absolute paths one per line); anything else
+--                           (a binary file, outside WezTerm) goes to yazi's own opener
 -- Also the previewer of empty files (yazi.toml): "Empty file" centred like an empty
 -- folder's "No items", instead of yazi's reversed slab.
 local M = {}
@@ -45,6 +49,42 @@ local hovered = ya.sync(function()
   return h and tostring(h.url.path)
 end)
 
+-- The selected entries, else the hovered one: their paths and whether the hovered one is a
+-- folder (only asked when nothing is selected).
+local targets = ya.sync(function()
+  local paths = {}
+  for _, u in pairs(cx.active.selected) do paths[#paths + 1] = tostring(u.path) end
+  local h = cx.active.current.hovered
+  if #paths == 0 and h then return { tostring(h.url.path) }, h.cha.is_dir end
+  return paths, false
+end)
+
+-- A file the editor can show: readable, no NUL byte in its first 8 KiB.
+local function is_text(path)
+  local f = io.open(path, 'rb')
+  if not f then return false end
+  local head = f:read(8192) or ''
+  f:close()
+  return not head:find('%z')
+end
+
+local function is_dir(path)
+  local f = io.open(path .. '/.', 'r')
+  if f then f:close() end
+  return f ~= nil
+end
+
+local function edit()
+  local paths, dir = targets()
+  if dir then return ya.emit('enter', {}) end
+  if #paths == 0 then return end
+  if not os.getenv('WEZTERM_PANE') then return ya.emit('open', {}) end
+  for _, p in ipairs(paths) do
+    if is_dir(p) or not is_text(p) or p:find('\n') then return ya.emit('open', {}) end
+  end
+  if not M.set_var('hivegrid_open_file', table.concat(paths, '\n')) then ya.emit('open', {}) end
+end
+
 local serial = 0
 
 function M:entry(job)
@@ -58,6 +98,8 @@ function M:entry(job)
     if not os.getenv('WEZTERM_PANE') or not M.set_var('sidebar_click', 'files:yazi' .. serial) then
       ya.emit('quit', {})
     end
+  elseif what == 'edit' then
+    edit()
   end
 end
 

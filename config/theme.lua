@@ -50,6 +50,24 @@ do
   end
 end
 
+-- The agent state table, shared with bin/hivegrid_ui.py (STATES): keep both in step. `key`
+-- names the palette colour, `color` is it resolved for the current theme, `rank` sorts by how
+-- much a state needs the eye (1 = most).
+M.STATES = {}
+for kind, s in pairs {
+  attention = { '?', 'needs you', 'violet', 1 },
+  bell = { '!', 'bell', 'red', 2 },
+  done = { '✓', 'done', 'green', 3 },
+  busy = { '◔', 'busy', 'amber', 4 },
+  working = { '↻', 'working', 'accent', 5 },
+  idle = { '·', 'idle', 'grey', 6 },
+  exited = { '○', 'exited', 'muted', 7 },
+  other = { '›', 'running', 'dim', 8 },
+  shell = { '›', 'shell', 'dim', 9 },
+} do
+  M.STATES[kind] = { glyph = s[1], text = s[2], key = s[3], color = M.P[s[3]], rank = s[4] }
+end
+
 -- Linear blend of two '#rrggbb' colours, t in [0, 1].
 function M.lerp(a, b, t)
   local function ch(h, i) return tonumber(h:sub(i, i + 1), 16) end
@@ -134,21 +152,17 @@ function M.chip(text, color, bg)
   }
 end
 
--- Thin-line bar for popups: the selector highlights its current row by reversing
--- colours, which turns a half-block bar into a slab but leaves a line readable.
+-- Thin-line gauge `cells` wide for picker rows (picker.lua column segments): `fill` for the
+-- used part in half-cell steps (━ and ╸), `track` for the rest. Returns { { text, color } }.
 function M.line(pct, cells, fill, track)
   local halves = math.floor(math.max(0, math.min(100, pct)) / 100 * cells * 2 + 0.5)
   if pct > 0 and halves == 0 then halves = 1 end
   local full, odd = halves // 2, halves % 2
-  local items = { { Foreground = { Color = fill } } }
-  if full > 0 then items[#items + 1] = { Text = string.rep('━', full) } end
-  if odd > 0 then items[#items + 1] = { Text = '╸' } end
+  local segs = {}
+  if full + odd > 0 then segs[#segs + 1] = { text = string.rep('━', full) .. string.rep('╸', odd), color = fill } end
   local rest = cells - full - odd
-  if rest > 0 then
-    items[#items + 1] = { Foreground = { Color = track } }
-    items[#items + 1] = { Text = string.rep('━', rest) }
-  end
-  return items
+  if rest > 0 then segs[#segs + 1] = { text = string.rep('━', rest), color = track } end
+  return segs
 end
 
 -- Appends every item of `src` to `dst`.
@@ -207,29 +221,36 @@ function M.group(parts, bg)
 end
 
 -- The mark drawn by the Hivegrid WezTerm fork (option tab_bar_brand): the app icon's
--- seven hexagons, centre strong blue, the ring by agent state (done green, working
--- light blue, needs input light red, waiting grey-blue). Sizes in pixels at 96 dpi.
+-- seven hexagons, centre in the accent, the ring in the agent state colours of the dock and
+-- the hive (theme.STATES: done, working, needs you, working, idle, working), so the logo
+-- speaks the one state vocabulary and follows the theme. Sizes in pixels at 96 dpi.
+local BRAND_RING = { 'done', 'working', 'attention', 'working', 'idle', 'working' }
+local function ring(t, toward)
+  local out = {}
+  for i, kind in ipairs(BRAND_RING) do out[i] = M.lerp(M.STATES[kind].color, toward, t) end
+  return out
+end
 M.BRAND_MARK = {
   enabled = true,
   size = 30,
   margin_left = 10,
   margin_right = 8,
   colors = {
-    center = '#1e90ff',
-    center_outline = '#96cdff',
-    ring = { '#1ea876', '#70aaee', '#ec6e76', '#70aaee', '#7a8eb8', '#70aaee' },
-    ring_outline = { '#82f0c3', '#c4e0ff', '#ffbebe', '#c4e0ff', '#cddaf0', '#c4e0ff' },
+    center = M.P.accent,
+    center_outline = M.lerp(M.P.accent, M.P.bright, 0.5),
+    ring = ring(0.3, M.P.deep),
+    ring_outline = ring(0.45, M.P.bright),
   },
 }
 
--- The Hivegrid mark for stock WezTerm: the logo's seven hexagons as a row of ⬢ glyphs, centre strong
--- blue and the others coloured by agent state as in the icon (done green, working
--- light blue, needs input light red, waiting grey-blue). No text, no pill; air around it
--- so it never touches the first tab. opts.glyph and opts.color switch to a single-colour
--- glyph; opts.pill sits it on a raised pill. Returns wezterm.format items.
-local BRAND_CELLS = {
-  '#82f0c3', '#c4e0ff', '#ffbebe', '#1e90ff', '#cddaf0', '#7aa8ee', '#c4e0ff',
-}
+-- The Hivegrid mark for stock WezTerm: the logo's seven hexagons as a row of ⬢ glyphs in
+-- the same colours (the ring's states around the accent centre). No text, no pill; air
+-- around it so it never touches the first tab. opts.glyph and opts.color switch to a
+-- single-colour glyph; opts.pill sits it on a raised pill. Returns wezterm.format items.
+local BRAND_CELLS = {}
+for i, kind in ipairs { 'done', 'working', 'attention', '', 'idle', 'working', 'working' } do
+  BRAND_CELLS[i] = kind == '' and M.P.accent or M.STATES[kind].color
+end
 function M.brand(opts)
   opts = opts or {}
   local mark = {}

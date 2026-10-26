@@ -172,7 +172,8 @@ end
 
 -- Writes the generated files, links every entry of the static config, drops links whose
 -- source is gone, and returns the directory for YAZI_CONFIG_HOME. Falls back to the static
--- config, uncoloured, if the cache cannot be written.
+-- config, uncoloured, if the cache cannot be written. A missing static config (install.sh
+-- not run) links nothing: yazi then runs with its defaults plus the theme.
 function M.config_home()
   local theme = require 'theme'
   if not wezterm.run_child_process { 'mkdir', '-p', CACHE }
@@ -181,17 +182,23 @@ function M.config_home()
     return SOURCE
   end
 
+  -- read_dir raises on a missing directory.
+  local function list(dir)
+    local ok, entries = pcall(wezterm.read_dir, dir)
+    return ok and entries or {}
+  end
+
   local own = {}
   for _, name in ipairs(GENERATED) do own[name] = true end
   local want, args = {}, { 'ln', '-sfn' }
-  for _, src in ipairs(wezterm.read_dir(SOURCE)) do
+  for _, src in ipairs(list(SOURCE)) do
     local name = src:match('[^/]+$')
     if not own[name] then
       want[name] = true
       args[#args + 1] = src
     end
   end
-  for _, dst in ipairs(wezterm.read_dir(CACHE)) do
+  for _, dst in ipairs(list(CACHE)) do
     local name = dst:match('[^/]+$')
     if not own[name] and not want[name] then os.remove(dst) end
   end

@@ -243,18 +243,19 @@ local function omp_info(pid, profile)
 end
 
 T.test('Alt+q lists the accounts and picking one starts omp with its profile in a shell', function(wz)
-  local cq, config = setup(wz, { files = { main = ok_entry('main', 10, 20), ['2'] = ok_entry('2', 50, 60) } })
+  local _, config = setup(wz, { files = { main = ok_entry('main', 10, 20), ['2'] = ok_entry('2', 50, 60) } })
   local p = shell_pane(wz, 1)
   local win = wz.fake.grid { { pane = p } }
   wz.stub.perform(key(config, 'q', 'ALT'), win, p)
-  local sel = win.actions[#win.actions].action
-  T.eq(sel.kind, 'InputSelector')
-  local ids = {}
-  for i, c in ipairs(sel.args.choices) do ids[i] = c.id end
+  local pick = wz.stub.picker(win)
+  local ids, keys = {}, {}
+  for i, r in ipairs(pick.spec.rows) do ids[i], keys[i] = r.id, r.key end
   T.eq(ids, { 'main', '2' })
-  sel.args.action.fn(win, p, nil)
+  T.eq(keys, { '1', '2' }, 'each row carries its LEADER+u digit')
+  pick.answer(nil)
   T.eq(p.sent, {}, 'Esc starts nothing')
-  sel.args.action.fn(win, p, '2')
+  wz.stub.perform(key(config, 'q', 'ALT'), win, p)
+  wz.stub.picker(win).answer('2')
   T.eq(p.sent, { 'omp --profile=team\r' })
 end)
 
@@ -383,14 +384,13 @@ T.test('a busy omp is only switched after a Yes; Yes interrupts, quits, moves th
   cq.set_pane_kind(function(id) return id == 7 and 'working' or nil end)
   switch_script(wz, { state = 'ok', session = '/s/a.jsonl', cwd = '/w' }, { state = 'ok', session = '/s2/a.jsonl' })
   cq.start_omp(win, p, '2')
-  local ask = win.actions[#win.actions].action
-  T.eq(ask.kind, 'InputSelector')
-  T.eq(ask.args.choices[1].id, 'no', 'No is the default row')
+  local ask = wz.stub.picker(win)
+  T.ok(ask.spec.confirm and ask.spec.confirm.danger, 'a destructive Yes / No question')
   T.eq({ p.sent, #wz.stub.children }, { {}, 0 }, 'nothing happens before the answer')
-  ask.args.action.fn(win, p, 'no')
+  ask.answer('no')
   T.eq({ p.sent, #wz.stub.children }, { {}, 0 }, 'No keeps omp running')
-  ask.args.action.fn(win, p, 'yes')
-  wz.stub.run_timers()
+  cq.start_omp(win, p, '2')
+  wz.stub.picker(win).answer('yes')
   T.eq(p.sent, { '\x1b', '\x04', "cd '/w' && omp --profile=team --resume '/s2/a.jsonl'\r" })
   T.eq(wz.stub.children, {
     { '/fake/bin/omp-switch', 'locate', '--pid', '507', '--from', 'work' },

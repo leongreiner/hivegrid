@@ -1,11 +1,13 @@
-"""Logic of the usage, agents and monitor panels (bin/hivegrid_panels.py) without a terminal:
-history loading and filtering, the usage page's notes and reset markers on its braille chart,
-`wezterm cli list` parsing and the monitor's sampling."""
+"""Logic of the usage, agents, monitor and settings panels (bin/hivegrid_panels.py) without a
+terminal: history loading and filtering, the usage page's notes and reset markers on its braille
+chart, `wezterm cli list` parsing, the monitor's sampling, and the wide (two-pane) layouts."""
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -125,27 +127,45 @@ class UsagePageTest(Env):
         pg.render(ui, cv, 0, 0, w, h)
         return ui, cv, ["".join(c[0] for c in row) for row in cv.cells]
 
-    def text(self, pg):
-        return "\n".join(self.render(pg)[2])
+    def view(self, pg):
+        """What the page shows below the account line, by place and colour rather than wording:
+        the note row (y+3) and its colour, the first row of the chart area (y+5), and whether a
+        plot (deep background) is drawn."""
+        ui, cv, rows = self.render(pg)
+        note = rows[3].strip()
+        note_fg = next((c[1] for c in cv.cells[3] if c[0] != " "), None)
+        role = {ui.pal["amber"]: "amber", ui.pal["muted"]: "muted"}.get(note_fg)
+        chart = any(c[2] == ui.pal["deep"] for row in cv.cells[5:] for c in row)
+        return {"note": note, "note_role": role, "body": rows[5].strip(), "chart": chart}
 
     def test_history_starting_inside_the_range_is_noted(self):
-        samples = [sample(NOW - 3 * H, five={"pct": 10}), sample(NOW - H, five={"pct": 20})]
+        first = NOW - 3 * H
+        samples = [sample(first, five={"pct": 10}), sample(NOW - H, five={"pct": 20})]
         for rng in ("6h", "24h", "7d"):
             with self.subTest(rng=rng):
-                self.assertIn("History starts", self.text(self.page(samples, rng)))
+                v = self.view(self.page(samples, rng))
+                self.assertEqual(v["note_role"], "muted")
+                self.assertIn(time.strftime("%H:%M", time.localtime(first)), v["note"])  # names when it starts
+                self.assertTrue(v["chart"])
 
     def test_history_covering_the_range_is_not_noted(self):
         samples = [sample(NOW - 25 * H, five={"pct": 10}), sample(NOW - H, five={"pct": 20})]
-        self.assertNotIn("History starts", self.text(self.page(samples, "24h")))
+        v = self.view(self.page(samples, "24h"))
+        self.assertEqual(v["note"], "")
+        self.assertTrue(v["chart"])
 
     def test_history_older_than_the_range_asks_for_a_longer_range(self):
-        text = self.text(self.page([sample(NOW - 10 * H, five={"pct": 10})], "6h"))
-        self.assertIn("No samples in the last 6h", text)
-        self.assertNotIn("No history", text)
+        v = self.view(self.page([sample(NOW - 10 * H, five={"pct": 10})], "6h"))
+        self.assertEqual(v["note"], "", "there is history, just not in this range")
+        self.assertIn("6h", v["body"])
+        self.assertFalse(v["chart"])
 
     def test_account_without_history(self):
-        text = self.text(self.page([sample(NOW - H, "other", five={"pct": 10})]))
-        self.assertIn("No history for this account", text)
+        v = self.view(self.page([sample(NOW - H, "other", five={"pct": 10})]))
+        self.assertEqual(v["note_role"], "amber")
+        self.assertNotEqual(v["note"], "")
+        self.assertEqual(v["body"], "", "no range hint: a longer range would not help")
+        self.assertFalse(v["chart"])
 
     def markers(self, pg):
         ui, cv, _ = self.render(pg)
@@ -174,6 +194,59 @@ class UsagePageTest(Env):
         pg.key(None, frozenset(), "4")
         pg.key(None, frozenset(), "UpArrow")
         self.assertEqual(P.RANGES[pg.range][0], "30d")
+
+    def test_unrecorded_span_is_named_inside_it_only(self):
+        first = NOW - 12 * H  # half of the 24h range has no history
+        pg = self.page([sample(first, five={"pct": 10}), sample(NOW - H, five={"pct": 20})])
+        _, cv, rows = self.render(pg)
+        hits = [(y, row.index("not recorded")) for y, row in enumerate(rows) if y >= 5 and "not recorded" in row]
+        self.assertEqual(len(hits), 2, "once per window plot")
+        gx, gw = 2 + 6, 100 - 4 - 6  # braille(): plot column and width at x + 2
+        since_col = gx + round(12 * H / (24 * H) * (gw - 1))
+        for y, x in hits:
+            self.assertLessEqual(x + len("not recorded"), since_col, "never over the recorded span")
+            self.assertEqual(cv.cells[y][x][2], cv.cells[y][gx][2], "drawn on the shaded background")
+
+    def test_short_unrecorded_span_has_no_label(self):
+        pg = self.page([sample(NOW - 23 * H, five={"pct": 10}), sample(NOW - H, five={"pct": 20})])
+        self.assertFalse(any("not recorded" in row for row in self.render(pg)[2][5:]))
+
+    def test_wide_layout_lists_every_account_beside_the_chart(self):
+        pg = P.UsagePage(Model([{"label": "work", "dir": "~/.claude-work"}, {"label": "team", "dir": "~/.claude-2"},
+                                {"label": "gone", "dir": "~/.claude-gone", "hidden": True}]),
+                         "work", "24h", history=os.path.join(self.tmp, "none.jsonl"), now=lambda: NOW)
+        pg.samples = [sample(NOW - 30 * H, five={"pct": 10}), sample(NOW - H, five={"pct": 20})]
+        ui, w = FakeUI(), 240
+        cv = U.Canvas(w, 50, "#ffffff", ui.pal["base"])
+        col = pg.render(ui, cv, 0, 0, w, 50)
+        rows = ["".join(c[0] for c in row) for row in cv.cells]
+        ux, uw = U.content_box(w, P.UsagePage.CHART_MAX)
+        self.assertEqual(col, (ux - 2, uw + 4), "status and footer line up with the composition")
+        sx = ux + uw - P.UsagePage.SIDE_W
+        self.assertEqual(rows[0][sx + 2:sx + 9], "Account")
+        self.assertEqual([rows[2][sx + 2:sx + 9].strip(), rows[3][sx + 2:sx + 9].strip()], ["work", "team"])
+        self.assertNotIn("gone", "".join(rows), "hidden accounts are not offered")
+        self.assertNotIn("Account ", rows[0][:sx], "no account chips: the table picks")
+        chart = [x for row in cv.cells[5:] for x, c in enumerate(row) if c[2] == ui.pal["deep"]]
+        self.assertLess(max(chart), sx, "the chart ends before the table")
+        cv.hit_at(sx + 4, 3)("left")
+        self.assertEqual(pg.account, "team")
+
+
+class QuotaLinesTest(unittest.TestCase):
+    def text(self, e, now=NOW):
+        return ["".join(t for t, _, _ in line) for line in P.quota_lines(Pal(), e, now)]
+
+    def test_windows_then_a_non_ok_state(self):
+        e = {"five_hour": {"pct": 12.4, "reset_at": NOW + 3 * H + 600}, "seven_day": {"pct": 40, "reset_at": NOW - 5},
+             "state": "rate_limited"}
+        self.assertEqual(self.text(e), ["5h 12% resets in 3h10m", "7d 40% ", "rate limited"])
+
+    def test_ok_state_and_missing_entry(self):
+        self.assertEqual(self.text({"seven_day": {"pct": 1}, "state": "ok"}), ["7d 1% "])
+        self.assertEqual(self.text(None), ["no data yet"])
+        self.assertEqual("".join(t for t, _, _ in P.quota_segments(Pal(), {"five_hour": {"pct": 1}, "seven_day": {"pct": 2},
+                                                                           "state": "ok"}, NOW)), "5h 1%     7d 2% ")
 
 
 class BrailleTest(unittest.TestCase):
@@ -299,6 +372,113 @@ class MonitorTest(unittest.TestCase):
             self.tick_at(s, t)
         self.assertEqual(s.values("RAM", 5), [None, None, None, 60.0, 60.0, 60.0])
         self.assertEqual(s.values("RAM", 5, now=110.0), [None] * 6)
+
+
+# ---- settings: one column, or section list + content (wide) ----------------------------
+
+
+class SettingsLayoutTest(Env):
+    ABOUT = {"executable": "/x/wezterm", "version": "wezterm test", "clicks": True, "overlay": True, "custom": True}
+
+    def setUp(self):
+        super().setUp()
+        import hivegrid_settings_core as S
+        self.model = S.Model(S.Settings(os.path.join(self.tmp, "settings.json")))
+        self.page = P.SettingsPage(self.model)
+        self.page.about = self.ABOUT
+
+    def draw(self, w, h=50, sub=0):
+        self.page.sub = sub
+        ui = U.UI(self.model, [self.page])
+        ui.size, ui.out = (w, h), io.StringIO()
+        ui.draw()
+        return ui, ["".join(c[0] for c in row) for row in ui.cv.cells]
+
+    def box(self, w):
+        """(x, width) of the wide composition: section list, separator, content."""
+        return U.content_box(w, self.page.SUB_W + 5 + self.page.content_w(w))
+
+    def test_narrow_keeps_the_section_strip(self):
+        _, rows = self.draw(U.WIDE_COLS - 1)
+        self.assertFalse(self.page.two_pane)
+        self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+About\s*$")
+
+    def test_wide_content_stays_in_its_column_for_every_section(self):
+        for w in (U.WIDE_COLS, 240, 320):
+            lx, tw = self.box(w)
+            sep = lx + self.page.SUB_W + 1
+            for sub in range(4):
+                with self.subTest(w=w, section=self.page.SUBS[sub]):
+                    _, rows = self.draw(w, sub=sub)
+                    self.assertTrue(self.page.two_pane)
+                    for y, row in enumerate(rows[2:-2], 2):
+                        used = [x for x, ch in enumerate(row) if ch != " "]
+                        if used:
+                            self.assertGreaterEqual(min(used), lx, f"row {y} left of the composition")
+                            self.assertLess(max(used), lx + tw, f"row {y} right of the composition")
+                        self.assertEqual(row[sep], "│", f"row {y}: the separator is not overdrawn")
+                    self.assertEqual(rows[-1].index("↑↓"), lx, "the footer lines up")
+
+    def test_about_arrows_walk_the_sections(self):
+        self.page.sub = 3
+        self.page.key(None, set(), "UpArrow")
+        self.assertEqual(self.page.SUBS[self.page.sub], "Accounts")
+        self.page.sub = 3
+        self.page.key(None, set(), "DownArrow")
+        self.assertEqual(self.page.SUBS[self.page.sub], "About", "stays on the last section")
+
+    def test_section_list_shows_unsaved_sections_and_switches_on_click(self):
+        w = 240
+        lx, _ = self.box(w)
+        ui, rows = self.draw(w)
+        keys_row = next(y for y, r in enumerate(rows) if r[lx + 2:lx + 6] == "Keys")
+        self.assertNotIn("●", rows[keys_row])
+        self.model.keys["equalize"] = "CTRL+ALT+e"
+        ui, rows = self.draw(w)
+        self.assertIn("● 1 changed", rows[keys_row])
+        theme_row = rows[keys_row - 1]
+        self.assertNotIn("●", theme_row, "only the edited section is marked")
+        ui.cv.hit_at(lx + 3, keys_row + 1)("left")
+        self.assertEqual(self.page.SUBS[self.page.sub], "Accounts")
+        self.model.keys["equalize"] = "CTRL+SHIFT+e"  # undoing the edit clears the mark
+        self.assertNotIn("●", self.draw(w)[1][keys_row])
+
+    def test_wide_keys_detail_follows_the_cursor_and_actions_move_there(self):
+        w = 240
+        names = list(P.BINDINGS)
+        self.page.cursor[1] = names.index("overview_toggle")
+        ui, rows = self.draw(w, sub=1)
+        self.assertTrue(any(r.rstrip().endswith("Overview dock: toggle") for r in rows[2:4]), "detail title")
+        self.assertEqual(sum(" Change " in r for r in rows), 1, "one Change button, in the detail")
+        x = next(r.index(" Change ") for r in rows if " Change " in r)
+        y = next(i for i, r in enumerate(rows) if " Change " in r)
+        modal = []
+        self.page.change_binding = lambda ui_, n: modal.append(n)
+        ui.cv.hit_at(x + 2, y)("left")
+        self.assertEqual(modal, ["overview_toggle"])
+
+
+class FrameTest(Env):
+    class Col(U.Page):
+        title = "Col"
+
+        def render(self, ui, cv, x, y, w, h):
+            return 40, 60
+
+        def hints(self):
+            return "a one  b two"
+
+    def test_status_and_footer_line_up_with_the_page_column(self):
+        model = mock.Mock(dirty=False)
+        model.current_theme.return_value = {"palette": U.DEFAULT_PAL}
+        ui = U.UI(model, [self.Col()])
+        ui.size, ui.out = (200, 20), io.StringIO()
+        ui.say("saved")
+        ui.draw()
+        rows = ["".join(c[0] for c in row) for row in ui.cv.cells]
+        self.assertEqual(rows[-2].index("saved"), 42)
+        self.assertEqual(rows[-1].index("a one"), 42)
+        self.assertTrue(ui.out.getvalue().startswith("\x1b[?2026h") and ui.out.getvalue().endswith("\x1b[?2026l"))
 
 
 if __name__ == "__main__":

@@ -204,5 +204,94 @@ class Tiles(unittest.TestCase):
         self.assertEqual(X.fit_tiles(3, 2, 1)[0], 0)
 
 
+CELLS = ((8, 17), (10, 21), (7, 15))  # cell pixel sizes: 1080p, a larger font, a small one
+
+
+def inside(poly, x, y, eps=1e-6):
+    ext = X.x_extent(poly, y)
+    return ext is not None and ext[0] - eps <= x <= ext[1] + eps
+
+
+class Pixels(unittest.TestCase):
+    def test_hex_polygon_is_regular_in_lattice_proportions(self):
+        for cw, ch in CELLS:
+            for ry in X.hex_sizes():
+                poly = X.hex_polygon(ry, cw, ch)
+                a, t = X.hex_extent(ry, cw, ch)
+                xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+                self.assertAlmostEqual(max(xs) - min(xs), 2 * a)
+                self.assertAlmostEqual(max(ys) - min(ys), 2 * t)
+                # centred on the hex's centre as hit_test and centre() see it
+                pw, h, _, _ = X.shape(ry)
+                self.assertAlmostEqual((max(xs) + min(xs)) / 2, pw * cw / 2)
+                self.assertAlmostEqual((max(ys) + min(ys)) / 2, h * ch / 2)
+
+    def test_neighbours_share_edges_so_the_gap_is_even(self):
+        """The polygons tile the plane: a neighbour's vertices coincide with this hex's, so
+        insetting both by the same amount leaves the same gap on every side."""
+        for cw, ch in CELLS:
+            for ry in X.hex_sizes():
+                mine = {(round(x, 6), round(y, 6)) for x, y in X.hex_polygon(ry, cw, ch)}
+                for q, r in ((1, 0), (0, 1), (-1, 1)):
+                    ox, oy = X.origin(q, r, ry)
+                    theirs = {(round(x + ox * cw, 6), round(y + oy * ch, 6)) for x, y in X.hex_polygon(ry, cw, ch)}
+                    self.assertEqual(len(mine & theirs), 2, (cw, ch, ry, q, r))
+
+    def test_polygon_agrees_with_hit_test(self):
+        """Every character whose centre lies in the drawn hex is a click on that hex."""
+        for cw, ch in CELLS:
+            for ry in X.hex_sizes():
+                poly = X.hex_polygon(ry, cw, ch)
+                pw, h, _, _ = X.shape(ry)
+                for y in range(-2, h + 2):
+                    for x in range(-2, pw + 2):
+                        if inside(X.inset(poly, 0.01), (x + 0.5) * cw, (y + 0.5) * ch):
+                            self.assertEqual(X.hit_test(x, y, ry), (0, 0), (cw, ch, ry, x, y))
+
+    def test_inset_moves_every_edge_by_d(self):
+        poly = X.hex_polygon(6, 8, 17)
+        for d in (1.0, 3.5, 7.0):
+            inner = X.inset(poly, d)
+            for i in range(6):
+                (x0, y0), (x1, y1) = poly[i], poly[(i + 1) % 6]
+                nx, ny = y1 - y0, -(x1 - x0)
+                n = (nx * nx + ny * ny) ** 0.5
+                for px, py in (inner[i], inner[(i + 1) % 6]):
+                    self.assertAlmostEqual(((x0 - px) * nx + (y0 - py) * ny) / n, d, places=6)
+
+    def test_rounded_corners_stay_inside_and_keep_the_sides(self):
+        poly = X.hex_polygon(8, 8, 17)
+        pts = X.rounded(poly, 6.0)
+        for x, y in pts:
+            self.assertTrue(inside(poly, x, y, 1e-6), (x, y))
+        # the vertical sides survive: the outline still reaches the full width
+        self.assertAlmostEqual(max(x for x, _ in pts), max(x for x, _ in poly))
+        self.assertEqual(X.rounded(poly, 0), poly)
+
+    def test_text_spans_lie_on_flat_fill(self):
+        for cw, ch in CELLS:
+            for ry in X.hex_sizes():
+                for margin in (4.0, 7.0):
+                    inner = X.inset(X.hex_polygon(ry, cw, ch), margin)
+                    spans = X.text_spans(ry, cw, ch, margin)
+                    self.assertEqual(len(spans), X.shape(ry)[1])
+                    for i, span in enumerate(spans):
+                        if span is None:
+                            continue
+                        for px in (span[0] * cw, span[1] * cw):
+                            for py in (i * ch, (i + 1) * ch):
+                                self.assertTrue(inside(inner, px, py), (cw, ch, ry, margin, i, span))
+
+    def test_tile_polygon_leaves_even_gaps(self):
+        for tw, th in X.TILE_SIZES:
+            if th <= 2:
+                continue
+            px, py = X.tile_pitch(tw, th)
+            poly = X.tile_polygon(tw, th, 8, 17)
+            # the lattice cells of neighbouring tiles touch exactly
+            self.assertAlmostEqual(poly[1][0] - poly[0][0], px * 8)
+            self.assertAlmostEqual(poly[2][1] - poly[1][1], py * 17)
+
+
 if __name__ == "__main__":
     unittest.main()
