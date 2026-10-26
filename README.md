@@ -80,7 +80,6 @@ omp-grid --layout columns 4 --tab --dirs ~/a,~/b  # new tab, 4 columns, director
 - omp state detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
 - The sidebar takes the full window height only in a single-pane tab; in a grid it is docked beside the leftmost pane.
 - `Ctrl+V` paste is not fanned out in broadcast mode, because the clipboard is not readable from Lua.
-- Window opacity is 0.94; it only shows with a compositing window manager, and WezTerm 20240203 has no blur on Wayland.
 
 ## License
 

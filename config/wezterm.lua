@@ -43,11 +43,8 @@ config.keys = {
 config.scrollback_lines = 20000
 config.enable_wayland = true
 
--- Hivegrid look: navy base, slightly translucent. WezTerm 20240203 has no blur API
--- on Wayland, so translucency is plain alpha over whatever is behind the window.
--- text_background_opacity stays at 1 so cells with their own background (selection,
--- ls colours, TUIs) remain solid and readable.
-config.window_background_opacity = 0.94
+-- Hivegrid look: solid navy base. The window stays fully opaque.
+config.window_background_opacity = 1.0
 config.text_background_opacity = 1.0
 
 -- Dimmed panes sink into the navy instead of going grey.
