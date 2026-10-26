@@ -193,9 +193,45 @@ done
     end
   end
 
+  local function is_dir(path)
+    if type(path) ~= 'string' or path:sub(1, 1) ~= '/' then return false end
+    local f = io.open(path .. '/.', 'r')
+    if f then f:close() end
+    return f ~= nil
+  end
+
+  -- The shell's OSC 7 directory, unless it names a path on another host (an ssh session
+  -- reports the remote path, which is meaningless to a local split).
+  local function reported_cwd(pane)
+    local ok, path = pcall(function()
+      local cwd = pane:get_current_working_dir()
+      if not cwd then return nil end
+      local host = (cwd.host or ''):lower():gsub('%..*$', '')
+      local me = wezterm.hostname():lower():gsub('%..*$', '')
+      if host ~= '' and host ~= 'localhost' and host ~= me then return nil end
+      return cwd.file_path
+    end)
+    return ok and path or nil
+  end
+
+  -- Existing local directory of a pane: the reported cwd, else the cwd of the foreground
+  -- process or of its ancestors up to the pane's shell (a pane whose shell emits no OSC 7,
+  -- or an ssh pane), else nil.
+  local function pane_dir(pane)
+    local path = reported_cwd(pane)
+    if is_dir(path) then return path end
+    local ok, info = pcall(function() return pane:get_foreground_process_info() end)
+    for _ = 1, 6 do
+      if not ok or not info or tostring(info.name):find('^wezterm') then return nil end
+      if is_dir(info.cwd) then return info.cwd end
+      ok, info = pcall(wezterm.procinfo.get_info_for_pid, info.ppid)
+    end
+  end
+
+  -- Directory the sidebar view starts in: git shows the repository around the pane's
+  -- directory, and a directory outside any repository stays itself.
   local function dir_of(pane, view)
-    local cwd = pane and pane:get_current_working_dir()
-    local dir = cwd and cwd.file_path or wezterm.home_dir
+    local dir = pane and pane_dir(pane) or wezterm.home_dir
     if view == 'git' then
       local ok, out = wezterm.run_child_process { 'git', '-C', dir, 'rev-parse', '--show-toplevel' }
       if ok and out ~= '' then return (out:gsub('%s+$', '')) end
@@ -284,6 +320,10 @@ done
     if c and not rescale_pending(tab_id, rs) then wezterm.GLOBAL.sidebar_width = c.width end
   end
 
+  -- The explorer's own config home keeps the sidebar's keys and click handling out of a
+  -- global ~/.config/yazi.
+  local YAZI_CONFIG_HOME = wezterm.home_dir .. '/.config/hivegrid/yazi'
+
   local function show(cli, rec, rs, src, anchor, window)
     local w = anchor and width_for(rs, anchor, not rec.handle, wezterm.GLOBAL.sidebar_width)
     if not w then
@@ -298,8 +338,11 @@ done
     end
     local dir = dir_of(src, rec.view)
     -- PWD is set explicitly because tools such as yazi prefer the inherited $PWD over the cwd.
+    local cmd = { 'env', 'PWD=' .. dir }
+    if rec.view == 'files' then cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. YAZI_CONFIG_HOME end
+    cmd[#cmd + 1] = VIEWS[rec.view].bin
     local ok, out = cli('split-pane', '--left', '--cells', w, '--cwd', dir,
-      '--pane-id', anchor.id, '--', 'env', 'PWD=' .. dir, VIEWS[rec.view].bin)
+      '--pane-id', anchor.id, '--', table.unpack(cmd))
     if ok then
       rec.content = tonumber(out)
       wezterm.GLOBAL.sidebar_width = wezterm.GLOBAL.sidebar_width or w
@@ -372,15 +415,51 @@ done
       write_state(rec)
     end
     if not rec.handle then return {} end
-    return theme.chip({
+    return theme.pill({
       { Foreground = { Color = rec.content and COLORS.accent or COLORS.muted } },
       { Text = (rec.content and '◀ ' or '▶ ') .. (rec.view == 'git' and 'git' or 'files') },
-    })
+    }, rec.content and theme.P.raised or theme.P.pill)
   end
 
-  wezterm.on('user-var-changed', function(window, pane, name)
+  -- The explorer announces a double click as the user var hivegrid_open_dir (an absolute
+  -- path). A wide target pane gets the terminal on its right, a narrow one below it.
+  local RIGHT_MIN_COLS = 80
+  local function open_terminal(window, pane, path)
+    local tab = pane:tab() or window:active_tab()
+    local rs = rows(tab:panes_with_info())
+    local rec = reconcile(load(tab:tab_id()), rs)
+    if not rec.content or rec.content ~= pane:pane_id() then return end
+    if type(path) ~= 'string' or path:sub(1, 1) ~= '/' or path:find('%z') then return end
+
+    path = path:gsub('/+$', '')
+    local dir = path == '' and '/' or path
+    if not is_dir(dir) then
+      local f = io.open(dir, 'r')
+      if not f then return end
+      f:close()
+      dir = dir:match('^(.*)/[^/]*$')
+      dir = dir == '' and '/' or dir
+      if not is_dir(dir) then return end
+    end
+
+    local function skip(id) return id == rec.handle or id == rec.content end
+    local target = find(rs, rec.last) or leftmost(rs, skip)
+    if not target then return end
+    local cli = make_cli(pane)
+    local ok, out = cli('split-pane', target.width >= RIGHT_MIN_COLS and '--right' or '--bottom',
+      '--cwd', dir, '--pane-id', target.id)
+    local id = ok and tonumber(out)
+    if not id then return end
+    cli('activate-pane', '--pane-id', id)
+    rec.last = id
+    save(tab:tab_id(), rec)
+  end
+
+  wezterm.on('user-var-changed', function(window, pane, name, value)
     if name == 'sidebar_toggle' and api.is_sidebar(pane:pane_id()) then
       apply(window, pane, nil)
+    elseif name == 'hivegrid_open_dir' then
+      open_terminal(window, pane, value)
     end
   end)
 
