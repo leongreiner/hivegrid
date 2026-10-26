@@ -25,7 +25,6 @@ local function build(config, wezterm)
     git = { bin = wezterm.home_dir .. '/.local/bin/hivegrid-git' },
   }
   local theme = require 'theme'
-  local COLORS = { accent = theme.P.accent, muted = theme.P.muted }
 
   -- Runs inside the bar pane: three buttons (explorer, git, settings) drawn from the
   -- state file "<open|closed> <files|git>", written by Lua and polled here so a resize
@@ -486,9 +485,8 @@ done
   end
 
   -- Reconciles state with the live tab, so call it from update-status. Creates the bar
-  -- when the tab has none. Returns wezterm.format items for a chip such as "◀ files":
-  -- accent colour while open, muted when hidden.
-  function api.status(window)
+  -- when the tab has none.
+  function api.sync(window)
     local tab = window:active_tab()
     local rs = rows(tab:panes_with_info())
     local old = load(tab:tab_id())
@@ -506,11 +504,6 @@ done
       save(tab:tab_id(), rec)
       write_state(rec)
     end
-    if not rec.handle then return {} end
-    return theme.pill({
-      { Foreground = { Color = rec.content and COLORS.accent or COLORS.muted } },
-      { Text = (rec.content and '◀ ' or '▶ ') .. (rec.view == 'git' and 'git' or 'files') },
-    }, rec.content and theme.P.raised or theme.P.pill)
   end
 
   -- The explorer announces a double click as the user var hivegrid_open_dir (an absolute

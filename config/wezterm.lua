@@ -228,7 +228,7 @@ wezterm.on('update-status', function(window)
   cq.refresh_if_due(window)
 
   -- Up to three visual groups: brand (left status), then right to left of the tabs
-  --   [broadcast] [sidebar]   B: quota   C: system
+  --   [broadcast]   B: quota   C: system
   -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
   -- groups fit the free cells. Agent states live in the overview dock, not here.
   local groups = {
@@ -242,8 +242,7 @@ wezterm.on('update-status', function(window)
       { Text = 'BROADCAST' },
     }, '#c23b4a')
   end
-  local sidebar_items = sb.status(window)
-  if #sidebar_items > 0 then lead[#lead + 1] = sidebar_items end
+  sb.sync(window)
   local lead_w = 0
   for _, it in ipairs(lead) do lead_w = lead_w + theme.width(it) + 1 end
 
