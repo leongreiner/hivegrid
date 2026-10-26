@@ -52,6 +52,7 @@ class Canvas:
         self.w, self.h, self.fg, self.bg = w, h, fg, bg
         self.cells = [[(" ", fg, bg, 0)] * w for _ in range(h)]
         self.hits = []
+        self.keys = []
         self.images = []
 
     def put(self, x, y, text, fg=None, bg=None, attrs=0):
@@ -75,14 +76,24 @@ class Canvas:
                 old = row[xx]
                 row[xx] = (ch, fg or old[1], bg or old[2], 0)
 
-    def hit(self, x, y, w, h, fn):
-        """Registers a click region; the last one registered wins. fn(button) with 'left' or 'right'."""
+    def hit(self, x, y, w, h, fn, key=None):
+        """Registers a click region; the last one registered wins. fn(button) with 'left' or 'right'.
+        A `key` names the region for hover effects (see key_at)."""
         self.hits.append((x, y, w, h, fn))
+        if key is not None:
+            self.keys.append((x, y, w, h, key))
 
     def hit_at(self, x, y):
         for rx, ry, rw, rh, fn in reversed(self.hits):
             if rx <= x < rx + rw and ry <= y < ry + rh:
                 return fn
+        return None
+
+    def key_at(self, x, y):
+        """The key of the last registered keyed region under (x, y), or None."""
+        for rx, ry, rw, rh, key in reversed(self.keys):
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return key
         return None
 
     def image(self, x, y, w, h, png):

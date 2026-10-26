@@ -7,6 +7,9 @@ $XDG_RUNTIME_DIR/hivegrid-overview-$WEZTERM_PANE.json about once a second; this 
 draws it. Per pane: number (the minimap digit), state glyph, directory, how long it has been in
 that state, and omp's session title. A click on a row, or its digit on the keyboard, jumps to
 that pane (user var hivegrid_overview_goto, handled by the config). q or Esc closes the dock.
+The row and the ⊞ / ▦ button under the pointer fade to a lighter shade (about 150 ms in, 200 ms
+out; frames only while a fade runs). The Hivegrid build reports the pointer leaving the dock
+(DEC private mode 8800, a motion report at column 0, row 0), which ends the hover.
 
 Usage: hivegrid-overview [--file PATH] [--dump COLSxROWS]
   --file PATH        read the state from PATH instead of the pane's own file
@@ -25,7 +28,7 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from hivegrid_ui import BOLD, DIM, Canvas, decode  # noqa: E402
+from hivegrid_ui import BOLD, DIM, Canvas, decode, mix  # noqa: E402
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ORDER = ("ask", "bell", "finished", "waiting", "working", "exited", "idle")
@@ -33,6 +36,10 @@ DEFAULT_PAL = {
     "deep": "#070d19", "base": "#0b1220", "surface": "#111b30", "text": "#c9d6ee", "bright": "#eaf1ff",
     "muted": "#8a9cc2", "dim": "#7487ad", "accent": "#4f9dff", "raised": "#1d3a70", "border": "#1e2a45",
 }
+STEPS = 8  # shades between rest and full hover: the fade is drawn in this many steps
+HOVER_BLEND = 0.45  # share of the way to the hover colour that full hover reaches
+FADE_IN, FADE_OUT = 0.15, 0.20  # seconds from rest to full hover and back
+FRAME = 1 / 30  # seconds between frames while a fade runs
 
 
 def state_path():
@@ -78,9 +85,11 @@ def human(secs):
     return f"{secs // 86400}d{secs % 86400 // 3600:02d}h"
 
 
-def render(doc, w, h, now, goto=None, equalize=None, arrange=None):
+def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None):
     """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
-    equalize() by a click on ▦, arrange() by a click on ⊞."""
+    equalize() by a click on ▦, arrange() by a click on ⊞. hover maps what the pointer is over
+    (a pane id for a row, 'equalize' or 'arrange' for a header button) to its fade level 0..1."""
+    hover = hover or {}
     pal = dict(DEFAULT_PAL)
     pal.update((doc or {}).get("pal") or {})
     cv = Canvas(w, h, pal["text"], pal["surface"])
@@ -95,11 +104,12 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None):
     # Header right: the buttons (arrange, equalize), left of them the number of panes per
     # state in state colour.
     x = w - 1
-    for label, action in ((" ▦ ", equalize), (" ⊞ ", arrange)):
+    for label, name, action in ((" ▦ ", "equalize", equalize), (" ⊞ ", "arrange", arrange)):
         if action:
             x -= len(label)
-            cv.put(x, 0, label, pal["bright"], pal["raised"], BOLD)
-            cv.hit(x, 0, len(label), 1, lambda button, action=action: action())
+            bg = mix(pal["raised"], pal["accent"], HOVER_BLEND * hover.get(name, 0.0))
+            cv.put(x, 0, label, pal["bright"], bg, BOLD)
+            cv.hit(x, 0, len(label), 1, lambda button, action=action: action(), key=name)
             x -= 1
     seen = {}
     for p in panes:
@@ -130,7 +140,8 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None):
     y = 2
     for p in panes[:shown]:
         active = bool(p.get("active"))
-        bg = pal["raised"] if active else pal["surface"]
+        lit = hover.get(p["id"], 0.0)
+        bg = pal["raised"] if active else mix(pal["surface"], pal["raised"], HOVER_BLEND * lit)
         lines = 2 if two_lines else 1
         cv.fill(0, y, w, lines, bg=bg)
         if active:
@@ -154,7 +165,7 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None):
             detail = title if title and title != name else proc
             cv.put(6, y + 1, fit(detail, w - 7), pal["muted"], bg)
         if goto:
-            cv.hit(0, y, w, lines, lambda button, pid=p["id"]: goto(pid))
+            cv.hit(0, y, w, lines, lambda button, pid=p["id"]: goto(pid), key=p["id"])
         y += rows_per
     if hidden:
         cv.put(2, h - 2, f"+{hidden} more", pal["dim"])
@@ -177,6 +188,9 @@ class Dock:
         self.last = None
         self.cv = None
         self.serial = 0
+        self.hover = None  # what the pointer is over: a pane id, 'equalize', 'arrange' or None
+        self.levels = {}  # fade level 0..1 of every key that is hovered or still fading out
+        self.clock = None  # time of the last fade step; None while no fade runs
 
     def reload(self):
         try:
@@ -209,9 +223,37 @@ class Dock:
                 self.goto(p["id"])
                 return
 
+    def set_hover(self, key):
+        if key != self.hover:
+            self.hover = key
+            if self.clock is None:
+                self.clock = time.monotonic()
+
+    def advance(self, now):
+        """Moves every fade on by the time since the last step; True while one is still running."""
+        dt = 0.0 if self.clock is None else max(now - self.clock, 0.0)
+        busy = False
+        for key in set(self.levels) | ({self.hover} - {None}):
+            target = 1.0 if key == self.hover else 0.0
+            level = self.levels.get(key, 0.0)
+            if level < target:
+                level = min(target, level + dt / FADE_IN)
+            elif level > target:
+                level = max(target, level - dt / FADE_OUT)
+            if level:
+                self.levels[key] = level
+            else:
+                self.levels.pop(key, None)
+            busy = busy or level != target
+        self.clock = now if busy else None
+        return busy
+
     def handle(self, ev):
         if ev[0] == "mouse":
             _, action, button, x, y = ev
+            if action in ("drag", "press", "release"):  # motion without a button counts as a drag
+                # A report at column 0, row 0 (x, y < 0 here) says the pointer left the dock.
+                self.set_hover(self.cv.key_at(x, y) if self.cv and x >= 0 and y >= 0 else None)
             if action == "press" and button == "left" and self.cv:
                 fn = self.cv.hit_at(x, y)
                 if fn:
@@ -230,7 +272,8 @@ class Dock:
     def draw(self, size):
         cols, rows = size
         now = time.time()
-        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize, self.arrange)
+        hover = {k: round(v * STEPS) / STEPS for k, v in self.levels.items()}
+        self.cv = render(self.doc, cols, rows, now, self.goto, self.equalize, self.arrange, hover)
         frame = "\x1b[?25l" + self.cv.render()
         if frame != self.last:
             self.out.write(frame)
@@ -241,7 +284,7 @@ class Dock:
         old = termios.tcgetattr(self.fd)
         try:
             tty.setraw(self.fd)
-            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
             self.out.flush()
             signal.signal(signal.SIGWINCH, lambda *_: None)
             while self.running:
@@ -251,9 +294,10 @@ class Dock:
                     size = (size.columns, size.lines)
                 except OSError:
                     size = (30, 24)
+                fading = self.advance(time.monotonic())
                 self.draw(size)
                 busy = any(p.get("kind") == "working" for p in (self.doc or {}).get("panes", []))
-                r, _, _ = select.select([self.fd], [], [], 0.125 if busy else 0.5)
+                r, _, _ = select.select([self.fd], [], [], FRAME if fading else 0.125 if busy else 0.5)
                 if r:
                     data = os.read(self.fd, 4096)
                     if not data:
@@ -262,7 +306,7 @@ class Dock:
                         self.handle(ev)
         finally:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
-            self.out.write("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+            self.out.write("\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
             self.out.flush()
 
 
