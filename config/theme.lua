@@ -1,5 +1,7 @@
 -- Hivegrid palette and small drawing helpers shared by every module.
 -- Dark navy base; green/amber/red stay semantic for state, blue is the accent.
+local wezterm = require 'wezterm'
+
 local M = {}
 
 M.P = {
@@ -14,15 +16,15 @@ M.P = {
   edge_lo = '#0c1630', -- shaded edge
   text = '#c9d6ee',
   bright = '#eaf1ff',
-  muted = '#7487ad',
-  dim = '#5a6c93',
+  muted = '#8a9cc2',
+  dim = '#7487ad', -- the dimmest text allowed on a pill
   accent = '#4f9dff',
   cyan = '#38bdf8',
   green = '#34d399',
   amber = '#fbbf24',
   red = '#f87171',
   violet = '#a78bfa',
-  grey = '#64708a',
+  grey = '#8190ad',
 }
 
 -- Linear blend of two '#rrggbb' colours, t in [0, 1].
@@ -102,6 +104,64 @@ function M.gauge(pct, cells, fill, bg)
   return items
 end
 
+-- Bar `cells` wide (rounded caps included) with `text` laid over it, centred: cells
+-- up to the fill carry `fill` as background and dark text, the rest the track and light
+-- text, so the text stays legible on both sides of the fill edge. A cell the fill edge
+-- cuts through is drawn in eighths when it is blank and flips whole otherwise.
+-- Returns wezterm.format items that end on background `bg`.
+function M.gauge_text(pct, cells, fill, bg, text, opts)
+  opts = opts or {}
+  local track = opts.track or M.lerp(bg, M.P.edge_hi, 0.3)
+  local on_fill, on_track = opts.on_fill or M.P.deep, opts.on_track or M.P.text
+  local inner = cells - 2
+  text = text or ''
+  if (utf8.len(text) or #text) > inner then text = wezterm.truncate_right(text, inner) end
+  local len = utf8.len(text) or #text
+  local chars = {}
+  for k = 1, inner do chars[k] = ' ' end
+  local at = (inner - len) // 2
+  for _, c in utf8.codes(text) do
+    at = at + 1
+    chars[at] = utf8.char(c)
+  end
+  local eighths = math.floor(math.max(0, math.min(100, pct)) / 100 * inner * 8 + 0.5)
+  if pct > 0 and eighths == 0 then eighths = 1 end
+  local full, part = eighths // 8, eighths % 8
+
+  local items = {
+    { Foreground = { Color = eighths > 0 and fill or track } }, { Background = { Color = bg } },
+    { Text = M.CAP_L },
+  }
+  local run, run_fg, run_bg = '', nil, nil
+  local function flush()
+    if run == '' then return end
+    items[#items + 1] = { Foreground = { Color = run_fg } }
+    items[#items + 1] = { Background = { Color = run_bg } }
+    items[#items + 1] = { Text = run }
+    run = ''
+  end
+  for k = 1, inner do
+    local ch, fg, cbg = chars[k], on_track, track
+    if k <= full then
+      fg, cbg = on_fill, fill
+    elseif k == full + 1 and part > 0 then
+      if ch == ' ' then
+        ch, fg, cbg = EIGHTHS[part], fill, track
+      elseif part >= 4 then
+        fg, cbg = on_fill, fill
+      end
+    end
+    if fg ~= run_fg or cbg ~= run_bg then flush() end
+    run_fg, run_bg = fg, cbg
+    run = run .. ch
+  end
+  flush()
+  items[#items + 1] = { Foreground = { Color = full >= inner and fill or track } }
+  items[#items + 1] = { Background = { Color = bg } }
+  items[#items + 1] = { Text = M.CAP_R }
+  return items
+end
+
 -- Thin-line bar for popups: the selector highlights its current row by reversing
 -- colours, which turns a half-block bar into a slab but leaves a line readable.
 function M.line(pct, cells, fill, track)
@@ -125,6 +185,23 @@ function M.extend(dst, src)
   return dst
 end
 
+-- True when this WezTerm knows the Hivegrid fork's `Click` format item; stock WezTerm
+-- rejects it as an unknown FormatItem, so older binaries get plain, unclickable text.
+M.has_click = pcall(wezterm.format, { { Click = 'probe' } })
+
+-- Makes `items` a clickable region reported to the `status-click` event as `id`. A
+-- ResetAttributes inside `items` ends the region, so it is re-opened after each one.
+function M.click(id, items)
+  if not M.has_click then return items end
+  local out = { { Click = id } }
+  for i, it in ipairs(items) do
+    out[#out + 1] = it
+    if it == 'ResetAttributes' and i < #items then out[#out + 1] = { Click = id } end
+  end
+  out[#out + 1] = 'ClickEnd'
+  return out
+end
+
 -- A rounded pill: cap, one cell of padding, `items`, padding, cap. Caps take `bg` as
 -- foreground on the bar; the body paints `bg` behind every item, so the body is
 -- re-asserted after each ResetAttributes in `items`.
@@ -143,6 +220,18 @@ function M.pill(items, bg)
   out[#out + 1] = { Text = M.CAP_R }
   out[#out + 1] = 'ResetAttributes'
   return out
+end
+
+-- One continuous rounded pill holding `parts` (item lists) with a thin divider between
+-- neighbours. Each part leaves the background at `bg` when it ends.
+function M.group(parts, bg)
+  local body = {}
+  local divider = { { Foreground = { Color = M.lerp(bg, M.P.edge_hi, 0.55) } }, { Text = ' │ ' } }
+  for i, part in ipairs(parts) do
+    if i > 1 then M.extend(body, divider) end
+    M.extend(body, part)
+  end
+  return M.pill(body, bg)
 end
 
 -- The Hivegrid mark: Nerd md-hexagon-multiple (three hexagons, the bundled Symbols Nerd

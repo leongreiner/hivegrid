@@ -171,73 +171,65 @@ return function(config, wezterm)
   local function gib(kib) return kib / 1048576 end
   local function size(g) return g >= 10 and string.format('%.0f', g) or string.format('%.1f', g) end
 
-  -- One entry per available source: { label, pct, amount }. amount is padded to a
-  -- fixed width so a changing number never shifts the chips beside it.
+  -- One entry per available source: { label, pct, amount, inner }. inner is the width of
+  -- the bar's text area in the amount tier, fixed per source so a changing number
+  -- never shifts the groups beside it.
   local function metrics()
     local out = {}
-    if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct } end
+    if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct, nil, 6 } end
     if mem.total then
       local used = gib(mem.total - mem.avail)
       out[#out + 1] = {
         'RAM', 100 * (mem.total - mem.avail) / mem.total,
-        string.format('%4s/%sG', string.format('%.1f', used), size(gib(mem.total))),
+        string.format('%.1fG/%sG', used, size(gib(mem.total))), 10,
       }
     end
     if disk.pct then
-      out[#out + 1] = { 'DSK', disk.pct, string.format('%4sG free', size(gib(disk.free_kib))) }
+      out[#out + 1] = { 'DSK', disk.pct, string.format('%sG free', size(gib(disk.free_kib))), 10 }
     end
     if gpu.util and gpu.kind == 'nvidia' and gpu.total_mib then
       out[#out + 1] = {
-        'GPU', gpu.util, string.format('%4.1f/%sG', gpu.used_mib / 1024, size(gpu.total_mib / 1024)),
+        'GPU', gpu.util, string.format('%.1f/%sG', gpu.used_mib / 1024, size(gpu.total_mib / 1024)), 8,
       }
     elseif gpu.util and gpu.kind == 'jetson' then
-      out[#out + 1] = { 'GPU', gpu.util, 'shared' }
+      out[#out + 1] = { 'GPU', gpu.util, nil, 6 }
     end
     return out
   end
 
   -- Richest first; the caller takes the first tier that fits its cell budget.
-  -- bar = cells of bar (0: label and number only), amount = trailing size text,
-  -- only = labels kept in the tier.
+  -- bar: gauges with the value inside (inside = 'amount': the size, 'pct': the
+  -- percentage); without bar only label and percentage. only = labels kept.
   local TIERS = {
-    { bar = 10, amount = true },
-    { bar = 8 },
-    { bar = 6 },
-    { bar = 0 },
-    { bar = 0, only = { CPU = true, RAM = true } },
+    { bar = true, inside = 'amount' },
+    { bar = true, inside = 'pct', inner = 5 },
+    { bar = false },
+    { bar = false, only = { CPU = true, RAM = true } },
   }
 
-  -- Items of one metric: muted label, rounded gauge (bar tiers), value, amount.
+  -- Items of one metric: muted label, then a gauge with its value inside (bar tiers)
+  -- or the coloured percentage.
   local function body(m, tier)
     local items = { { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' } }
-    if tier.bar > 0 then
-      theme.extend(items, theme.gauge(m[2], tier.bar, color(m[2]), P.pill))
-    end
-    items[#items + 1] = { Foreground = { Color = color(m[2]) } }
-    items[#items + 1] = { Text = string.format(tier.bar > 0 and ' %3.0f%%' or '%3.0f%%', m[2]) }
-    if tier.amount and m[3] then
-      items[#items + 1] = { Foreground = { Color = P.dim } }
-      items[#items + 1] = { Text = ' ' .. m[3] }
+    if tier.bar then
+      local text = tier.inside == 'amount' and m[3] or string.format('%.0f%%', m[2])
+      theme.extend(items, theme.gauge_text(
+        m[2], (tier.inner or m[4]) + 2, color(m[2]), P.pill, text))
+    else
+      items[#items + 1] = { Foreground = { Color = color(m[2]) } }
+      items[#items + 1] = { Text = string.format('%3.0f%%', m[2]) }
     end
     return items
   end
 
-  -- Gauge tiers give every metric its own pill; label-only tiers share one pill.
+  -- One continuous pill per tier, a thin divider between the metrics.
   local function render(tier)
-    local items, shared = {}, {}
+    local parts = {}
     for _, m in ipairs(metrics()) do
-      if not tier.only or tier.only[m[1]] then
-        if tier.bar > 0 then
-          if #items > 0 then items[#items + 1] = { Text = ' ' } end
-          theme.extend(items, theme.pill(body(m, tier), P.pill))
-        else
-          if #shared > 0 then shared[#shared + 1] = { Text = '  ' } end
-          theme.extend(shared, body(m, tier))
-        end
-      end
+      if not tier.only or tier.only[m[1]] then parts[#parts + 1] = body(m, tier) end
     end
-    if #shared > 0 then items = theme.pill(shared, P.pill) end
-    return items
+    if #parts == 0 then return {} end
+    return theme.group(parts, P.pill)
   end
 
   -- Renders only change when a source was sampled, so a tick between samples reuses
@@ -274,6 +266,18 @@ return function(config, wezterm)
       if hit.w > 0 and hit.w <= budget then return hit.items, hit.w end
     end
     return {}, 0
+  end
+
+  -- Every tier richest first as { items, w }, widths included; tiers with nothing to
+  -- show are skipped.
+  function api.tiers()
+    refresh()
+    local out = {}
+    for _, tier in ipairs(TIERS) do
+      local hit = cached(tier)
+      if hit.w > 0 then out[#out + 1] = hit end
+    end
+    return out
   end
 
   -- Width of the narrowest tier, so the header can keep room for it.

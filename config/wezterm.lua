@@ -120,7 +120,19 @@ config.pane_select_bg_color = P.raised
 config.pane_select_fg_color = P.bright
 
 -- Space between the header and the first line of the grid.
-config.window_padding = { left = 20, right = 20, top = 24, bottom = 16 }
+config.window_padding = { left = 20, right = 20, top = 22, bottom = 16 }
+
+-- Header proportions: a taller bar, status groups centred in it with air above and
+-- below, and a hairline under it. These options exist only in the Hivegrid WezTerm
+-- fork; stock WezTerm rejects them, so each is tried on its own.
+for key, value in pairs {
+  tab_bar_height_scale = 2.6,
+  tab_bar_status_scale = 1.75,
+  tab_bar_separator_height = 1,
+  tab_bar_separator_color = P.border,
+} do
+  pcall(function() config[key] = value end)
+end
 
 -- Agent state tracking registers its own update-status first, so the state is fresh below.
 local as = require('agentstatus')(config, wezterm)
@@ -168,10 +180,17 @@ local function tab_layout(parts, tab_index, cap)
   return name, proc, marks, fixed + (utf8.len(name) or #name) + mneed + pneed + TAB_PAD_CELLS
 end
 
--- Right side of the header, left to right: [BROADCAST] cwd, sidebar, pane minimap,
--- agent counts, Claude quota chip, system stats. The chips share one cell budget:
--- what the tabs leave over; the system stats pick a tier that fits and the cwd takes
--- the remainder.
+-- How the right status gives up width: { 'tier', group, tier } takes a group to a
+-- narrower tier, { 'drop', group } removes it (S = the sidebar toggle).
+local PLAN = {
+  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'C', 3 }, { 'tier', 'B', 3 }, { 'drop', 'S' },
+  { 'tier', 'A', 2 }, { 'tier', 'C', 4 }, { 'tier', 'B', 4 }, { 'tier', 'A', 3 }, { 'tier', 'B', 5 },
+  { 'tier', 'A', 4 }, { 'drop', 'C' }, { 'drop', 'B' }, { 'drop', 'A' },
+}
+
+-- Right side of the header, in the cells the tabs leave over: [BROADCAST] [sidebar
+-- toggle] A (path, panes, minimap or agent marks), B (Claude quota), C (system stats).
+-- Every group has tiers; PLAN says which one narrows first.
 wezterm.on('update-status', function(window, pane)
   local cwd = pane:get_current_working_dir()
   local path = cwd and cwd.file_path or ''
@@ -203,85 +222,106 @@ wezterm.on('update-status', function(window, pane)
   local avail = total - used - 1
 
   cq.refresh_if_due(window)
-  local blocks = {}
-  local function add(name, items, w)
-    if #items > 0 then blocks[#blocks + 1] = { name = name, items = items, w = w or theme.width(items) } end
+
+  -- Up to four visual groups: brand (left status), then right to left of the tabs
+  --   [broadcast] [sidebar] A: path, panes, minimap, agent marks   B: quota   C: system
+  -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
+  -- groups fit the free cells.
+  local function short_path(p)
+    if p == '~' then return '~/' end
+    if #p <= 22 then return p end
+    local tail = p:match('([^/]*/[^/]*)/?$') or p:sub(-20)
+    return '…/' .. tail
   end
+  local a_tiers = {}
+  do
+    local minimap = as.minimap(window, { max_width = 28, bare = true })
+    local marks = as.status(window, { bare = true })
+    local function tier(with_path, with_minimap, with_marks)
+      local head = {}
+      if with_path and path ~= '' then
+        head = { { Foreground = { Color = P.muted } }, { Text = short_path(path) .. ' · ' } }
+      end
+      theme.extend(head, { { Foreground = { Color = P.bright } }, { Text = tostring(n) } })
+      local parts = { head }
+      if with_minimap and #minimap > 0 then parts[#parts + 1] = minimap end
+      if with_marks and #marks > 0 then parts[#parts + 1] = marks end
+      local flat = {}
+      for i, part in ipairs(parts) do
+        if i > 1 then
+          theme.extend(flat, { { Foreground = { Color = P.dim } }, { Text = ' │ ' } })
+        end
+        theme.extend(flat, part)
+      end
+      local items = theme.click('agents', theme.pill(flat, P.pill))
+      return { items = items, w = theme.width(items) }
+    end
+    a_tiers = { tier(true, true, false), tier(true, false, true), tier(false, false, true), tier(false, false, false) }
+  end
+  local groups = {
+    A = { tiers = a_tiers },
+    B = { tiers = cq.visible() and cq.tiers() or {} },
+    C = { tiers = ss.visible() and ss.tiers() or {} },
+  }
+  local lead = {}
   if window:active_key_table() == 'broadcast' then
-    add('broadcast', theme.pill({
+    lead[#lead + 1] = theme.pill({
       { Foreground = { Color = P.bright } }, { Attribute = { Intensity = 'Bold' } },
       { Text = 'BROADCAST' },
-    }, '#c23b4a'))
+    }, '#c23b4a')
   end
-  add('sidebar', sb.status(window))
-  add('minimap', as.minimap(window, { max_width = 28 }))
-  add('agents', as.status(window, pane))
-  local quota_tiers, quota_tier = {}, 1
-  if cq.visible() then
-    quota_tiers = cq.tiers()
-    if #quota_tiers > 0 then add('quota', quota_tiers[1].items, quota_tiers[1].w) end
-  end
+  local sidebar_items = sb.status(window)
+  if #sidebar_items > 0 then lead[#lead + 1] = sidebar_items end
+  local lead_w = 0
+  for _, it in ipairs(lead) do lead_w = lead_w + theme.width(it) + 1 end
 
-  -- Each block is one pill, a cell apart; the system stats keep room for their
-  -- narrowest tier before the other blocks are fitted.
-  local reserve = ss.visible() and ss.min_width() or 0
-  if reserve > 0 then reserve = reserve + 1 end
-  local function fixed_width()
-    local w = reserve
-    for _, b in ipairs(blocks) do w = w + b.w + 1 end
+  for _, g in pairs(groups) do g.tier = 1 end
+  local function total()
+    local w = lead_w
+    for _, g in pairs(groups) do
+      local t = g.tiers[g.tier]
+      if t then w = w + t.w + 1 end
+    end
     return w
   end
-  -- The quota pill narrows to its third tier before any other block is given up and
-  -- to its last before the agent counts go; the quota pill itself is dropped last.
-  local function shrink_quota(limit)
-    for _, b in ipairs(blocks) do
-      if b.name == 'quota' then
-        while quota_tier < math.min(limit, #quota_tiers) and fixed_width() > avail do
-          quota_tier = quota_tier + 1
-          b.items, b.w = quota_tiers[quota_tier].items, quota_tiers[quota_tier].w
-        end
-      end
+  for _, step in ipairs(PLAN) do
+    if total() <= avail then break end
+    local g = groups[step[2]]
+    if step[1] == 'tier' then
+      if g.tiers[step[3]] then g.tier = math.max(g.tier, step[3]) end
+    elseif step[1] == 'drop' then
+      if step[2] == 'S' then lead_w, lead = 0, {} else g.tier = math.huge end
     end
   end
-  for _, step in ipairs {
-    { 'shrink', 3 }, { 'drop', 'sidebar' }, { 'drop', 'minimap' },
-    { 'shrink', 5 }, { 'drop', 'agents' }, { 'drop', 'quota' },
-  } do
-    if fixed_width() <= avail then break end
-    if step[1] == 'shrink' then
-      shrink_quota(step[2])
-    else
-      for i, b in ipairs(blocks) do
-        if b.name == step[2] then table.remove(blocks, i) break end
-      end
-    end
-  end
-
-  local left = avail - fixed_width() + reserve
-  local sys_items, sys_w = {}, 0
-  if ss.visible() then sys_items, sys_w = ss.segments { budget = left } end
-  left = left - sys_w - (sys_w > 0 and 1 or 0)
 
   local items = {}
-  local label = string.format('%d pane%s', n, n == 1 and '' or 's')
-  local text = path ~= '' and (path .. '  ' .. label) or label
-  if #text + 4 > left - 1 then text = label end
-  if #text + 4 <= left - 1 then
-    theme.extend(items, theme.pill({
-      { Foreground = { Color = P.muted } }, { Text = text },
-    }, P.pill))
+  for _, it in ipairs(lead) do
+    theme.extend(items, it)
     items[#items + 1] = { Text = ' ' }
   end
-  for _, b in ipairs(blocks) do
-    theme.extend(items, b.items)
-    items[#items + 1] = { Text = ' ' }
+  for _, name in ipairs { 'A', 'B', 'C' } do
+    local t = groups[name].tiers[groups[name].tier]
+    if t then
+      theme.extend(items, t.items)
+      items[#items + 1] = { Text = ' ' }
+    end
   end
-  if sys_w > 0 then
-    theme.extend(items, sys_items)
-    items[#items + 1] = { Text = ' ' }
-  end
-  window:set_left_status(wezterm.format(theme.brand()))
+  window:set_left_status(wezterm.format(theme.click('brand', theme.brand())))
   window:set_right_status(wezterm.format(items))
+end)
+
+-- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
+-- fork, stock WezTerm never emits the event). Unknown ids are ignored.
+wezterm.on('status-click', function(window, pane, id, button)
+  if button ~= 'Left' then return end
+  local account = id:match('^quota:(.+)$')
+  if account then
+    cq.start_omp(window, pane, account)
+  elseif id == 'brand' then
+    window:toast_notification('Hivegrid', 'settings panel coming soon', nil, 3000)
+  elseif id == 'agents' then
+    window:perform_action(as.picker, pane)
+  end
 end)
 
 -- Right-click on the "+" button opens this menu.
@@ -308,25 +348,23 @@ for i, entry in ipairs(config.launch_menu) do
   })
 end
 
--- Tab shape. The fancy bar draws a tab as a rounded-top box whose padding and border
--- take the background of the title's FIRST cell, and paints the other cells over it.
--- The first cell is therefore a full block in the body colour on a lighter rim colour:
--- the rim reads as a lit bezel around a body that blends light to dark left to right.
--- The bar draws no top/bottom edge of its own, so this rim is all the depth available.
+-- Tab shape: the fancy bar draws a tab as a rounded-top box in the background colour of
+-- the title's first cell, so every cell of a title shares one background. The active
+-- tab is a raised box, hover a faint one, and inactive tabs are bare text on the bar.
 wezterm.on('format-tab-title', function(tab, tabs, panes, cfg, hover, max_width)
   local parts = as.tab_parts(tab)
   local name, proc, marks = tab_layout(parts, tab.tab_index, wezterm.GLOBAL.hivegrid_tab_cap)
-  local rim, c1, c2, text, num
+  local bg, text, num
   if tab.is_active then
-    rim, c1, c2, text, num = '#4a78c4', '#2b5199', '#1a3563', P.bright, P.cyan
+    bg, text, num = P.raised, P.bright, P.cyan
   elseif hover then
-    rim, c1, c2, text, num = '#2f4a82', '#1f3563', '#142348', P.text, P.accent
+    bg, text, num = '#18274a', P.text, P.accent
   else
-    rim, c1, c2, text, num = '#1d2d50', '#16233f', '#0e1830', P.muted, P.dim
+    bg, text, num = P.deep, P.muted, P.dim
   end
   local pieces = {
-    { fg = c1, text = '█' },
-    { fg = num, text = ' ' .. (tab.tab_index + 1) .. ' ', bold = true },
+    { fg = text, text = ' ' },
+    { fg = num, text = (tab.tab_index + 1) .. ' ', bold = true },
     { fg = text, text = name, bold = tab.is_active },
   }
   if proc then pieces[#pieces + 1] = { fg = P.dim, text = ' ' .. proc } end
@@ -338,8 +376,7 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, cfg, hover, max_width)
     end
   end
   pieces[#pieces + 1] = { fg = text, text = ' ' }
-  -- Cell 0 keeps `rim` as its background (what the bar reads) while showing body colour.
-  return theme.gradient(pieces, c1, c2, rim)
+  return theme.gradient(pieces, bg, bg)
 end)
 
 wezterm.on('format-window-title', function(tab, pane, tabs, panes, cfg)

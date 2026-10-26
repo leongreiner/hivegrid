@@ -253,11 +253,13 @@ end
 
 local api = { internals = { markers = markers, step = step } }
 
--- Right-status items; refreshes state as a side effect.
-function api.status(window, _)
+-- Right-status items; refreshes state as a side effect. opts.bare returns the marks
+-- without a pill around them, for the caller to place in its own group.
+function api.status(window, opts)
   local _, totals = scan(window)
   local items = marks(totals)
   if #items == 0 then return {} end
+  if type(opts) == 'table' and opts.bare then return items end
   return theme.pill(items, P.pill)
 end
 
@@ -279,6 +281,7 @@ function api.minimap(window, opts)
         local s = STATES[e.st.kind or 'idle']
         return { glyph = s.glyph, color = s.color, active = e.info.is_active, zoomed = e.info.is_zoomed }
       end)
+      if opts and opts.bare then return items end
       return theme.pill(items, P.pill)
     end
   end

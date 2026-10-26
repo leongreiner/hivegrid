@@ -175,70 +175,97 @@ return function(config, wezterm)
     }
   end
 
-  -- Richest first. `crit` is the most critical account, lifted onto the raised
-  -- colour with a bold bright label when it is at least amber.
+  -- Text laid over an account's bar: both windows, or only the worst one when the bar
+  -- is narrow, `login` / `--` when nothing is cached; `~` marks stale numbers.
+  local function bar_text(s, worst_only)
+    if #s.windows == 0 then return s.login and 'login' or '--' end
+    local parts = {}
+    for _, w in ipairs(worst_only and { s.worst } or s.windows) do
+      parts[#parts + 1] = string.format('%s %.0f%%', w[1], w[2].pct)
+    end
+    return (s.login and 'login ' or '') .. table.concat(parts, ' ') .. (s.stale and '~' or '')
+  end
+
+  -- Richest first. `crit` is the most critical account (at least amber): its label is
+  -- bold and bright and its label and bar sit on a raised block. Every tier is one
+  -- continuous group with a divider between accounts, each account a click target.
   local function build_tiers(m, now)
     local sums, crit = m.sums, nil
     for _, s in ipairs(sums) do
       if s.pct >= 50 and (not crit or s.pct > crit.pct) then crit = s end
     end
-    local function bg_of(s) return s == crit and P.raised or P.pill end
-    local function gauge(s)
-      return theme.gauge(math.max(s.pct, 0), GAUGE, s.color, bg_of(s))
-    end
+    local function click(s, items) return theme.click('quota:' .. s.label, items) end
 
-    local function per_account(label_n, with_numbers)
+    -- Label, bar with the numbers inside, and (from 80%) the reset countdown after it.
+    local function account(s, label_n, inner, worst_only)
+      local lit = s == crit
+      local bg = lit and P.raised or P.pill
       local items = {}
-      for _, s in ipairs(sums) do
-        if #items > 0 then items[#items + 1] = { Text = ' ' } end
-        local body = label_items(s, s == crit, label_n)
-        theme.extend(body, gauge(s))
-        body[#body + 1] = { Text = ' ' }
-        if with_numbers then
-          theme.extend(body, numbers(s, now))
-        else
-          theme.extend(body, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
-        end
-        theme.extend(items, theme.pill(body, bg_of(s)))
+      if lit then
+        theme.extend(items, {
+          { Foreground = { Color = P.raised } }, { Background = { Color = P.pill } },
+          { Text = theme.CAP_L }, { Background = { Color = bg } },
+        })
       end
-      return items
+      theme.extend(items, label_items(s, lit, label_n))
+      theme.extend(items, theme.gauge_text(
+        math.max(s.pct, 0), inner + 2, s.color, bg, bar_text(s, worst_only)))
+      if lit then
+        theme.extend(items, {
+          { Text = ' ' }, { Foreground = { Color = P.raised } },
+          { Background = { Color = P.pill } }, { Text = theme.CAP_R },
+        })
+      end
+      items[#items + 1] = { Background = { Color = P.pill } }
+      local reset = s.worst and s.worst[2].reset_at
+      if s.pct >= 80 and type(reset) == 'number' then
+        items[#items + 1] = { Foreground = { Color = P.muted } }
+        items[#items + 1] = { Text = ' ↻' .. remaining(reset - now) }
+      end
+      return click(s, items)
     end
 
-    local function one_pill(label_n)
-      local body = {}
+    local function bars(label_n, inner, worst_only)
+      local parts = {}
+      for _, s in ipairs(sums) do parts[#parts + 1] = account(s, label_n, inner, worst_only) end
+      return theme.group(parts, P.pill)
+    end
+
+    local function compact(label_n)
+      local parts = {}
       for _, s in ipairs(sums) do
-        if #body > 0 then body[#body + 1] = { Text = '  ' } end
-        theme.extend(body, label_items(s, s == crit, label_n))
-        theme.extend(body, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
+        local seg = label_items(s, s == crit, label_n)
+        theme.extend(seg, { { Foreground = { Color = s.color } }, { Text = worst_text(s) } })
+        parts[#parts + 1] = click(s, seg)
       end
-      return theme.pill(body, P.pill)
+      return theme.group(parts, P.pill)
     end
 
     local function dots()
       local body = {}
       for _, s in ipairs(sums) do
-        body[#body + 1] = { Foreground = { Color = s.color } }
-        body[#body + 1] = { Text = '● ' }
+        theme.extend(body, click(s, { { Foreground = { Color = s.color } }, { Text = '● ' } }))
       end
       local c = crit
       if not c then
         for _, s in ipairs(sums) do if not c or s.pct > c.pct then c = s end end
       end
-      theme.extend(body, label_items(c, true))
+      local seg = label_items(c, true)
       if c.pct < 0 then
-        theme.extend(body, { { Foreground = { Color = c.color } }, { Text = worst_text(c) } })
+        theme.extend(seg, { { Foreground = { Color = c.color } }, { Text = worst_text(c) } })
       else
-        theme.extend(body, {
+        theme.extend(seg, {
           { Foreground = { Color = P.muted } }, { Text = c.worst[1] .. ' ' },
           { Foreground = { Color = c.color } }, { Text = worst_text(c) },
         })
       end
+      theme.extend(body, click(c, seg))
       return theme.pill(body, crit and P.raised or P.pill)
     end
 
     local out = {}
     for _, items in ipairs {
-      per_account(nil, true), per_account(4, false), one_pill(4), one_pill(1), dots(),
+      bars(7, 13, false), bars(4, 12, false), bars(4, 8, true), compact(4), dots(),
     } do
       out[#out + 1] = { items = items, w = theme.width(items) }
     end
