@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Claude Code usage windows (5h / 7d) for several accounts, cached for the WezTerm header.
 
+Accounts: env CLAUDE_QUOTA_DIRS (or --dirs) wins; otherwise the list in
+~/.config/hivegrid/settings.json (written by hivegrid-settings; hidden ones are skipped) plus every
+~/.claude-* directory it does not mention that holds a .credentials.json; without that file, the
+discovered directories alone (existence of the credentials file is checked, never its contents).
+
 refresh: poll https://api.anthropic.com/api/oauth/usage per account (protocol as in
          agent-quota.wezterm: OAuth bearer + anthropic-beta header), write
          ~/.cache/wezterm-claude-quota/<label>.json.
@@ -25,7 +30,7 @@ from pathlib import Path
 
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 HOME = Path.home()
-DEFAULT_DIRS = [HOME / ".claude", HOME / ".claude-2", HOME / ".claude-private"]
+SETTINGS = Path(os.environ.get("HIVEGRID_SETTINGS") or HOME / ".config" / "hivegrid" / "settings.json")
 CACHE_DIR = Path(os.environ.get("CLAUDE_QUOTA_CACHE_DIR") or HOME / ".cache" / "wezterm-claude-quota")
 OK_TTL = 60
 ERR_BASE, RATE_BASE, LOGIN_TTL, MAX_BACKOFF = 30, 300, 30, 1800
@@ -33,6 +38,8 @@ HTTP_TIMEOUT = 5
 LOCK_STALE = 90
 STALE_AFTER = 180  # a shown number older than this gets the "~" mark
 VERSION_TTL = 86400
+HISTORY_KEEP = 30 * 86400  # history.jsonl keeps this much; trimmed once it holds 1 day more
+HISTORY_EVERY = 120  # at most one sample per account this often, unless a number moved by >= 1 point
 
 # ---- pure logic --------------------------------------------------------------
 
@@ -42,6 +49,54 @@ def label_for(path):
     name = Path(path).name.lstrip(".")
     name = re.sub(r"^claude[-_.]?", "", name)
     return name or "main"
+
+
+def discover_dirs(home=None):
+    """~/.claude and ~/.claude-* directories that hold a .credentials.json (existence only)."""
+    home = Path(home or HOME)
+    try:
+        names = sorted(p.name for p in home.iterdir())
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if name == ".claude" or (name.startswith(".claude-") and len(name) > len(".claude-")):
+            d = home / name
+            if d.is_dir() and (d / ".credentials.json").exists():
+                found.append(d)
+    order = {".claude": 0, ".claude-2": 1, ".claude-private": 2}
+    found.sort(key=lambda d: (order.get(d.name, 99), d.name))
+    return found
+
+
+def settings_accounts(path=None):
+    """[(dir, label)] from settings.json, or None when the file has no account list."""
+    try:
+        data = json.loads(Path(path or SETTINGS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    if not isinstance(accounts, list):
+        return None
+    out = []
+    for a in accounts:
+        if not isinstance(a, dict) or not isinstance(a.get("dir"), str) or not isinstance(a.get("label"), str):
+            continue
+        d = a["dir"]
+        d = str(HOME) + d[1:] if d.startswith("~/") else d
+        out.append((Path(d), a["label"], bool(a.get("hidden"))))
+    return out
+
+
+def default_accounts():
+    """[(dir, label)]: the settings list without hidden entries, then undiscovered credentials dirs."""
+    configured = settings_accounts()
+    listed = {d for d, _, _ in configured or []}
+    out = [(d, lb) for d, lb, hidden in configured or [] if not hidden]
+    for d in discover_dirs():
+        if d not in listed:
+            out.append((d, label_for(d)))
+    return out
 
 
 def parse_ts(value):
@@ -274,6 +329,63 @@ def fetch(token, version):
     return ("ok", windows, 200, None) if windows else ("error", None, 200, None)
 
 
+def history_path():
+    return CACHE_DIR / "history.jsonl"
+
+
+def history_due(prev, entry, now):
+    """Sample after a good fetch: first one, every HISTORY_EVERY seconds, or when a number moved."""
+    last = (prev or {}).get("hist") if isinstance(prev, dict) else None
+    if not isinstance(last, dict):
+        return True
+    if now - (last.get("ts") or 0) >= HISTORY_EVERY:
+        return True
+    for key in ("five_hour", "seven_day"):
+        w = entry.get(key)
+        old = last.get(key)
+        if isinstance(w, dict) and (not isinstance(old, (int, float)) or abs(w["pct"] - old) >= 1):
+            return True
+    return False
+
+
+def append_history(entry, now):
+    """One line per sample: ts, label and both windows (percent and reset time). No credentials."""
+    path = history_path()
+    line = json.dumps({"ts": int(now), "label": entry["label"], "five_hour": entry.get("five_hour"),
+                       "seven_day": entry.get("seven_day")}, separators=(",", ":")) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(line)
+    trim_history(path, now)
+
+
+def trim_history(path, now):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first = f.readline()
+        oldest = json.loads(first).get("ts") if first else None
+    except (OSError, ValueError):
+        return
+    if not isinstance(oldest, (int, float)) or now - oldest <= HISTORY_KEEP + 86400:
+        return
+    keep = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    if json.loads(raw).get("ts", 0) >= now - HISTORY_KEEP:
+                        keep.append(raw if raw.endswith("\n") else raw + "\n")
+                except ValueError:
+                    continue
+        tmp = path.with_name(f".history.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.writelines(keep)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def refresh_one(cred_dir, label, order, version, now):
     prev = read_entry(label)
     if not is_due(prev, now):
@@ -285,6 +397,17 @@ def refresh_one(cred_dir, label, order, version, now):
         kind, windows, http, ra = fetch(token, version)
     token = None
     entry = next_entry(prev, label, order, kind, now, windows, http, ra)
+    if kind == "ok":
+        if history_due(prev, entry, now):
+            try:
+                append_history(entry, now)
+                entry["hist"] = {"ts": int(now), **{k: entry[k]["pct"] for k in ("five_hour", "seven_day") if isinstance(entry.get(k), dict)}}
+            except OSError:
+                pass
+        elif isinstance(prev, dict) and "hist" in prev:
+            entry["hist"] = prev["hist"]
+    elif isinstance(prev, dict) and "hist" in prev:
+        entry["hist"] = prev["hist"]
     write_entry(entry)
     return entry, True
 
@@ -300,6 +423,8 @@ def cmd_refresh(args):
             return 0
         now = time.time()
         version = claude_version()
+        if not dirs:
+            return 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(dirs)) as ex:
             futs = [ex.submit(refresh_one, d, lb, i, version, now) for i, (d, lb) in enumerate(zip(dirs, labels))]
             results = [f.result() for f in futs]
@@ -321,11 +446,14 @@ def cmd_show(args):
 def resolve_dirs(args):
     raw = args.dirs or os.environ.get("CLAUDE_QUOTA_DIRS")
     if not raw:
-        return DEFAULT_DIRS
+        return [d for d, _ in default_accounts()]
     return [Path(p).expanduser() for p in re.split(r"[,:]", raw) if p]
 
 
 def resolve_labels(args, dirs):
+    explicit = args.dirs or os.environ.get("CLAUDE_QUOTA_DIRS")
+    if not explicit and not args.labels:
+        return [lb for _, lb in default_accounts()]
     if args.labels:
         labels = args.labels.split(",")
         if len(labels) != len(dirs):

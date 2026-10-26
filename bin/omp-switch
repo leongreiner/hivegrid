@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Move a running omp chat to another omp profile (account), for the WezTerm header.
+
+locate:   find the session of the omp process --pid (profile --from). Read-only.
+          -> {"state": "ok", "session": PATH, "cwd": DIR} | {"state": "none"} | {"state": "error", "reason": ...}
+transfer: after that omp has exited, make the session available to profile --to:
+          the session file, its sibling artifact directory and the blobs it references are
+          copied under the same relative names. Nothing of the source profile is modified.
+          -> {"state": "ok", "session": PATH_IN_TARGET} | {"state": "error", "reason": ...}
+
+How the session is found (omp 18): omp records the session of each terminal in
+<profile>/agent/terminal-sessions/pts-N (line 1 the cwd, line 2 the session file, a
+`fresh` line while no message has been written yet) and holds the file open once it
+appends to it. Only paths and names are read, never the conversation or credentials.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+BLOB_RE = re.compile(rb"blob:sha256:([0-9a-f]{64})")
+
+
+def profile_agent(profile):
+    return Path.home() / ".omp" / "profiles" / profile / "agent"
+
+
+def check_profile(name):
+    if not NAME_RE.match(name or ""):
+        raise Failure(f"invalid profile name {name!r}")
+    return name
+
+
+class Failure(Exception):
+    pass
+
+
+def under(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def open_session_files(pid, sessions_root):
+    """jsonl files of the profile that the process holds open."""
+    found = []
+    fd_dir = Path(f"/proc/{pid}/fd")
+    try:
+        entries = list(fd_dir.iterdir())
+    except OSError:
+        return found
+    for e in entries:
+        try:
+            target = os.readlink(e)
+        except OSError:
+            continue
+        if target.endswith(".jsonl") and under(target, sessions_root):
+            found.append(target)
+    return found
+
+
+def read_terminal_record(agent, pid):
+    try:
+        tty = os.readlink(f"/proc/{pid}/fd/0")
+    except OSError:
+        return None
+    m = re.fullmatch(r"/dev/pts/(\d+)", tty)
+    if not m:
+        return None
+    try:
+        lines = (agent / "terminal-sessions" / f"pts-{m.group(1)}").read_text().splitlines()
+    except OSError:
+        return None
+    if len(lines) < 2:
+        return None
+    return {"cwd": lines[0], "session": lines[1], "fresh": "fresh" in lines[2:]}
+
+
+def locate(pid, src):
+    agent = profile_agent(src)
+    sessions = agent / "sessions"
+    if not agent.is_dir():
+        raise Failure(f"profile {src} has no data directory")
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        raise Failure("cannot inspect the omp process")
+    held = open_session_files(pid, sessions)
+    rec = read_terminal_record(agent, pid)
+    if held:
+        if len(held) > 1 and not (rec and rec["session"] in held):
+            raise Failure("more than one session is open; cannot tell which one is the chat")
+        session = rec["session"] if rec and rec["session"] in held else held[0]
+        return {"state": "ok", "session": session, "cwd": cwd}
+    if rec is None:
+        raise Failure("session not found: omp left no record for this terminal")
+    if os.path.realpath(rec["cwd"]) != os.path.realpath(cwd):
+        raise Failure("session not found: the terminal record belongs to another directory")
+    if not under(rec["session"], sessions):
+        raise Failure("session not found: record points outside the profile")
+    if not Path(rec["session"]).is_file():
+        if rec["fresh"]:
+            return {"state": "none"}
+        raise Failure("session not found: the recorded file is missing")
+    return {"state": "ok", "session": rec["session"], "cwd": cwd}
+
+
+def body_after_title(data):
+    """Everything after the first line: omp rewrites that title line in place."""
+    i = data.find(b"\n")
+    return data[i + 1:] if i >= 0 else b""
+
+
+def copy_file_new(src, dst):
+    """Copy src to dst atomically, never replacing an existing dst. -> True when written."""
+    if dst.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=".omp-switch.")
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.link(tmp, dst)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        os.unlink(tmp)
+
+
+def copy_tree_new(src, dst):
+    for root, _dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        (dst / rel).mkdir(parents=True, exist_ok=True)
+        for f in files:
+            copy_file_new(Path(root) / f, dst / rel / f)
+
+
+def transfer(session, src, dst):
+    src_sessions = profile_agent(src) / "sessions"
+    session = Path(session)
+    if not under(session, src_sessions) or session.suffix != ".jsonl" or not session.is_file():
+        raise Failure("session file not found in the source profile")
+    rel = session.resolve().relative_to(src_sessions.resolve())
+    dst_agent = profile_agent(dst)
+    target = dst_agent / "sessions" / rel
+    data = session.read_bytes()
+
+    if target.exists():
+        have = target.read_bytes()
+        mine, theirs = body_after_title(data), body_after_title(have)
+        if have == data or theirs.startswith(mine):
+            pass  # already there, or the target is ahead: resume it as it is
+        elif mine.startswith(theirs):
+            fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".omp-switch.")
+            os.close(fd)
+            shutil.copy2(session, tmp)
+            os.replace(tmp, target)  # the target held an older part of this chat
+        else:
+            raise Failure(f"profile {dst} already has a different chat under this session name")
+    else:
+        copy_file_new(session, target)
+
+    artifacts = session.with_suffix("")
+    if artifacts.is_dir():
+        copy_tree_new(artifacts, target.with_suffix(""))
+
+    blobs_src, blobs_dst = profile_agent(src) / "blobs", dst_agent / "blobs"
+    for h in {m.decode() for m in BLOB_RE.findall(data)}:
+        for b in blobs_src.glob(h + "*"):
+            if b.is_file():
+                copy_file_new(b, blobs_dst / b.name)
+    return {"state": "ok", "session": str(target)}
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="omp-switch", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    a = sub.add_parser("locate", help="find the session of a running omp")
+    a.add_argument("--pid", type=int, required=True)
+    a.add_argument("--from", dest="src", required=True)
+    b = sub.add_parser("transfer", help="copy a session into another profile")
+    b.add_argument("--session", required=True)
+    b.add_argument("--from", dest="src", required=True)
+    b.add_argument("--to", dest="dst", required=True)
+    args = p.parse_args(argv)
+    try:
+        check_profile(args.src)
+        if args.cmd == "locate":
+            out = locate(args.pid, args.src)
+        else:
+            out = transfer(args.session, args.src, check_profile(args.dst))
+    except Failure as exc:
+        out = {"state": "error", "reason": str(exc)}
+    except OSError as exc:
+        out = {"state": "error", "reason": f"{type(exc).__name__}: {exc.strerror or exc}"}
+    print(json.dumps(out))
+    return 0 if out["state"] != "error" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -322,6 +322,11 @@ function api.bell(window, pane)
   end
 end
 
+-- State kind of a pane ('working', 'ask', 'waiting', ...) as of the last scan, nil if unknown.
+function api.pane_kind(pane_id)
+  return panes[pane_id] and panes[pane_id].kind or nil
+end
+
 function api.pane_label(pane_id)
   return panes[pane_id] and panes[pane_id].label or nil
 end

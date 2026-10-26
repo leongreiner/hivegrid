@@ -9,6 +9,12 @@
 --                             countdowns of every account
 -- Reads only the numbers cached by ~/.local/bin/claude-quota (io.open, re-read at most every 5 s);
 -- the network and credentials are never touched from the GUI thread.
+-- The accounts shown come from settings.lua (the panel's list, else today's three, plus any
+-- ~/.claude-<name> directory with credentials): one pill per account, in that order, and an
+-- account without cached numbers yet shows `--`. When the list changes the config reloads.
+-- Picking an account (pill click, ALT+q row, LEADER+u <n>) starts omp with its profile, or,
+-- when omp already runs in the pane under another profile, moves that chat over (see
+-- switch_account).
 -- Marks: `login` (token expired or rejected), `err` (failed, nothing cached), `~` (numbers stale).
 return function(config, wezterm)
   local theme = require 'theme'
@@ -18,6 +24,8 @@ return function(config, wezterm)
   local DIR = os.getenv('CLAUDE_QUOTA_CACHE_DIR') or (HOME .. '/.cache/wezterm-claude-quota')
   local BIN = os.getenv('CLAUDE_QUOTA_BIN') or (HOME .. '/.local/bin/claude-quota')
   local BLOCK, LABEL_MAX = '▮', 4
+  local S = require('settings')(config, wezterm)
+  local accounts_at_load = S.signature()
 
   local cache = { t = -math.huge, entries = {} }
 
@@ -45,9 +53,17 @@ return function(config, wezterm)
         end
       end
     end
-    table.sort(entries, function(a, b) return (a.order or 0) < (b.order or 0) end)
-    cache.entries = entries
-    return entries
+    -- Only the configured accounts, in their order; a removed account's cache file is ignored.
+    local by_label = {}
+    for _, e in ipairs(entries) do by_label[tostring(e.label)] = e end
+    local shown = {}
+    for _, a in ipairs(S.accounts()) do
+      local e = by_label[a.label]
+      if not e and a.creds then e = { label = a.label, state = 'none' } end
+      if e then shown[#shown + 1] = e end
+    end
+    cache.entries = shown
+    return shown
   end
 
   local function color(pct)
@@ -304,6 +320,11 @@ return function(config, wezterm)
 
   -- Per-account due-ness and backoff live in the helper; this only paces the spawns.
   function api.refresh_if_due(_window)
+    -- An account came or went (a new ~/.claude-<name>): reload so the key table follows.
+    if S.signature() ~= accounts_at_load and os.time() - (wezterm.GLOBAL.claudequota_reloaded or 0) > 10 then
+      wezterm.GLOBAL.claudequota_reloaded = os.time()
+      pcall(wezterm.reload_configuration)
+    end
     if not api.visible() then return end
     local now = os.time()
     if now - (wezterm.GLOBAL.claudequota_spawned or 0) < SPAWN_EVERY then return end
@@ -351,17 +372,35 @@ return function(config, wezterm)
     return wezterm.format(items)
   end
 
-  -- Starting omp for an account -----------------------------------------------
-  -- omp picks its account with --profile (or OMP_PROFILE), not CLAUDE_CONFIG_DIR; the
-  -- profiles pair with the Claude config dirs ~/.claude, ~/.claude-2, ~/.claude-private
-  -- exactly as the claude-work / claude-team / claude-private aliases do.
-  local PROFILES = { main = 'work', ['2'] = 'team', private = 'private' }
+  -- Starting omp for an account / switching a running omp -----------------------
+  -- omp picks its account with --profile (or OMP_PROFILE), not CLAUDE_CONFIG_DIR; the profile
+  -- paired with each account comes from settings.lua.
   local DEFAULT_PROFILE = 'work' -- what a bare `omp` uses (OMP_PROFILE default in ~/.bashrc)
   local SHELLS = { bash = true, zsh = true, fish = true, sh = true, dash = true }
+  local SWITCH_BIN = os.getenv('OMP_SWITCH_BIN') or (HOME .. '/.local/bin/omp-switch')
+  local EXIT_KEY = '\x04' -- Ctrl+D on an empty prompt quits omp; with a draft it does nothing
+  local EXIT_WAIT, EXIT_POLL = 5, 0.25 -- seconds to wait for omp to hand the pane back
 
-  local function toast(window, msg) window:toast_notification('Hivegrid', msg, nil, 4000) end
+  local function toast(window, msg)
+    wezterm.log_info('hivegrid: ' .. msg)
+    window:toast_notification('Hivegrid', msg, nil, 4000)
+  end
 
   local function basename(p) return (tostring(p or ''):match('([^/]+)$') or ''):gsub('^%-', '') end
+
+  local function profile_of(label)
+    for _, a in ipairs(S.accounts()) do
+      if a.label == label then return a.profile end
+    end
+    return nil
+  end
+
+  local function label_of(profile)
+    for _, a in ipairs(S.accounts()) do
+      if a.profile == profile then return a.label end
+    end
+    return nil
+  end
 
   -- The pane to type into: the active one, or the last non-sidebar pane when the
   -- sidebar has focus.
@@ -395,10 +434,104 @@ return function(config, wezterm)
     return env:match('%f[^%z]OMP_PROFILE=([^%z]*)') or env:match('^OMP_PROFILE=([^%z]*)') or DEFAULT_PROFILE
   end
 
+  local function shquote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+
+  -- Runs an omp-switch subcommand and returns its JSON answer.
+  local function omp_switch(args)
+    local cmd = { SWITCH_BIN }
+    for _, a in ipairs(args) do cmd[#cmd + 1] = tostring(a) end
+    local _, out = wezterm.run_child_process(cmd)
+    local ok, res = pcall(wezterm.json_parse, out or '')
+    if ok and type(res) == 'table' then return res end
+    return { state = 'error', reason = 'omp-switch gave no answer' }
+  end
+
+  local function foreground_name(pane)
+    local ok, info = pcall(function() return pane:get_foreground_process_info() end)
+    if not ok or not info then return nil end
+    return basename(info.name or (info.argv or {})[1])
+  end
+
+  -- Waits until `pane` shows a shell again, calling done(true) then, or done(false) after
+  -- EXIT_WAIT seconds. Never kills anything.
+  local function wait_for_shell(pane, done)
+    local waited = 0
+    local function poll()
+      if SHELLS[foreground_name(pane) or ''] then return done(true) end
+      waited = waited + EXIT_POLL
+      if waited >= EXIT_WAIT then return done(false) end
+      wezterm.time.call_after(EXIT_POLL, poll)
+    end
+    wezterm.time.call_after(EXIT_POLL, poll)
+  end
+
+  -- Moves the chat of the omp running in `target` from `from` to `profile`:
+  --   1. omp-switch locate finds the session (nothing is touched yet);
+  --   2. omp is asked to quit with Ctrl+D and given EXIT_WAIT seconds; if it stays (a draft
+  --      in the prompt, a turn still running) the switch is abandoned and omp keeps running;
+  --   3. omp-switch transfer copies the finished session, its artifacts and blobs into the
+  --      other profile (never overwriting, never touching the first profile's files);
+  --   4. `omp --profile=<to> --resume <copy>` continues the same chat. No session yet: a
+  --      fresh omp under the new profile.
+  local function switch_account(window, target, info, from, profile, label)
+    local busy = wezterm.GLOBAL.omp_switching or {}
+    wezterm.GLOBAL.omp_switching = busy
+    local id = tostring(target:pane_id())
+    if busy[id] and os.time() - busy[id] < 20 then
+      return toast(window, 'An account switch is already running in this pane')
+    end
+
+    local loc = omp_switch { 'locate', '--pid', info.pid, '--from', from }
+    if loc.state == 'error' then
+      return toast(window, 'Account switch aborted, omp keeps running: ' .. tostring(loc.reason))
+    end
+    busy[id] = os.time()
+
+    local function finish(ok, msg)
+      busy[id] = nil
+      toast(window, msg)
+      return ok
+    end
+
+    local function resume_in_shell()
+      local cmd = 'omp --profile=' .. profile
+      if loc.state == 'ok' then
+        local moved = omp_switch { 'transfer', '--session', loc.session, '--from', from, '--to', profile }
+        if moved.state ~= 'ok' then
+          return finish(false, string.format('omp exited but the chat could not be moved: %s', tostring(moved.reason)))
+        end
+        cmd = cmd .. ' --resume ' .. shquote(moved.session)
+        -- A shell that is not where omp ran would resume the chat in the wrong directory.
+        local cwd = target:get_current_working_dir()
+        local here = cwd and (cwd.file_path or tostring(cwd)) or nil
+        if loc.cwd and here and here:gsub('/+$', '') ~= loc.cwd:gsub('/+$', '') then
+          cmd = 'cd ' .. shquote(loc.cwd) .. ' && ' .. cmd
+        end
+      end
+      target:send_text(cmd .. '\r')
+      return finish(true, string.format('omp moved to account %s (%s)', label, profile))
+    end
+
+    -- A turn in progress is interrupted first (Escape); an idle prompt ignores it.
+    if info.working then
+      target:send_text('\x1b')
+      wezterm.time.call_after(0.4, function() target:send_text(EXIT_KEY) end)
+    else
+      target:send_text(EXIT_KEY)
+    end
+    wait_for_shell(target, function(exited)
+      if not exited then
+        return finish(false, 'omp did not quit (unsent text in its prompt?); account not switched, omp keeps running')
+      end
+      resume_in_shell()
+    end)
+  end
+
   local function start_omp(window, pane, label)
-    local profile = PROFILES[label]
+    local profile = profile_of(label)
     if not profile then
-      return toast(window, 'No omp profile is paired with account ' .. tostring(label))
+      return toast(window, 'No omp profile is paired with account ' .. tostring(label)
+        .. '; choose one in the settings panel')
     end
     local target = target_pane(window, pane)
     local info = target and target:get_foreground_process_info()
@@ -407,12 +540,27 @@ return function(config, wezterm)
     if name == 'omp' then
       local running = running_profile(info)
       if running == profile then return toast(window, 'omp is already running with account ' .. label) end
-      local account = running
-      for l, p in pairs(PROFILES) do
-        if p == running then account = string.format('%s (%s)', l, p) end
+      if not running or not profile then
+        return toast(window, 'Cannot tell which account omp is running with')
       end
-      return toast(window, string.format('omp is running with account %s in this pane',
-        account or 'unknown'))
+      local kind = api.pane_kind and api.pane_kind(target:pane_id())
+      local function go(working)
+        info.working = working
+        switch_account(window, target, info, running, profile, label)
+      end
+      if kind == 'working' or kind == 'ask' then
+        window:perform_action(wezterm.action.InputSelector {
+          title = 'Switch account',
+          description = string.format('omp is %s in this pane. Switch to %s anyway? Esc keeps omp as it is.',
+            kind == 'ask' and 'waiting for an answer' or 'working', label),
+          choices = { { id = 'no', label = 'No, keep omp running' }, { id = 'yes', label = 'Yes, switch now' } },
+          action = wezterm.action_callback(function(_, _, id)
+            if id == 'yes' then go(true) end
+          end),
+        }, target)
+        return
+      end
+      return go(false)
     end
     if not SHELLS[name] then
       return toast(window, string.format('%s is running in this pane, not a shell prompt', name))
@@ -420,6 +568,10 @@ return function(config, wezterm)
     target:send_text('omp --profile=' .. profile .. '\r')
   end
   api.start_omp = start_omp
+
+  -- The parent hands over agentstatus' per-pane state lookup (as.pane_kind) so a switch can
+  -- ask before interrupting a working agent.
+  function api.set_pane_kind(fn) api.pane_kind = fn end
 
   -- Alt+q: the selector doubles as the account list; Enter or a click on a row starts omp.
   api.select = wezterm.action_callback(function(window, pane)
@@ -451,25 +603,35 @@ return function(config, wezterm)
 
   if wezterm.GLOBAL.claudequota_visible == nil then wezterm.GLOBAL.claudequota_visible = true end
   config.keys = config.keys or {}
-  table.insert(config.keys, { key = 'q', mods = 'ALT', action = api.select })
-  -- LEADER+u then 1/2/3 starts omp for main / 2 / private without the popup.
+  local popup = S.key('quota_popup', 'ALT+q')
+  table.insert(config.keys, { key = popup.key, mods = popup.mods, action = api.select })
+  -- LEADER+u then 1..9 starts omp for the n-th account (main / 2 / private today) without
+  -- the popup. The key is resolved when pressed, so the order follows the account list.
   config.key_tables = config.key_tables or {}
-  config.key_tables.omp_account = {
-    { key = '1', action = wezterm.action_callback(function(w, p) start_omp(w, p, 'main') end) },
-    { key = '2', action = wezterm.action_callback(function(w, p) start_omp(w, p, '2') end) },
-    { key = '3', action = wezterm.action_callback(function(w, p) start_omp(w, p, 'private') end) },
-    { key = 'Escape', action = wezterm.action.PopKeyTable },
-  }
+  local account_keys = {}
+  for i = 1, math.min(#S.accounts(), 9) do
+    account_keys[#account_keys + 1] = {
+      key = tostring(i),
+      action = wezterm.action_callback(function(w, p)
+        local a = S.accounts()[i]
+        if a then start_omp(w, p, a.label) else toast(w, 'No account number ' .. i) end
+      end),
+    }
+  end
+  account_keys[#account_keys + 1] = { key = 'Escape', action = wezterm.action.PopKeyTable }
+  config.key_tables.omp_account = account_keys
+  local launch = S.key('quota_launch', 'LEADER+u')
   table.insert(config.keys, {
-    key = 'u',
-    mods = 'LEADER',
+    key = launch.key,
+    mods = launch.mods,
     action = wezterm.action.ActivateKeyTable {
       name = 'omp_account', one_shot = true, timeout_milliseconds = 4000,
     },
   })
+  local toggle = S.key('quota_toggle', 'LEADER+q')
   table.insert(config.keys, {
-    key = 'q',
-    mods = 'LEADER',
+    key = toggle.key,
+    mods = toggle.mods,
     action = wezterm.action_callback(function()
       wezterm.GLOBAL.claudequota_visible = not api.visible()
     end),
