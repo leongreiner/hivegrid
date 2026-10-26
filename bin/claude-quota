@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Claude Code usage windows (5h / 7d) for several accounts, cached for the WezTerm header.
+
+refresh: poll https://api.anthropic.com/api/oauth/usage per account (protocol as in
+         agent-quota.wezterm: OAuth bearer + anthropic-beta header), write
+         ~/.cache/wezterm-claude-quota/<label>.json.
+show:    print a one-line summary from that cache.
+
+Read-only on credentials: tokens live only in memory and the request header; an
+expired token is reported as `login`, never refreshed. The cache holds numbers,
+timestamps and a state string only.
+"""
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+API_URL = "https://api.anthropic.com/api/oauth/usage"
+HOME = Path.home()
+DEFAULT_DIRS = [HOME / ".claude", HOME / ".claude-2", HOME / ".claude-private"]
+CACHE_DIR = Path(os.environ.get("CLAUDE_QUOTA_CACHE_DIR") or HOME / ".cache" / "wezterm-claude-quota")
+OK_TTL = 60
+ERR_BASE, RATE_BASE, LOGIN_TTL, MAX_BACKOFF = 30, 300, 30, 1800
+HTTP_TIMEOUT = 5
+LOCK_STALE = 90
+STALE_AFTER = 180  # a shown number older than this gets the "~" mark
+VERSION_TTL = 86400
+
+# ---- pure logic --------------------------------------------------------------
+
+
+def label_for(path):
+    """~/.claude -> main, ~/.claude-2 -> 2, ~/.claude-private -> private."""
+    name = Path(path).name.lstrip(".")
+    name = re.sub(r"^claude[-_.]?", "", name)
+    return name or "main"
+
+
+def parse_ts(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    s = value.strip().replace("Z", "+00:00")
+    # fromisoformat before 3.11 only accepts 3 or 6 fractional digits.
+    s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.timestamp()
+
+
+def parse_usage(payload):
+    """five_hour / seven_day windows -> {'five_hour': {pct, reset_at}, ...} or None."""
+    if not isinstance(payload, dict):
+        return None
+    out = {}
+    for key in ("five_hour", "seven_day"):
+        w = payload.get(key)
+        if not isinstance(w, dict):
+            continue
+        pct = w.get("utilization")
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0 <= pct <= 100:
+            continue
+        out[key] = {"pct": float(pct), "reset_at": parse_ts(w.get("resets_at"))}
+    return out or None
+
+
+def backoff(kind, fails, retry_after=None):
+    """Seconds until the next request. fails counts consecutive failures including this one."""
+    if kind == "ok":
+        return OK_TTL
+    if kind == "login":
+        return LOGIN_TTL
+    base = RATE_BASE if kind == "rate_limited" else ERR_BASE
+    delay = min(MAX_BACKOFF, base * 2 ** max(0, fails - 1))
+    if retry_after is not None:
+        delay = max(delay, min(MAX_BACKOFF, retry_after))
+    return delay
+
+
+def fmt_remaining(secs):
+    if secs is None:
+        return ""
+    if secs <= 0:
+        return "now"
+    m = int(secs // 60)
+    if m >= 1440:
+        return f"{m // 1440}d{m % 1440 // 60}h"
+    if m >= 60:
+        return f"{m // 60}h{m % 60:02d}m"
+    return f"{max(m, 1)}m"
+
+
+def read_token(cred_dir, now):
+    """-> (token, None) or (None, 'login'). Never logs or returns anything but the token."""
+    try:
+        data = json.loads((Path(cred_dir) / ".credentials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "login"
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return None, "login"
+    token, exp = oauth.get("accessToken"), oauth.get("expiresAt")
+    if not isinstance(token, str) or not token or not isinstance(exp, (int, float)):
+        return None, "login"
+    if exp <= now * 1000:
+        return None, "login"
+    return token, None
+
+
+def next_entry(prev, label, order, kind, now, windows=None, http=None, retry_after=None):
+    """New cache record; failures keep the last good numbers so the header can mark them stale."""
+    prev = prev if isinstance(prev, dict) else {}
+    fails = 0 if kind == "ok" else int(prev.get("fails", 0) or 0) + 1
+    entry = {
+        "label": label, "order": order, "state": kind, "http": http,
+        "checked_at": now, "next_at": now + backoff(kind, fails, retry_after), "fails": fails,
+        "updated_at": prev.get("updated_at"),
+        "five_hour": prev.get("five_hour"), "seven_day": prev.get("seven_day"),
+    }
+    if kind == "ok":
+        entry.update(updated_at=now, five_hour=windows.get("five_hour"), seven_day=windows.get("seven_day"))
+    return entry
+
+
+def is_due(entry, now):
+    return not isinstance(entry, dict) or now >= (entry.get("next_at") or 0)
+
+
+def render(entries, now, compact=False):
+    parts = []
+    for e in sorted(entries, key=lambda e: e.get("order", 0)):
+        wins = [(k, e.get(f)) for k, f in (("5h", "five_hour"), ("7d", "seven_day")) if isinstance(e.get(f), dict)]
+        state = e.get("state")
+        mark = ""
+        if wins:
+            stale = state != "ok" or now - (e.get("updated_at") or 0) > STALE_AFTER
+            past = any((w["reset_at"] or now + 1) < now for _, w in wins)
+            mark = "~" if stale or past else ""
+        if state == "login" and not wins:
+            body = "login"
+        elif not wins:
+            body = "err"
+        elif compact:
+            k, w = max(wins, key=lambda kw: kw[1]["pct"])
+            body = f"{k} {w['pct']:.0f}%{mark}"
+        else:
+            segs = []
+            for k, w in wins:
+                s = f"{k} {w['pct']:.0f}%"
+                rem = fmt_remaining(w["reset_at"] - now) if w["reset_at"] else ""
+                segs.append(f"{s} {rem}".rstrip())
+            body = " | ".join(segs) + mark
+        if state == "login" and wins:
+            body += " login"
+        parts.append(f"{e.get('label', '?')} {body}")
+    return "  ".join(parts) if parts else "no data"
+
+
+# ---- I/O ----------------------------------------------------------------------
+
+
+def ensure_cache_dir():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(CACHE_DIR, 0o700)
+
+
+def read_entry(label):
+    try:
+        return json.loads((CACHE_DIR / f"{label}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def write_entry(entry):
+    path = CACHE_DIR / f"{entry['label']}.json"
+    tmp = CACHE_DIR / f".{entry['label']}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(entry, f)
+    os.replace(tmp, path)
+
+
+class Lock:
+    """mkdir lock; a lock older than LOCK_STALE belongs to a crashed run."""
+
+    def __init__(self):
+        self.path = CACHE_DIR / "refresh.lock"
+
+    def __enter__(self):
+        for _ in range(2):
+            try:
+                os.mkdir(self.path, 0o700)
+                return True
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > LOCK_STALE:
+                        os.rmdir(self.path)
+                        continue
+                except OSError:
+                    pass
+                return False
+        return False
+
+    def __exit__(self, *exc):
+        try:
+            os.rmdir(self.path)
+        except OSError:
+            pass
+
+
+def claude_version():
+    """Cached `claude --version`; only the User-Agent suffix, so staleness is harmless."""
+    vfile = CACHE_DIR / "version"
+    try:
+        if time.time() - vfile.stat().st_mtime < VERSION_TTL:
+            return vfile.read_text().strip() or "unknown"
+    except OSError:
+        pass
+    ver = "unknown"
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=3, check=False)
+        m = re.search(r"\d+\.\d+\.\d+", r.stdout)
+        ver = m.group(0) if m else ver
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        fd = os.open(vfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(ver)
+    except OSError:
+        pass
+    return ver
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib would replay the Authorization header to the redirect target.
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def fetch(token, version):
+    """-> ('ok', windows, None, None) | (kind, None, http_status_or_None, retry_after)."""
+    req = urllib.request.Request(API_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "Content-Type": "application/json",
+        "User-Agent": f"claude-code/{version}",
+    })
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=HTTP_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        ra = exc.headers.get("Retry-After") if exc.headers else None
+        ra = float(ra) if ra and ra.replace(".", "", 1).isdigit() else None
+        if exc.code == 429:
+            return "rate_limited", None, 429, ra
+        if exc.code in (401, 403):
+            return "login", None, exc.code, None
+        return "error", None, exc.code, ra
+    except (OSError, ValueError):
+        return "error", None, None, None
+    windows = parse_usage(payload)
+    return ("ok", windows, 200, None) if windows else ("error", None, 200, None)
+
+
+def refresh_one(cred_dir, label, order, version, now):
+    prev = read_entry(label)
+    if not is_due(prev, now):
+        return prev, False
+    token, err = read_token(cred_dir, now)
+    if err:
+        kind, windows, http, ra = err, None, None, None
+    else:
+        kind, windows, http, ra = fetch(token, version)
+    token = None
+    entry = next_entry(prev, label, order, kind, now, windows, http, ra)
+    write_entry(entry)
+    return entry, True
+
+
+def cmd_refresh(args):
+    dirs = resolve_dirs(args)
+    labels = resolve_labels(args, dirs)
+    ensure_cache_dir()
+    with Lock() as got:
+        if not got:
+            if args.verbose:
+                print("refresh already running", file=sys.stderr)
+            return 0
+        now = time.time()
+        version = claude_version()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(dirs)) as ex:
+            futs = [ex.submit(refresh_one, d, lb, i, version, now) for i, (d, lb) in enumerate(zip(dirs, labels))]
+            results = [f.result() for f in futs]
+    if args.verbose:
+        for entry, fetched in results:
+            print(f"{entry['label']}: state={entry['state']} http={entry.get('http')} "
+                  f"{'fetched' if fetched else 'cached'} next_in={max(0, entry['next_at'] - now):.0f}s")
+    return 0
+
+
+def cmd_show(args):
+    dirs = resolve_dirs(args)
+    labels = resolve_labels(args, dirs)
+    entries = [e for e in (read_entry(lb) for lb in labels) if e]
+    print(render(entries, time.time(), args.compact))
+    return 0
+
+
+def resolve_dirs(args):
+    raw = args.dirs or os.environ.get("CLAUDE_QUOTA_DIRS")
+    if not raw:
+        return DEFAULT_DIRS
+    return [Path(p).expanduser() for p in re.split(r"[,:]", raw) if p]
+
+
+def resolve_labels(args, dirs):
+    if args.labels:
+        labels = args.labels.split(",")
+        if len(labels) != len(dirs):
+            sys.exit("claude-quota: --labels count must match --dirs")
+        return labels
+    return [label_for(d) for d in dirs]
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="claude-quota", description=__doc__.splitlines()[0])
+    p.add_argument("--dirs", help="comma-separated Claude config dirs (env CLAUDE_QUOTA_DIRS)")
+    p.add_argument("--labels", help="comma-separated labels, one per dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("refresh", help="fetch due accounts into the cache")
+    r.add_argument("-v", "--verbose", action="store_true")
+    r.set_defaults(fn=cmd_refresh)
+    s = sub.add_parser("show", help="one-line summary from the cache")
+    s.add_argument("--compact", action="store_true")
+    s.set_defaults(fn=cmd_show)
+    args = p.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
