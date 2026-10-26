@@ -37,7 +37,7 @@ CI_RUNNING_EVERY = 10.0  # while a run is unfinished, look again sooner
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # shown instead of ◔ for a running CI, animated
 WORKERS = 4
 ROW_H = 2
-TEXT_X = 4  # text column of a row: dot at 1, CI mark at 2
+TEXT_X = 5  # text column of a row: dot at 1, CI mark at 3 (a blank column between: the glyphs overlap when adjacent)
 # CI state -> (glyph, palette key). Repositories without workflows have no state and show nothing.
 CI_MARKS = {"pass": ("✓", "green"), "fail": ("✗", "red"), "running": ("◔", "amber"),
             "other": ("–", "muted"), "none": ("–", "muted"), "unknown": ("?", "muted")}
@@ -193,11 +193,12 @@ class View:
         if st and not st.get("error") and st["ahead"] is not None:
             sync = " ".join(t for t in (f"↑{st['ahead']}" if st["ahead"] else "",
                                         f"↓{st['behind']}" if st["behind"] else "") if t)
-        # The CI result follows the dot (column 2); the name and the branch line start after both.
+        # The CI result follows the dot with a blank column between (column 3); the name and the branch
+        # line start after both.
         mark = CI_MARKS.get(repo.ci)
         if mark:
             glyph = SPINNER[int(time.monotonic() * 8) % len(SPINNER)] if repo.ci == "running" else mark[0]
-            cv.put(2, y, glyph, p[mark[1]], bg)
+            cv.put(3, y, glyph, p[mark[1]], bg)
         left = w - 1
         if sync:
             left -= len(sync)
