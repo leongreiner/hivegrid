@@ -1,0 +1,8 @@
+*.bak.*
+*.swp
+*~
+.DS_Store
+# Downloaded by `install.sh --tools`, never committed.
+/yazi
+/ya
+/lazygit
