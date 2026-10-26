@@ -26,7 +26,9 @@ if [ -z "$wezterm_bin" ]; then
   echo "  sudo apt install wezterm" >&2
   exit 1
 fi
-
+# The custom build wrapper (wezterm/build-hivegrid.sh) takes precedence for the launcher.
+launcher_bin=$wezterm_bin
+[ -x "$bindir/hivegrid" ] && launcher_bin=$bindir/hivegrid
 # install_file SRC DST [MODE]: copies, keeping one backup of a differing existing file.
 install_file() {
   local src=$1 dst=$2 mode=${3:-644}
@@ -52,7 +54,7 @@ install_file "$repo/assets/icon.png" "$icon_dst"
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT
-sed -e "s|@HOME@|$HOME|g" -e "s|@WEZTERM@|$wezterm_bin|g" "$repo/desktop/hivegrid.desktop.in" >"$rendered"
+sed -e "s|@HOME@|$HOME|g" -e "s|@WEZTERM@|$launcher_bin|g" "$repo/desktop/hivegrid.desktop.in" >"$rendered"
 install_file "$rendered" "$desktop_dst"
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$(dirname "$desktop_dst")" >/dev/null 2>&1 || true
