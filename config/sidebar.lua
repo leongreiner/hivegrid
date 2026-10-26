@@ -379,10 +379,16 @@ done
     write_state(rec)
   end
 
-  for _, k in ipairs { { 'f', 'files', 'CTRL' }, { 'g', 'git', 'CTRL' }, { 'Tab', nil, 'LEADER' } } do
+  local S = require('settings')(config, wezterm)
+  for _, k in ipairs {
+    { 'sidebar_files', 'CTRL+f', 'files' },
+    { 'sidebar_git', 'CTRL+g', 'git' },
+    { 'sidebar_toggle', 'LEADER+Tab', nil },
+  } do
+    local bind = S.key(k[1], k[2])
     table.insert(config.keys, {
-      key = k[1], mods = k[3],
-      action = wezterm.action_callback(function(window, pane) apply(window, pane, k[2]) end),
+      key = bind.key, mods = bind.mods,
+      action = wezterm.action_callback(function(window, pane) apply(window, pane, k[3]) end),
     })
   end
 

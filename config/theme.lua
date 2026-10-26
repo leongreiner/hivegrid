@@ -27,6 +27,29 @@ M.P = {
   grey = '#8190ad',
 }
 
+-- Terminal and tab bar colours that are not part of the palette proper.
+M.T = {
+  selection_bg = '#1f3f73',
+  split = '#1a2b4d',
+  scrollbar_thumb = '#22324f',
+  button_hover = '#1b2f55', -- window button and "+" button hover
+  tab_hover = '#18274a',
+  tab_edge = '#04080f',
+  ansi = { '#243252', '#f87171', '#34d399', '#fbbf24', '#4f9dff', '#c084fc', '#38bdf8', '#c9d6ee' },
+  brights = { '#5b6b8f', '#fca5a5', '#6ee7b7', '#fcd34d', '#7dbaff', '#d8b4fe', '#7dd3fc', '#eaf1ff' },
+}
+
+-- The colour theme chosen in `hivegrid-panel settings` replaces these defaults, key by key.
+do
+  local S = require('settings')(nil, wezterm)
+  for k, v in pairs(S.theme_palette()) do
+    if M.P[k] then M.P[k] = v end
+  end
+  for k, v in pairs(S.theme_terminal()) do
+    if M.T[k] then M.T[k] = v end
+  end
+end
+
 -- Linear blend of two '#rrggbb' colours, t in [0, 1].
 function M.lerp(a, b, t)
   local function ch(h, i) return tonumber(h:sub(i, i + 1), 16) end
