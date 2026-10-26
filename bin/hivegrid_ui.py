@@ -1,0 +1,781 @@
+"""Small terminal UI toolkit for the Hivegrid panels: a cell canvas with click regions, raw ANSI
+output with truecolor, SGR mouse input, modal dialogs, inline images (iTerm2 protocol, rendered with
+PIL when available) and braille charts as the image-free fallback. Standard library only."""
+import base64
+import fcntl
+import io
+import json
+import os
+import re
+import select
+import signal
+import struct
+import sys
+import termios
+import time
+import tty
+
+BOLD, DIM, REV, UL = 1, 2, 4, 8
+
+TRUECOLOR = os.environ.get("COLORTERM", "") in ("truecolor", "24bit") or os.environ.get("TERM", "").endswith("-direct")
+
+
+def _rgb(h):
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def _to256(r, g, b):
+    q = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40
+    return 16 + 36 * q(r) + 6 * q(g) + q(b)
+
+
+def sgr_color(h, bgnd):
+    r, g, b = _rgb(h)
+    if TRUECOLOR:
+        return f"{48 if bgnd else 38};2;{r};{g};{b}"
+    return f"{48 if bgnd else 38};5;{_to256(r, g, b)}"
+
+
+def mix(a, b, t):
+    ra, ga, ba = _rgb(a)
+    rb, gb, bb = _rgb(b)
+    return "#%02x%02x%02x" % (round(ra + (rb - ra) * t), round(ga + (gb - ga) * t), round(ba + (bb - ba) * t))
+
+
+# ---- canvas -------------------------------------------------------------------------
+
+
+class Canvas:
+    """A grid of (char, fg, bg, attrs) cells, click regions and image placements."""
+
+    def __init__(self, w, h, fg, bg):
+        self.w, self.h, self.fg, self.bg = w, h, fg, bg
+        self.cells = [[(" ", fg, bg, 0)] * w for _ in range(h)]
+        self.hits = []
+        self.images = []
+
+    def put(self, x, y, text, fg=None, bg=None, attrs=0):
+        """Writes `text` at (x, y), clipped to the canvas; returns the width written."""
+        if y < 0 or y >= self.h:
+            return 0
+        row = self.cells[y]
+        n = 0
+        for ch in text:
+            cx = x + n
+            n += 1
+            if 0 <= cx < self.w:
+                old = row[cx]
+                row[cx] = (ch, fg or old[1], bg or old[2], attrs)
+        return n
+
+    def fill(self, x, y, w, h, bg=None, fg=None, ch=" "):
+        for yy in range(max(y, 0), min(y + h, self.h)):
+            row = self.cells[yy]
+            for xx in range(max(x, 0), min(x + w, self.w)):
+                old = row[xx]
+                row[xx] = (ch, fg or old[1], bg or old[2], 0)
+
+    def hit(self, x, y, w, h, fn):
+        """Registers a click region; the last one registered wins. fn(button) with 'left' or 'right'."""
+        self.hits.append((x, y, w, h, fn))
+
+    def hit_at(self, x, y):
+        for rx, ry, rw, rh, fn in reversed(self.hits):
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return fn
+        return None
+
+    def image(self, x, y, w, h, png):
+        self.fill(x, y, w, h)
+        self.images.append((x, y, w, h, png))
+
+    def render(self):
+        out = []
+        for y, row in enumerate(self.cells):
+            out.append(f"\x1b[{y + 1};1H")
+            last = None
+            run = []
+            for ch, fg, bg, attrs in row:
+                style = (fg, bg, attrs)
+                if style != last:
+                    if run:
+                        out.append("".join(run))
+                        run = []
+                    codes = ["0"]
+                    if attrs & BOLD:
+                        codes.append("1")
+                    if attrs & DIM:
+                        codes.append("2")
+                    if attrs & UL:
+                        codes.append("4")
+                    if attrs & REV:
+                        codes.append("7")
+                    codes.append(sgr_color(fg, False))
+                    codes.append(sgr_color(bg, True))
+                    out.append("\x1b[" + ";".join(codes) + "m")
+                    last = style
+                run.append(ch)
+            out.append("".join(run))
+        out.append("\x1b[0m")
+        return "".join(out)
+
+
+# ---- input --------------------------------------------------------------------------
+
+ARROWS = {"A": "UpArrow", "B": "DownArrow", "C": "RightArrow", "D": "LeftArrow", "H": "Home", "F": "End"}
+TILDE = {"1": "Home", "2": "Insert", "3": "Delete", "4": "End", "5": "PageUp", "6": "PageDown", "7": "Home",
+         "8": "End", "11": "F1", "12": "F2", "13": "F3", "14": "F4", "15": "F5", "17": "F6", "18": "F7",
+         "19": "F8", "20": "F9", "21": "F10", "23": "F11", "24": "F12"}
+SS3 = {"P": "F1", "Q": "F2", "R": "F3", "S": "F4", "A": "UpArrow", "B": "DownArrow", "C": "RightArrow",
+       "D": "LeftArrow", "H": "Home", "F": "End"}
+
+
+def _mods_from_param(n):
+    n -= 1
+    return {name for bit, name in ((1, "SHIFT"), (2, "ALT"), (4, "CTRL"), (8, "SUPER")) if n & bit}
+
+
+def _plain(c):
+    o = ord(c)
+    if o == 0:
+        return {"CTRL"}, "Space"
+    if c == "\t":
+        return set(), "Tab"
+    if c in "\r\n":
+        return set(), "Enter"
+    if o in (8, 127):
+        return set(), "Backspace"
+    if 1 <= o <= 26:
+        return {"CTRL"}, chr(o + 96)
+    if 28 <= o <= 31:
+        return {"CTRL"}, "\\]^_"[o - 28]
+    if c == " ":
+        return set(), "Space"
+    if c.isalpha() and c.isupper():
+        return {"SHIFT"}, c.lower()
+    return set(), c
+
+
+MOUSE_RE = re.compile(r"\[<(\d+);(\d+);(\d+)([Mm])")
+CSI_RE = re.compile(r"\[(\d*)(?:;(\d+))?([A-Za-z~])")
+CSI_U_RE = re.compile(r"\[(\d+)(?:;(\d+))?u")
+
+
+def decode(data):
+    """Bytes from the tty -> events: ('key', mods, key) or ('mouse', action, button, x, y).
+    action: press | release | drag | wheel; button: left | middle | right | up | down; x, y 0-based."""
+    out = []
+    s = data.decode("utf-8", "replace")
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c != "\x1b":
+            mods, key = _plain(c)
+            out.append(("key", frozenset(mods), key))
+            i += 1
+            continue
+        rest = s[i + 1:]
+        m = MOUSE_RE.match(rest)
+        if m:
+            b, x, y, kind = int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4)
+            if b & 64:
+                out.append(("mouse", "wheel", "up" if b & 1 == 0 else "down", x, y))
+            else:
+                button = {0: "left", 1: "middle", 2: "right"}.get(b & 3, "left")
+                action = "release" if kind == "m" else ("drag" if b & 32 else "press")
+                out.append(("mouse", action, button, x, y))
+            i += 1 + m.end()
+            continue
+        m_u = CSI_U_RE.match(rest)
+        m = CSI_RE.match(rest)
+        if m_u:
+            code = int(m_u.group(1))
+            mods = _mods_from_param(int(m_u.group(2) or 1))
+            key = {9: "Tab", 13: "Enter", 27: "Escape", 32: "Space", 127: "Backspace"}.get(code, chr(code))
+            out.append(("key", frozenset(mods), key))
+            i += 1 + m_u.end()
+        elif m:
+            num, mod, final = m.group(1), m.group(2), m.group(3)
+            mods = _mods_from_param(int(mod)) if mod else set()
+            if final == "Z":
+                out.append(("key", frozenset({"SHIFT"}), "Tab"))
+            elif final == "~":
+                out.append(("key", frozenset(mods), TILDE.get(num, "?")))
+            else:
+                out.append(("key", frozenset(mods), ARROWS.get(final, "?")))
+            i += 1 + m.end()
+        elif rest[:1] == "O" and len(rest) > 1:
+            out.append(("key", frozenset(), SS3.get(rest[1], "?")))
+            i += 3
+        elif rest:
+            mods, key = _plain(rest[0])
+            out.append(("key", frozenset(mods | {"ALT"}), key))
+            i += 2
+        else:
+            out.append(("key", frozenset(), "Escape"))
+            i += 1
+    return out
+
+
+# ---- images and charts --------------------------------------------------------------
+
+try:
+    from PIL import Image, ImageDraw, ImageFont  # noqa: F401
+    HAVE_PIL = True
+except Exception:  # noqa: BLE001 - any import problem means no images
+    HAVE_PIL = False
+
+
+def images_enabled():
+    """Inline images need PIL and a terminal that speaks the iTerm2 protocol (WezTerm does)."""
+    if os.environ.get("HIVEGRID_NO_IMAGES") == "1" or not HAVE_PIL:
+        return False
+    if os.environ.get("HIVEGRID_IMAGES") == "1":
+        return True
+    return os.environ.get("TERM_PROGRAM") == "WezTerm" or "WEZTERM_PANE" in os.environ or os.environ.get("LC_TERMINAL") == "iTerm2"
+
+
+def cell_pixels(fd=1):
+    """Pixel size of one cell from the tty's window size; a typical size when unreported."""
+    try:
+        rows, cols, xpix, ypix = struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+        if xpix and ypix and cols and rows:
+            return max(xpix // cols, 4), max(ypix // rows, 8)
+    except OSError:
+        pass
+    return 9, 18
+
+
+def iterm_image(png, cols, rows):
+    """iTerm2 inline image escape for `png` stretched over cols x rows cells."""
+    data = base64.b64encode(png).decode()
+    return f"\x1b]1337;File=inline=1;size={len(png)};width={cols};height={rows};preserveAspectRatio=0:{data}\x07"
+
+
+_FONT_CACHE = {}
+
+
+def font(size):
+    if size not in _FONT_CACHE:
+        for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"):
+            try:
+                _FONT_CACHE[size] = ImageFont.truetype(path, size)
+                break
+            except OSError:
+                continue
+        else:
+            _FONT_CACHE[size] = ImageFont.load_default()
+    return _FONT_CACHE[size]
+
+
+def _fmt_time(t, span):
+    lt = time.localtime(t)
+    if span <= 2 * 86400:
+        return time.strftime("%H:%M", lt)
+    return time.strftime("%d %b", lt)
+
+
+def line_chart_png(width, height, series, x0, x1, ymax, pal, markers=(), unit="%", ymin=0.0, title=None):
+    """series: [{'pts': [(t, v)], 'color', 'label'}]; markers: [(t, color)] vertical dotted lines.
+    Drawn at 2x and scaled down for smooth lines. -> PNG bytes."""
+    S = 2
+    W, H = width * S, height * S
+    img = Image.new("RGB", (W, H), pal["base"])
+    d = ImageDraw.Draw(img)
+    f = font(11 * S)
+    left, right, top, bottom = 44 * S, 10 * S, (22 if title else 8) * S, 20 * S
+    pw, ph = W - left - right, H - top - bottom
+    if pw < 10 or ph < 10:
+        return _png(img.resize((width, height)))
+    d.rectangle([left, top, left + pw, top + ph], fill=pal["deep"])
+    span = max(x1 - x0, 1)
+    ysp = max(ymax - ymin, 1e-9)
+
+    def px(t):
+        return left + (t - x0) / span * pw
+
+    def py(v):
+        return top + ph - (v - ymin) / ysp * ph
+
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        y = top + ph - frac * ph
+        d.line([left, y, left + pw, y], fill=pal["border"], width=S)
+        label = f"{ymin + ysp * frac:.0f}{unit}"
+        d.text((left - 4 * S, y), label, fill=pal["muted"], font=f, anchor="rm")
+    ticks = 6
+    for i in range(ticks + 1):
+        t = x0 + span * i / ticks
+        x = px(t)
+        d.line([x, top + ph, x, top + ph + 3 * S], fill=pal["muted"], width=S)
+        anchor = "ma" if 0 < i < ticks else ("la" if i == 0 else "ra")
+        d.text((x, top + ph + 5 * S), _fmt_time(t, span), fill=pal["muted"], font=f, anchor=anchor)
+    for t, color in markers:
+        if x0 <= t <= x1:
+            x = px(t)
+            for yy in range(int(top), int(top + ph), 6 * S):
+                d.line([x, yy, x, min(yy + 3 * S, top + ph)], fill=color, width=S)
+    for s in series:
+        pts = [(px(t), py(v)) for t, v in s["pts"] if x0 <= t <= x1]
+        if len(pts) >= 2:
+            d.line(pts, fill=s["color"], width=2 * S, joint="curve")
+        elif pts:
+            x, y = pts[0]
+            d.ellipse([x - 3 * S, y - 3 * S, x + 3 * S, y + 3 * S], fill=s["color"])
+    if title:
+        d.text((left, 3 * S), title, fill=pal["bright"], font=f, anchor="la")
+    lx = left + pw
+    for s in reversed(series):
+        w = d.textlength(s["label"], font=f)
+        lx -= w + 22 * S
+        d.line([lx, 11 * S, lx + 12 * S, 11 * S], fill=s["color"], width=3 * S)
+        d.text((lx + 16 * S, 3 * S), s["label"], fill=pal["text"], font=f, anchor="la")
+    return _png(img.resize((width, height), Image.LANCZOS))
+
+
+def sparkline_png(width, height, values, color, pal, label, value_text, ymax=100.0):
+    """A filled mini graph with its label and current value, for the monitor."""
+    S = 2
+    W, H = width * S, height * S
+    img = Image.new("RGB", (W, H), pal["deep"])
+    d = ImageDraw.Draw(img)
+    f = font(12 * S)
+    d.rectangle([0, 0, W - 1, H - 1], outline=pal["border"], width=S)
+    d.text((8 * S, 5 * S), label, fill=pal["muted"], font=f, anchor="la")
+    d.text((W - 8 * S, 5 * S), value_text, fill=color, font=f, anchor="ra")
+    top, bottom = 22 * S, H - 6 * S
+    if len(values) >= 2 and bottom - top > 4:
+        n = len(values)
+        pts = [(8 * S + i / (n - 1) * (W - 16 * S), bottom - min(max(v, 0), ymax) / ymax * (bottom - top))
+               for i, v in enumerate(values)]
+        fill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        fd = ImageDraw.Draw(fill)
+        r, g, b = _rgb(color)
+        fd.polygon(pts + [(pts[-1][0], bottom), (pts[0][0], bottom)], fill=(r, g, b, 70))
+        img.paste(fill, (0, 0), fill)
+        d.line(pts, fill=color, width=2 * S, joint="curve")
+        d.line([8 * S, bottom, W - 8 * S, bottom], fill=pal["border"], width=S)
+    return _png(img.resize((width, height), Image.LANCZOS))
+
+
+def _png(img):
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+BRAILLE_BITS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
+
+
+def braille_chart(cols, rows, series, x0, x1, ymax, ymin=0.0):
+    """Line chart in braille dots. series: [{'pts': [(t, v)], 'color'}]. -> rows of [(char, color)]
+    with each series drawn in its own colour (a cell keeps the colour of the last series that set it)."""
+    dw, dh = cols * 2, rows * 4
+    dots = [[0] * cols for _ in range(rows)]
+    owner = [[None] * cols for _ in range(rows)]
+    span = max(x1 - x0, 1)
+    ysp = max(ymax - ymin, 1e-9)
+
+    def to_dot(t, v):
+        x = round((t - x0) / span * (dw - 1))
+        y = round((1 - (min(max(v, ymin), ymax) - ymin) / ysp) * (dh - 1))
+        return x, y
+
+    def plot(x, y, color):
+        if 0 <= x < dw and 0 <= y < dh:
+            cx, cy = x // 2, y // 4
+            dots[cy][cx] |= BRAILLE_BITS[y % 4][x % 2]
+            owner[cy][cx] = color
+
+    for s in series:
+        pts = [to_dot(t, v) for t, v in s["pts"] if x0 <= t <= x1]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            steps = max(abs(bx - ax), abs(by - ay), 1)
+            for k in range(steps + 1):
+                plot(round(ax + (bx - ax) * k / steps), round(ay + (by - ay) * k / steps), s["color"])
+        if len(pts) == 1:
+            plot(pts[0][0], pts[0][1], s["color"])
+    return [[(chr(0x2800 + dots[r][c]) if dots[r][c] else " ", owner[r][c]) for c in range(cols)] for r in range(rows)]
+
+
+# ---- UI -----------------------------------------------------------------------------
+
+
+class Modal:
+    """Base of the dialogs drawn over the page. They take every key and click while open."""
+
+    def render(self, ui, cv):
+        raise NotImplementedError
+
+    def key(self, ui, mods, key):
+        """-> True to close."""
+        return False
+
+
+def box(ui, cv, w, h, title):
+    """Centred dialog frame; returns its (x, y, w, h). Clicks outside are swallowed."""
+    p = ui.pal
+    w, h = min(w, cv.w - 2), min(h, cv.h - 2)
+    x, y = (cv.w - w) // 2, (cv.h - h) // 2
+    cv.hit(0, 0, cv.w, cv.h, lambda b: None)
+    cv.fill(x, y, w, h, bg=p["surface"])
+    cv.put(x, y, "┌" + "─" * (w - 2) + "┐", p["edge_hi"], p["surface"])
+    for yy in range(y + 1, y + h - 1):
+        cv.put(x, yy, "│", p["edge_hi"], p["surface"])
+        cv.put(x + w - 1, yy, "│", p["edge_hi"], p["surface"])
+    cv.put(x, y + h - 1, "└" + "─" * (w - 2) + "┘", p["edge_hi"], p["surface"])
+    cv.put(x + 2, y, f" {title} ", p["bright"], p["surface"], BOLD)
+    return x, y, w, h
+
+
+class PromptModal(Modal):
+    def __init__(self, title, text, on_ok, hint=""):
+        self.title, self.text, self.on_ok, self.hint, self.error = title, text, on_ok, hint, ""
+
+    def render(self, ui, cv):
+        p = ui.pal
+        x, y, w, h = box(ui, cv, 60, 9, self.title)
+        cv.fill(x + 2, y + 2, w - 4, 1, bg=p["deep"])
+        cv.put(x + 3, y + 2, self.text[-(w - 8):], p["bright"], p["deep"])
+        cv.put(x + 3 + min(len(self.text), w - 8), y + 2, "▏", p["accent"], p["deep"])
+        if self.hint:
+            cv.put(x + 2, y + 4, self.hint[:w - 4], p["muted"], p["surface"])
+        if self.error:
+            cv.put(x + 2, y + 5, self.error[:w - 4], p["red"], p["surface"])
+        ui.button(cv, x + 2, y + h - 2, "OK", lambda b: ui.finish(self, self.key(ui, set(), "Enter")), accent=True)
+        ui.button(cv, x + 10, y + h - 2, "Cancel", lambda b: ui.close_modal())
+
+    def key(self, ui, mods, key):
+        if key == "Enter":
+            err = self.on_ok(self.text)
+            if err:
+                self.error = err
+                return False
+            return True
+        if key == "Escape":
+            return True
+        if key == "Backspace":
+            self.text = self.text[:-1]
+        elif key == "Space" and not mods:
+            self.text += " "
+        elif len(key) == 1 and mods <= {"SHIFT"}:
+            self.text += key.upper() if "SHIFT" in mods else key
+        return False
+
+
+class ChoiceModal(Modal):
+    def __init__(self, title, options, current, on_pick):
+        self.title, self.options, self.idx, self.on_pick = title, options, current, on_pick
+
+    def render(self, ui, cv):
+        p = ui.pal
+        n = len(self.options)
+        shown = min(n, max(cv.h - 8, 3))
+        top = max(0, min(self.idx - shown // 2, n - shown))
+        x, y, w, h = box(ui, cv, 46, shown + 4, self.title)
+        for row in range(shown):
+            i = top + row
+            sel = i == self.idx
+            cv.fill(x + 2, y + 2 + row, w - 4, 1, bg=p["raised"] if sel else p["surface"])
+            cv.put(x + 3, y + 2 + row, self.options[i][:w - 6], p["bright"] if sel else p["text"],
+                   p["raised"] if sel else p["surface"])
+            cv.hit(x + 2, y + 2 + row, w - 4, 1, lambda b, i=i: self._pick(ui, i))
+        cv.put(x + 2, y + h - 2, "↑↓ choose  Enter ok  Esc cancel", p["muted"], p["surface"])
+
+    def _pick(self, ui, i):
+        self.on_pick(i)
+        ui.close_modal()
+
+    def key(self, ui, mods, key):
+        if key == "UpArrow":
+            self.idx = (self.idx - 1) % len(self.options)
+        elif key == "DownArrow":
+            self.idx = (self.idx + 1) % len(self.options)
+        elif key == "Enter":
+            self.on_pick(self.idx)
+            return True
+        elif key == "Escape":
+            return True
+        return False
+
+
+class ConfirmModal(Modal):
+    def __init__(self, text, on_yes, title="Confirm"):
+        self.text, self.on_yes, self.title = text, on_yes, title
+
+    def render(self, ui, cv):
+        p = ui.pal
+        x, y, w, h = box(ui, cv, min(max(len(self.text) + 6, 36), 70), 6, self.title)
+        cv.put(x + 3, y + 2, self.text[:w - 6], p["text"], p["surface"])
+        ui.button(cv, x + 2, y + h - 2, "Yes", lambda b: self._yes(ui), accent=True)
+        ui.button(cv, x + 10, y + h - 2, "No", lambda b: ui.close_modal())
+
+    def _yes(self, ui):
+        ui.close_modal()
+        self.on_yes()
+
+    def key(self, ui, mods, key):
+        if key in ("y", "Enter"):
+            self.on_yes()
+            return True
+        return key in ("n", "Escape")
+
+
+class UI:
+    """Owns the terminal: raw mode, mouse, alternate screen, the event loop and the shared frame
+    (title, page tabs, save button, status line)."""
+
+    def __init__(self, model, pages, active=0):
+        self.model, self.pages, self.active = model, pages, active
+        self.modal = None
+        self.message, self.message_error = "", False
+        self.fd = sys.stdin.fileno()
+        self.out = sys.stdout
+        self.cv = None
+        self.dirty = True
+        self.running = True
+        self.size = (0, 0)
+        self.tickers = []
+
+    # theme ------------------------------------------------------------------
+    @property
+    def pal(self):
+        return self.model.current_theme()["palette"]
+
+    def say(self, text, error=False):
+        self.message, self.message_error = text, error
+        self.dirty = True
+
+    # modal helpers ----------------------------------------------------------
+    def open_modal(self, modal):
+        self.modal = modal
+        self.dirty = True
+
+    def close_modal(self):
+        m, self.modal = self.modal, None
+        self.dirty = True
+        if m is not None and hasattr(m, "closed"):
+            m.closed(self)
+
+    def finish(self, modal, done):
+        """Closes `modal` when `done`, unless its handler already opened another dialog."""
+        if done and self.modal is modal:
+            self.close_modal()
+
+    def raw_keys(self, on):
+        """Asks WezTerm (user var hivegrid_capture) to hand every chord to this program."""
+        value = base64.b64encode(b"1" if on else b"0").decode()
+        self.out.write(f"\x1b]1337;SetUserVar=hivegrid_capture={value}\x07")
+        self.out.flush()
+        if on:
+            time.sleep(0.15)
+
+    # widgets ----------------------------------------------------------------
+    def button(self, cv, x, y, label, fn, accent=False, enabled=True):
+        p = self.pal
+        text = f" {label} "
+        bg = p["accent"] if accent and enabled else p["raised"]
+        fg = p["deep"] if accent and enabled else (p["bright"] if enabled else p["dim"])
+        cv.put(x, y, text, fg, bg, BOLD if accent else 0)
+        if enabled:
+            cv.hit(x, y, len(text), 1, fn)
+        return len(text)
+
+    def swatch(self, cv, x, y, color, w=3):
+        cv.put(x, y, " " * w, None, color)
+
+    # frame ------------------------------------------------------------------
+    def page(self):
+        return self.pages[self.active]
+
+    def switch(self, i, step=None):
+        if 0 <= i < len(self.pages):
+            self.active = i
+            if step is not None and hasattr(self.page(), "entered"):
+                self.page().entered(step)
+            self.page().on_show(self)
+            self.dirty = True
+
+    def draw(self):
+        cols, rows = self.size
+        p = self.pal
+        cv = Canvas(cols, rows, p["text"], p["base"])
+        cv.fill(0, 0, cols, 1, bg=p["deep"])
+        x = cv.put(1, 0, "⬡ Hivegrid ", p["accent"], p["deep"], BOLD) + 1
+        for i, pg in enumerate(self.pages):
+            label = f" {pg.title} "
+            sel = i == self.active
+            cv.put(x, 0, label, p["bright"] if sel else p["muted"], p["raised"] if sel else p["deep"], BOLD if sel else 0)
+            cv.hit(x, 0, len(label), 1, lambda b, i=i: self.switch(i))
+            x += len(label) + 1
+        close = " ✕ "
+        cv.put(cols - len(close), 0, close, p["muted"], p["deep"])
+        cv.hit(cols - len(close), 0, len(close), 1, lambda b: self.quit())
+        if self.model.dirty:
+            sx = cols - len(close) - 8
+            self.button(cv, sx, 0, "Save", lambda b: self.save(), accent=True)
+            cv.put(sx - 10, 0, "* unsaved", p["amber"], p["deep"])
+        cv.fill(0, 1, cols, 1, bg=p["base"], fg=p["border"], ch="─")
+        self.page().render(self, cv, 0, 2, cols, rows - 4)
+        msg_color = p["red"] if self.message_error else p["green"]
+        cv.put(1, rows - 2, self.message[:cols - 2], msg_color, p["base"])
+        cv.put(1, rows - 1, self.page().hints()[:cols - 2], p["muted"], p["base"], DIM)
+        if self.modal:
+            self.modal.render(self, cv)
+        self.cv = cv
+        probe = os.environ.get("HIVEGRID_PANEL_DEBUG")
+        if probe:
+            self._probe(probe, cv)
+        buf = ["\x1b[?25l", cv.render()]
+        if not self.modal:
+            for x, y, w, h, png in cv.images:
+                buf.append(f"\x1b[{y + 1};{x + 1}H" + iterm_image(png, w, h))
+        self.out.write("".join(buf))
+        self.out.flush()
+        self.dirty = False
+
+    def _probe(self, path, cv):
+        """Test aid: HIVEGRID_PANEL_DEBUG=<file> writes the screen text and size, and marks the
+        corner cells magenta so a screenshot can be mapped back to cells."""
+        for x, y in ((0, 0), (cv.w - 1, cv.h - 1)):
+            cv.cells[y][x] = ("█", "#ff00ff", "#ff00ff", 0)
+        try:
+            with open(path, "w") as f:
+                json.dump({"cols": cv.w, "rows": cv.h, "text": ["".join(c[0] for c in row) for row in cv.cells]}, f)
+        except OSError:
+            pass
+
+    def save(self):
+        ok, message = self.model.save()
+        self.say(message, not ok)
+
+    def quit(self):
+        if self.model.dirty and not isinstance(self.modal, ConfirmModal):
+            self.open_modal(ConfirmModal("Unsaved changes: y saves and closes, n discards, Esc goes back.", self._save_and_quit, "Close"))
+            self.modal.key = self._quit_key  # y save, n discard, Esc back
+            return
+        self.running = False
+
+    def _save_and_quit(self):
+        self.save()
+        if not self.model.dirty:
+            self.running = False
+
+    def _quit_key(self, ui, mods, key):
+        if key in ("y", "Enter"):
+            self._save_and_quit()
+            return True
+        if key == "n":
+            self.running = False
+            return True
+        return key == "Escape"
+
+    # events -----------------------------------------------------------------
+    def handle(self, ev):
+        if ev[0] == "mouse":
+            _, action, button, x, y = ev
+            if action == "wheel":
+                if not self.modal:
+                    self.page().wheel(self, -1 if button == "up" else 1)
+                return
+            if action == "press" and self.cv:
+                fn = self.cv.hit_at(x, y)
+                if fn:
+                    fn("right" if button == "right" else "left")
+                self.dirty = True
+            return
+        _, mods, key = ev
+        if self.modal:
+            m = self.modal
+            if m.key(self, mods, key) and self.modal is m:
+                self.close_modal()
+            self.dirty = True
+            return
+        if key == "c" and mods == {"CTRL"}:
+            self.running = False
+            return
+        if not mods and key in ("F1", "F2", "F3", "F4"):
+            self.switch(int(key[1]) - 1)
+        elif not mods and key == "Tab" or key == "Tab" and mods == {"SHIFT"}:
+            self.page().cycle(self, -1 if mods else 1)
+        elif key == "s" and not mods and self.model.dirty:
+            self.save()
+        elif key in ("q", "Escape") and not mods:
+            self.quit()
+        else:
+            self.page().key(self, mods, key)
+        self.dirty = True
+
+    def next_events(self, timeout):
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return []
+        data = os.read(self.fd, 4096)
+        if not data:
+            raise EOFError
+        return decode(data)
+
+    def run(self):
+        old = termios.tcgetattr(self.fd)
+        try:
+            tty.setraw(self.fd)
+            self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+            self.out.flush()
+            signal.signal(signal.SIGWINCH, lambda *_: None)
+            self.page().on_show(self)
+            while self.running:
+                try:
+                    size = os.get_terminal_size(self.out.fileno())
+                    size = (size.columns, size.lines)
+                except OSError:
+                    size = (100, 30)
+                if size != self.size:
+                    self.size = size
+                    self.dirty = True
+                if self.dirty:
+                    self.draw()
+                try:
+                    events = self.next_events(0.2)
+                except EOFError:
+                    break
+                for ev in events:
+                    self.handle(ev)
+                if self.page().tick(self):
+                    self.dirty = True
+                for t in self.tickers:
+                    t()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
+            self.raw_keys(False)
+            self.out.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+            self.out.flush()
+
+
+class Page:
+    """A panel. Subclasses draw into the canvas region they are given and register click regions."""
+
+    title = "Page"
+
+    def render(self, ui, cv, x, y, w, h):
+        pass
+
+    def key(self, ui, mods, key):
+        pass
+
+    def wheel(self, ui, dy):
+        pass
+
+    def tick(self, ui):
+        """Called every ~0.2 s; True asks for a redraw."""
+        return False
+
+    def on_show(self, ui):
+        pass
+
+    def hints(self):
+        return "Tab next section  q close"
+
+    def cycle(self, ui, step):
+        ui.switch((ui.active + step) % len(ui.pages), step)

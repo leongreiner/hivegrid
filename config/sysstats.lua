@@ -229,7 +229,7 @@ return function(config, wezterm)
       if not tier.only or tier.only[m[1]] then parts[#parts + 1] = body(m, tier) end
     end
     if #parts == 0 then return {} end
-    return theme.group(parts, P.pill)
+    return theme.click('system', theme.group(parts, P.pill))
   end
 
   -- Renders only change when a source was sampled, so a tick between samples reuses

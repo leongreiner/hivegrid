@@ -3,6 +3,14 @@ local act = wezterm.action
 local config = wezterm.config_builder()
 local theme = require 'theme'
 local P = theme.P
+local T = theme.T
+local S = require('settings')(config, wezterm)
+
+-- A binding from settings.json (see settings.lua), `default` when the file has none.
+local function bound(name, default, action)
+  local k = S.key(name, default)
+  return { key = k.key, mods = k.mods, action = action }
+end
 
 -- Ctrl+C copies when text is selected, otherwise sends SIGINT.
 -- Ctrl+V pastes from the clipboard.
@@ -23,8 +31,8 @@ config.keys = {
   { key = 'v', mods = 'CTRL', action = act.PasteFrom 'Clipboard' },
 
   -- Pane grid for running many agents.
-  { key = '|', mods = 'CTRL|SHIFT', action = act.SplitHorizontal { domain = 'CurrentPaneDomain' } },
-  { key = '_', mods = 'CTRL|SHIFT', action = act.SplitVertical { domain = 'CurrentPaneDomain' } },
+  bound('split_horizontal', 'CTRL+SHIFT+|', act.SplitHorizontal { domain = 'CurrentPaneDomain' }),
+  bound('split_vertical', 'CTRL+SHIFT+_', act.SplitVertical { domain = 'CurrentPaneDomain' }),
   { key = 'h', mods = 'ALT', action = act.ActivatePaneDirection 'Left' },
   { key = 'l', mods = 'ALT', action = act.ActivatePaneDirection 'Right' },
   { key = 'k', mods = 'ALT', action = act.ActivatePaneDirection 'Up' },
@@ -75,17 +83,13 @@ config.colors = {
   cursor_bg = P.accent,
   cursor_fg = P.base,
   cursor_border = P.accent,
-  selection_bg = '#1f3f73',
+  selection_bg = T.selection_bg,
   selection_fg = P.bright,
-  split = '#1a2b4d',
-  scrollbar_thumb = '#22324f',
+  split = T.split,
+  scrollbar_thumb = T.scrollbar_thumb,
   visual_bell = P.bright,
-  ansi = {
-    '#243252', '#f87171', '#34d399', '#fbbf24', '#4f9dff', '#c084fc', '#38bdf8', '#c9d6ee',
-  },
-  brights = {
-    '#5b6b8f', '#fca5a5', '#6ee7b7', '#fcd34d', '#7dbaff', '#d8b4fe', '#7dd3fc', '#eaf1ff',
-  },
+  ansi = T.ansi,
+  brights = T.brights,
 }
 -- The tab bar font is monospaced so block-glyph bars in the status line line up.
 config.window_frame = {
@@ -99,17 +103,17 @@ config.window_frame = {
   inactive_titlebar_bg = P.deep,
   button_bg = P.deep,
   button_fg = P.muted,
-  button_hover_bg = '#1b2f55',
+  button_hover_bg = T.button_hover,
   button_hover_fg = P.bright,
 }
 config.colors.tab_bar = {
   background = P.deep,
   active_tab = { bg_color = P.raised, fg_color = P.bright },
   inactive_tab = { bg_color = P.surface, fg_color = P.muted },
-  inactive_tab_hover = { bg_color = '#18274a', fg_color = P.text },
-  inactive_tab_edge = '#04080f',
+  inactive_tab_hover = { bg_color = T.tab_hover, fg_color = P.text },
+  inactive_tab_edge = T.tab_edge,
   new_tab = { bg_color = P.surface, fg_color = P.muted },
-  new_tab_hover = { bg_color = '#1b2f55', fg_color = P.bright },
+  new_tab_hover = { bg_color = T.button_hover, fg_color = P.bright },
 }
 
 -- Popups (selectors, palette, pane select) share the palette.
@@ -138,6 +142,7 @@ end
 local as = require('agentstatus')(config, wezterm)
 local ss = require('sysstats')(config, wezterm)
 local cq = require('claudequota')(config, wezterm)
+cq.set_pane_kind(as.pane_kind)
 local sb = require('sidebar')(config, wezterm)
 config.status_update_interval = 1000
 
@@ -310,17 +315,43 @@ wezterm.on('update-status', function(window, pane)
   window:set_right_status(wezterm.format(items))
 end)
 
+-- The panels (bin/hivegrid-panel settings|usage|agents|monitor): an overlay over the tab
+-- where this WezTerm has ShowOverlayCommand (the Hivegrid fork), a new tab on stock WezTerm.
+local panel_bin = os.getenv('HOME') .. '/.local/bin/hivegrid-panel'
+local function panel_action(name, extra)
+  local args = { panel_bin, name }
+  for _, a in ipairs(extra or {}) do args[#args + 1] = a end
+  local ok, action = pcall(function()
+    return act.ShowOverlayCommand { args = args, cwd = os.getenv('HOME') }
+  end)
+  if ok then return action end
+  return act.SpawnCommandInNewTab { args = args }
+end
+local function settings_action() return panel_action('settings') end
+
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
+-- Left click: start/switch omp (quota pill), agent picker, settings, monitor. Right click on
+-- a quota pill, the agents pill or the system group opens the matching panel.
 wezterm.on('status-click', function(window, pane, id, button)
-  if button ~= 'Left' then return end
+  if button ~= 'Left' and button ~= 'Right' then return end
   local account = id:match('^quota:(.+)$')
   if account then
-    cq.start_omp(window, pane, account)
+    if button == 'Left' then
+      cq.start_omp(window, pane, account)
+    else
+      window:perform_action(panel_action('usage', { '--account', account }), pane)
+    end
   elseif id == 'brand' then
-    window:toast_notification('Hivegrid', 'settings panel coming soon', nil, 3000)
+    window:perform_action(panel_action('settings'), pane)
   elseif id == 'agents' then
-    window:perform_action(as.picker, pane)
+    if button == 'Left' then
+      window:perform_action(as.picker, pane)
+    else
+      window:perform_action(panel_action('agents'), pane)
+    end
+  elseif id == 'system' then
+    window:perform_action(panel_action('monitor'), pane)
   end
 end)
 
@@ -339,13 +370,22 @@ config.launch_menu = {
 }
 
 -- Leader (Ctrl+Space) then 1/2/3 opens a new tab with the matching menu entry.
-config.leader = { key = 'Space', mods = 'CTRL', timeout_milliseconds = 1000 }
+local leader = S.key('leader', 'CTRL+Space')
+config.leader = { key = leader.key, mods = leader.mods, timeout_milliseconds = 1000 }
 for i, entry in ipairs(config.launch_menu) do
   table.insert(config.keys, {
     key = tostring(i),
     mods = 'LEADER',
     action = act.SpawnCommandInNewTab { args = entry.args },
   })
+end
+
+-- The "+" menu entry comes after the leader loop above so it gets no LEADER+<n> binding.
+for _, entry in ipairs {
+  { 'Hivegrid settings', 'settings' }, { 'Usage history', 'usage' },
+  { 'Agent overview', 'agents' }, { 'System monitor', 'monitor' },
+} do
+  table.insert(config.launch_menu, { label = entry[1], args = { panel_bin, entry[2] } })
 end
 
 -- Tab shape: the fancy bar draws a tab as a rounded-top box in the background colour of
@@ -358,7 +398,7 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, cfg, hover, max_width)
   if tab.is_active then
     bg, text, num = P.raised, P.bright, P.cyan
   elseif hover then
-    bg, text, num = '#18274a', P.text, P.accent
+    bg, text, num = T.tab_hover, P.text, P.accent
   else
     bg, text, num = P.deep, P.muted, P.dim
   end
@@ -400,5 +440,26 @@ wezterm.on('bell', function(window, pane)
 end)
 
 require('layouts')(config, wezterm)
+
+-- While the settings panel records a new key binding it sets the user var
+-- hivegrid_capture: the config's bindings are suspended meanwhile, so a chord such as
+-- CTRL+f reaches the panel instead of triggering what it is bound to.
+wezterm.on('user-var-changed', function(window, pane, name, value)
+  if name ~= 'hivegrid_capture' then return end
+  if value == '1' then
+    window:set_config_overrides {
+      keys = {},
+      disable_default_key_bindings = true,
+      leader = { key = 'F24', mods = 'SHIFT|CTRL|ALT|SUPER' },
+    }
+  else
+    window:set_config_overrides {}
+  end
+end)
+
+-- Settings panel: LEADER+, by default. Added last so the callback numbering of the
+-- bindings above stays as it was.
+table.insert(config.keys, bound('settings', 'LEADER+,', panel_action('settings')))
+table.insert(config.keys, bound('usage_panel', 'LEADER+h', panel_action('usage')))
 
 return config
