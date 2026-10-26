@@ -1,6 +1,6 @@
 -- Left sidebar: file explorer (yazi) or git view (lazygit) docked beside a narrow
 -- handle pane. Wire: local sb = require('sidebar')(config, wezterm)
---   LEADER+f explorer   LEADER+t git view   LEADER+Tab hide/show, remembering the view
+--   Ctrl+F explorer   Ctrl+G git view   LEADER+Tab hide/show, remembering the view
 -- Layout is [handle][sidebar][leftmost pane...]: both are ordinary leaf splits of the
 -- leftmost grid pane, so a killed sidebar's columns return to that pane. `--top-level`
 -- is avoided: in WezTerm 20240203 it on a tab with 2+ panes leaves the pane tree
@@ -228,9 +228,9 @@ done
     write_state(rec)
   end
 
-  for _, k in ipairs { { 'f', 'files' }, { 't', 'git' }, { 'Tab', nil } } do
+  for _, k in ipairs { { 'f', 'files', 'CTRL' }, { 'g', 'git', 'CTRL' }, { 'Tab', nil, 'LEADER' } } do
     table.insert(config.keys, {
-      key = k[1], mods = 'LEADER',
+      key = k[1], mods = k[3],
       action = wezterm.action_callback(function(window, pane) apply(window, pane, k[2]) end),
     })
   end
