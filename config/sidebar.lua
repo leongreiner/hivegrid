@@ -140,7 +140,9 @@ done
 
   -- Drops ids of panes that no longer exist (killed, or quit with `q`).
   local function reconcile(rec, rs)
-    local r = { view = rec.view, handle = rec.handle, content = rec.content, last = rec.last }
+    local r = {
+      view = rec.view, handle = rec.handle, content = rec.content, last = rec.last, dir = rec.dir,
+    }
     for _, k in ipairs { 'handle', 'content', 'last' } do
       if r[k] and not find(rs, r[k]) then r[k] = nil end
     end
@@ -157,7 +159,8 @@ done
     wezterm.GLOBAL.sidebar = all
   end
   local function same(a, b)
-    return a.view == b.view and a.handle == b.handle and a.content == b.content and a.last == b.last
+    return a.view == b.view and a.handle == b.handle and a.content == b.content
+      and a.last == b.last and a.dir == b.dir
   end
 
   local function write_state(rec)
@@ -333,6 +336,7 @@ done
       rec.handle = tonumber(out)
     end
     local dir = dir_of(src)
+    rec.dir = dir
     -- PWD is set explicitly because tools such as yazi prefer the inherited $PWD over the cwd.
     local cmd = { 'env', 'PWD=' .. dir }
     if rec.view == 'files' then cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. YAZI_CONFIG_HOME end
@@ -400,6 +404,37 @@ done
 
   function api.toggle(window, pane, view) apply(window, pane, view) end
 
+  -- The git view lists the repositories of the directory it was started in, so it is
+  -- restarted when the active grid pane moves to another directory (another pane gets
+  -- focus, or its shell cd's). The keyboard stays in the grid pane. The directory is
+  -- recorded before the restart so a failed one is not retried on every status tick.
+  local last_follow = {}
+  local function follow_git(window, tab, rs, rec)
+    if rec.view ~= 'git' or not rec.content then return rs end
+    local pane = window:active_pane()
+    local id = pane:pane_id()
+    if id == rec.handle or id == rec.content then return rs end
+    local dir = dir_of(pane)
+    local prev = rec.dir
+    rec.dir = dir
+    -- An explorer opened before dir was tracked has an unknown start directory.
+    if not prev or prev == dir then return rs end
+    local tab_id = tab:tab_id()
+    local now = os.time()
+    if last_follow[tab_id] and now - last_follow[tab_id] < 1 then
+      rec.dir = prev
+      return rs
+    end
+    last_follow[tab_id] = now
+    local cli = make_cli(pane)
+    local function skip(i) return i == rec.handle or i == rec.content end
+    hide(cli, rec, rs, tab_id)
+    rs = rows(tab:panes_with_info())
+    show(cli, rec, rs, pane, anchor_for(rs, rec, skip), window)
+    cli('activate-pane', '--pane-id', id)
+    return rows(tab:panes_with_info())
+  end
+
   -- Reconciles state with the live tab, so call it from update-status. Returns
   -- wezterm.format items for a chip such as "◀ files": accent colour while open, muted when
   -- hidden, nothing before the sidebar was ever opened in this tab.
@@ -411,6 +446,7 @@ done
     for _, r in ipairs(rs) do
       if r.active and r.id ~= rec.handle and r.id ~= rec.content then rec.last = r.id end
     end
+    rs = follow_git(window, tab, rs, rec)
     settle(window, tab, rs, rec)
     if not same(old, rec) then
       save(tab:tab_id(), rec)

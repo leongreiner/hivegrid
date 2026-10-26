@@ -46,3 +46,31 @@ function Entity:click(event, up)
     last = { x = event.x, y = event.y, t = now, path = tostring(self._file.url.path) }
   end
 end
+
+-- Resize cursor over the column borders (the rails dragged to resize the parent / current /
+-- preview columns). WezTerm shows the pointer shape an application requests with OSC 22
+-- (the Hivegrid build); stock WezTerm ignores it. Yazi enables button-event tracking only,
+-- so any-event tracking (1003) is switched on here to receive hover events; with it left
+-- on, a program yazi suspends to (a shell command) would see stray mouse reports.
+local function tty_write(s)
+  local tty = io.open('/dev/tty', 'w')
+  if not tty then return end
+  tty:write(s)
+  tty:close()
+end
+
+local pointer = ''
+local function set_pointer(name)
+  if name == pointer then return end
+  pointer = name
+  tty_write('\27]22;' .. name .. '\27\\')
+end
+
+tty_write('\27[?1003h')
+
+local move = Root.move
+function Root:move(event)
+  move(self, event)
+  local c = ya.child_at(ui.Rect { x = event.x, y = event.y }, self:reflow())
+  set_pointer(c and (c._id == 'rail-left' or c._id == 'rail-right') and 'ew-resize' or '')
+end

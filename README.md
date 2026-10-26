@@ -18,7 +18,7 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 - System stats in the header: CPU, RAM, disk, GPU, each with its percentage, a slim bar and, when the window is wide enough, the absolute amount (`11.7G/31G`, `165G free`).
 - Claude Code usage (5h and 7d windows) for every account as a header chip with numbers and slim bars (an account that needs a login shows only an amber `login` chip); accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
 - Panels inside the window (logo click, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
-- Left sidebar with a yazi file explorer or a git view, toggled by key or by clicking its handle. The git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick.
+- Left sidebar with a yazi file explorer or a git view, toggled by key or by clicking its handle. The git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
 - Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (a click opens the settings panel), wide padding, and dimmed inactive panes.
 
@@ -57,7 +57,7 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | `Enter` / click, `r`, `q` in the git view | open lazygit in the selected repository (quit lazygit to return to the list), rescan, close; `j`/`k` or arrows move |
 | | `Ctrl+C` in the explorer | copy the absolute path of the hovered file or folder, or of all selected entries one per line |
 | | double click in the explorer | open a terminal in that folder (a file's folder), split right of the last active grid pane, or below it when that pane is narrow; it takes focus |
-| | drag a column border in the explorer | resize the parent / current / preview columns |
+| | drag a column border in the explorer | resize the parent / current / preview columns (the pointer turns into a resize cursor over a border; Hivegrid build only) |
 | Panels | `LEADER+,` | settings panel |
 | | `LEADER+h` | usage history panel |
 | | `LEADER+u`, then `1`-`9` | start (or switch) omp with that account |
