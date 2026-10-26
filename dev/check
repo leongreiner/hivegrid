@@ -13,6 +13,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 export PYTHONDONTWRITEBYTECODE=1 # bin/ is copied wholesale by install.sh: no __pycache__ there
+# Tests must never reach the Hivegrid this shell may run in: a test that forgets to fake
+# `wezterm cli` gets this stand-in, which refuses, instead of the live mux.
+unset WEZTERM_PANE WEZTERM_UNIX_SOCKET WEZTERM_EXECUTABLE WEZTERM_EXECUTABLE_DIR
+BLOCK=$(mktemp -d)
+trap 'rm -rf "$BLOCK"' EXIT
+printf '#!/bin/sh\necho "dev/check: tests may not run the real wezterm: wezterm $*" >&2\nexit 97\n' >"$BLOCK/wezterm"
+chmod +x "$BLOCK/wezterm"
+export PATH="$BLOCK:$PATH"
 
 ALL=(py lua luacheck bun shell actions)
 failed=() skipped=()
