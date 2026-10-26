@@ -106,6 +106,37 @@ done
     if w >= 8 then return w end
   end
 
+  local function total_width(rs)
+    local total = 0
+    for _, r in ipairs(rs) do total = math.max(total, r.left + r.width) end
+    return total
+  end
+
+  -- Width the content pane should have: the saved one, capped so the pane right of it
+  -- keeps MIN_GRID columns, floored at 8 when the window is too small for the saved width.
+  local function content_target(rs, c, saved)
+    if not saved then return nil end
+    local a
+    for _, r in ipairs(rs) do
+      if r.left == c.left + c.width + 1 and r.top == c.top then a = r end
+    end
+    if not a then return nil end
+    local w = math.max(8, math.min(saved, c.width + a.width - MIN_GRID))
+    return math.max(1, math.min(w, c.width + a.width - 1))
+  end
+
+  -- The next resize that brings the sidebar panes to their intended widths, or nil. The
+  -- handle goes first: AdjustPaneSize on it only trades columns with the subtree beside
+  -- it, so the content width is untouched by that step.
+  local function next_step(rs, rec, saved)
+    local h = rec.handle and find(rs, rec.handle)
+    if not h then return nil end
+    if h.width ~= HANDLE_COLS then return { id = h.id, delta = HANDLE_COLS - h.width } end
+    local c = rec.content and find(rs, rec.content)
+    local w = c and content_target(rs, c, saved)
+    if w and w ~= c.width then return { id = c.id, delta = w - c.width } end
+  end
+
   -- Drops ids of panes that no longer exist (killed, or quit with `q`).
   local function reconcile(rec, rs)
     local r = { view = rec.view, handle = rec.handle, content = rec.content, last = rec.last }
@@ -172,12 +203,85 @@ done
     return dir
   end
 
+  -- Window rescales ---------------------------------------------------------------------
+  -- WezTerm redistributes columns across the pane tree when the window changes size (a
+  -- move to another monitor), which rescales the handle and the content. A rescale is
+  -- told from a divider drag by the tab's total width: it changes only with the window.
+  -- `seen` is the state after the last settle; a width saved from a rescale would stick.
+  local function seen_all() return wezterm.GLOBAL.sidebar_seen or {} end
+  local function rescale_pending(tab_id, rs)
+    local s = seen_all()[tostring(tab_id)]
+    return s ~= nil and s.total ~= total_width(rs)
+  end
+
+  local settling = false
+
+  -- Brings handle and content back to their intended widths and records what was seen.
+  -- Idempotent: runs `wezterm cli` only when a width is off. AdjustPaneSize acts on the
+  -- tab's active pane, so the pane to resize is activated first and the user's restored.
+  local function settle(window, tab, rs, rec)
+    if settling or not rec.handle or not find(rs, rec.handle) then return end
+    local key = tostring(tab:tab_id())
+    local seen = seen_all()[key]
+    local total = total_width(rs)
+    local rescaled = seen ~= nil and seen.total ~= total
+    local c = rec.content and find(rs, rec.content)
+    local saved = wezterm.GLOBAL.sidebar_width
+    if c and not rescaled
+        and (saved == nil or (seen and seen.content_id == c.id and seen.content_w ~= c.width)) then
+      saved = c.width
+      wezterm.GLOBAL.sidebar_width = saved
+    end
+
+    local step = next_step(rs, rec, saved)
+    if step then
+      settling = true
+      local ok = pcall(function()
+        local pane = window:active_pane()
+        local cli = make_cli(pane)
+        local prev
+        for _ = 1, 3 do
+          if not step or (prev and prev.id == step.id and prev.delta == step.delta) then break end
+          cli('activate-pane', '--pane-id', step.id)
+          cli('adjust-pane-size', '--pane-id', step.id, '--amount', math.abs(step.delta),
+            step.delta > 0 and 'Right' or 'Left')
+          prev = step
+          rs = rows(tab:panes_with_info())
+          step = next_step(rs, rec, saved)
+        end
+        cli('activate-pane', '--pane-id', pane:pane_id())
+      end)
+      settling = false
+      if not ok then return end
+      rs = rows(tab:panes_with_info())
+      c = rec.content and find(rs, rec.content)
+    end
+
+    local all = seen_all()
+    all[key] = {
+      total = total_width(rs), content_id = c and c.id or nil, content_w = c and c.width or nil,
+    }
+    wezterm.GLOBAL.sidebar_seen = all
+  end
+
+  local last_resize = {}
+  wezterm.on('window-resized', function(window)
+    local now = os.time()
+    local id = window:window_id()
+    if last_resize[id] and now - last_resize[id] < 1 then return end
+    last_resize[id] = now
+    local tab = window:active_tab()
+    if not tab then return end
+    local rs = rows(tab:panes_with_info())
+    settle(window, tab, rs, reconcile(load(tab:tab_id()), rs))
+  end)
+
   -- Actions ---------------------------------------------------------------------------
-  local function hide(cli, rec, rs)
+  local function hide(cli, rec, rs, tab_id)
     local c = find(rs, rec.content)
     cli('kill-pane', '--pane-id', rec.content)
     rec.content = nil
-    if c then wezterm.GLOBAL.sidebar_width = c.width end
+    if c and not rescale_pending(tab_id, rs) then wezterm.GLOBAL.sidebar_width = c.width end
   end
 
   local function show(cli, rec, rs, src, anchor, window)
@@ -198,6 +302,7 @@ done
       '--pane-id', anchor.id, '--', 'env', 'PWD=' .. dir, VIEWS[rec.view].bin)
     if ok then
       rec.content = tonumber(out)
+      wezterm.GLOBAL.sidebar_width = wezterm.GLOBAL.sidebar_width or w
       cli('activate-pane', '--pane-id', rec.content)
     end
   end
@@ -216,12 +321,12 @@ done
     if not skip(src:pane_id()) then rec.last = src:pane_id() end
 
     if rec.content and (want == nil or want == rec.view) then
-      hide(cli, rec, rs)
+      hide(cli, rec, rs, tab:tab_id())
       local back = find(rs, rec.last) or leftmost(rs, skip)
       if back then cli('activate-pane', '--pane-id', back.id) end
     else
       if rec.content then
-        hide(cli, rec, rs)
+        hide(cli, rec, rs, tab:tab_id())
         rs = rows(tab:panes_with_info())
       end
       rec.view = want or rec.view or 'files'
@@ -241,7 +346,8 @@ done
   local api = {
     internals = {
       rows = rows, leftmost = leftmost, anchor_for = anchor_for,
-      width_for = width_for, reconcile = reconcile,
+      width_for = width_for, reconcile = reconcile, total_width = total_width,
+      content_target = content_target, next_step = next_step,
     },
   }
 
@@ -260,8 +366,7 @@ done
     for _, r in ipairs(rs) do
       if r.active and r.id ~= rec.handle and r.id ~= rec.content then rec.last = r.id end
     end
-    local c = rec.content and find(rs, rec.content)
-    if c and wezterm.GLOBAL.sidebar_width ~= c.width then wezterm.GLOBAL.sidebar_width = c.width end
+    settle(window, tab, rs, rec)
     if not same(old, rec) then
       save(tab:tab_id(), rec)
       write_state(rec)
