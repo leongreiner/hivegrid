@@ -19,7 +19,7 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 - Panels inside the window (the gear button of the left bar, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
 - Permanent narrow bar at the left of every tab with buttons for the file explorer, the git view and the settings panel. The explorer is a yazi sidebar; the git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick. It follows the active pane: focusing a pane in another directory (or a `cd` there) restarts it in that directory. `Ctrl+F` / `Ctrl+G` do the same as the buttons.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
-- Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (not clickable yet), wide padding, and dimmed inactive panes.
+- Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (click it to open the agent hive), wide padding, and dimmed inactive panes.
 
 ## Install
 
@@ -32,6 +32,8 @@ cd hivegrid
 ```
 
 The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `~/.config/hivegrid/yazi/` (the explorer's own yazi config; a global `~/.config/yazi` is never read or changed), `bin/` to `~/.local/bin/`, the icon, and a `Hivegrid` launcher that overrides the `org.wezfurlong.wezterm` desktop entry. Differing existing files are saved once as `*.bak.<timestamp>`. `--tools` also downloads the latest `yazi`, `ya` and `lazygit` into `~/.local/bin`. No sudo is used. `./sync.sh` copies the live setup back into the repo for maintenance.
+
+The usage chip in the header needs each account logged in at least once: an omp profile (`omp --profile=<name>`, then `/login` with Anthropic) and/or Claude Code (`CLAUDE_CONFIG_DIR=~/.claude-<name> claude`, which creates `~/.claude-<name>/.credentials.json`; that file is also how an account is discovered). An account paired with an omp profile (see Settings, Accounts) stays logged in as long as omp runs, because the chip reads omp's own token; without a profile it follows the Claude Code token, which only `claude` refreshes and which shows `login` once it expires (see Claude quota). The state is only read, never changed.
 
 ## Keys
 
@@ -60,6 +62,7 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | drag a column border in the explorer | resize the parent / current / preview columns (the pointer turns into a resize cursor over a border; Hivegrid build only) |
 | Panels | `LEADER+,` | settings panel |
 | | `LEADER+h` | usage history panel |
+| | `LEADER+a` | agent hive panel |
 | | `LEADER+u`, then `1`-`9` | start (or switch) omp with that account |
 | Misc | `Ctrl+C` / `Ctrl+V` | smart copy or interrupt / paste |
 | | `Alt+s` | toggle system stats |
@@ -70,13 +73,14 @@ Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), sp
 
 ## Panels
 
-`bin/hivegrid-panel [settings|usage|agents|monitor]` is a terminal UI with mouse support: click the tabs, buttons and rows, or use the keys shown at the bottom (`Tab` and `F1`-`F4` switch panels, `q` or `Esc` closes). On the Hivegrid build it opens as an overlay over the active tab (the panes keep running underneath and come back when it closes); on stock WezTerm it opens in a new tab.
+`bin/hivegrid-panel [settings|usage|agents|monitor|hive]` is a terminal UI with mouse support: click the tabs, buttons and rows, or use the keys shown at the bottom (`F1`-`F5` and `Tab` switch panels, `q` or `Esc` closes; in the hive `Tab` selects agents, so use the F-keys or click the tabs). On the Hivegrid build it opens as an overlay over the active tab (the panes keep running underneath and come back when it closes); on stock WezTerm it opens in a new tab.
 
 | Open it with | Panel |
 | --- | --- |
 | the gear button of the left bar, `LEADER+,`, `+` menu `Hivegrid settings` | settings |
 | right-click an account pill, `LEADER+h`, `+` menu `Usage history` | usage |
 | `+` menu `Agent overview` | agents |
+| click the header logo, `LEADER+a` | hive |
 | click the system group (CPU, RAM, DSK, GPU), `+` menu `System monitor` | monitor |
 
 - **Settings** writes `~/.config/hivegrid/settings.json`; the WezTerm config watches it, so *Save* applies at once (a missing file means today's defaults).
@@ -87,6 +91,8 @@ Leader, sidebar toggles, the overview dock toggle, `Ctrl+Shift+E` (equalize), sp
 - **Usage** charts the 5h and 7d utilisation of the chosen account over 6 h, 24 h, 7 d or 30 d with window-reset markers, from `~/.cache/wezterm-claude-quota/history.jsonl`, which `claude-quota refresh` appends to (percentages and reset times only, at most one sample per account every two minutes, trimmed to about 30 days, mode 0600). It says when the history starts later than the range.
 - **Agents** lists the panes of the window (`wezterm cli list`, the multiplexer of the terminal it runs in): process, omp profile, how long the foreground process has run, directory and title. A click or `Enter` jumps to the pane and closes the panel.
 - **Monitor** graphs CPU, RAM, disk and GPU (`nvidia-smi` or Jetson `gpu.0/load`) sampled every second while the panel is open, over 1, 5 or 15 minutes.
+- **Hive** shows every agent pane of the window (all tabs) as a hex cell, auto-arranged in a spiral that keeps each agent's slot when another is deleted (`c` compacts, `t` toggles hex/tile). Colour and glyph give the state: blue ↻ working, amber ◔ busy (the turn ended but background jobs run, or a tool such as a build or test has run for 8 s or more), green ✓ done, violet ? needs you (approval, question or plan review), grey · idle, ○ exited. A cell shows nothing more. Selecting one opens a larger popover with the directory, state, age and reason, the pending question, the last screen lines and a prompt line (Enter sends it to the pane). The prompt is disabled while the agent waits for an answer, since typed text would land in that dialog. Plan reviews can be answered from the popover; approvals and questions are shown and answered in the pane (`j` jumps there). `n` adds an agent (a split of the selected agent's tab while it holds fewer than 4 agents, otherwise a new tab) and `d` removes one (Ctrl+D, then the pane is closed; confirmation while the agent is working). `done` stays green until you acknowledge it (`a`) or jump to or prompt that agent.
+  - The exact states come from the omp extension `ext/hivegrid-agent-state.ts`, which `install.sh` copies into `~/.omp/agent/extensions/` and every profile's `extensions/`. It writes `$XDG_RUNTIME_DIR/hivegrid-agents/<pane id>.json`; the hive reads those files and accepts plan-review answers as `<pane id>.cmd.*.json`. Without the extension, or for a pane with a stale file, the state comes from omp's title glyph (working, idle, needs you only), and for other agents (claude, codex, ...) from the foreground process.
 
 Charts are drawn with PIL as inline images (the iTerm2 image protocol, which WezTerm speaks) when `python3-pil` is installed and the terminal is WezTerm; otherwise, or with `HIVEGRID_NO_IMAGES=1`, they are braille plots. The panels need only Python 3.
 
@@ -104,7 +110,7 @@ omp-grid --layout columns 4 --tab --dirs ~/a,~/b  # new tab, 4 columns, director
 
 ## Claude quota
 
-`claude-quota` fetches Claude Code usage for each account and caches only the percentages and reset times in `~/.cache/wezterm-claude-quota/` (plus `history.jsonl`, see Panels). The header reads that cache; the network is never touched from the GUI thread. It reads the OAuth token in-process from the `.credentials.json` of each account directory, calls the usage endpoint with caching and backoff, and never stores or logs tokens. An expired token shows as `login` and is not refreshed. Run `claude-quota refresh` or `claude-quota show` by hand to check it.
+`claude-quota` fetches Claude Code usage for each account and caches only the percentages and reset times in `~/.cache/wezterm-claude-quota/` (plus `history.jsonl`, see Panels). The header reads that cache; the network is never touched from the GUI thread. It reads the OAuth token in-process, first from the account's paired omp profile (the `anthropic` OAuth row in `~/.omp/profiles/<profile>/agent/agent.db`, opened read-only; omp keeps it fresh while it runs) and otherwise from the `.credentials.json` of the account directory (which only the `claude` CLI refreshes). It calls the usage endpoint with caching and backoff, never refreshes, stores or logs tokens, and shows `login` only when neither source holds a valid token. Run `claude-quota refresh` or `claude-quota show` by hand to check it.
 
 The accounts are, in order of precedence: `CLAUDE_QUOTA_DIRS` (or `--dirs`), a comma-separated list; the list in `~/.config/hivegrid/settings.json` (hidden entries skipped) plus every `~/.claude-*` directory holding a `.credentials.json` that the list does not mention; or, without a settings file, those discovered directories alone.
 
