@@ -344,8 +344,8 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual((pct, total, avail), (75.0, 1000, 250))
         self.assertIsNone(P.parse_meminfo("garbage")[0])
 
-    def sampler(self, stats):
-        s = P.Sampler()
+    def sampler(self, stats, log=None):
+        s = P.Sampler(log=log or os.path.join(tempfile.gettempdir(), "no-such-hivegrid-sysstats.jsonl"))
         s.gpu_kind = None  # never run nvidia-smi
         files = {"/proc/stat": iter(stats), "/proc/meminfo": None}
         s.read = lambda path: next(files[path]) if path == "/proc/stat" else "MemTotal: 100 kB\nMemAvailable: 40 kB\n"
@@ -354,6 +354,70 @@ class MonitorTest(unittest.TestCase):
     def tick_at(self, s, t):
         with mock.patch.object(P.time, "time", return_value=t):
             return s.tick()
+
+    def log_file(self, lines):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "sysstats.jsonl")
+        with open(path, "w") as f:
+            f.writelines(json.dumps(line) + "\n" for line in lines)
+        return path
+
+    def test_long_range_comes_from_the_log_without_the_panel_having_sampled(self):
+        now = 100_000.0
+        path = self.log_file([
+            {"ts": now - 3600, "cpu": 10.0, "ram": 50.0},
+            {"ts": now - 1000, "cpu": 20.0},
+            {"ts": now - 1003, "cpu": 40.0},  # same 6 s slot as the line above: their mean
+            {"ts": now - 15, "cpu": 55.0, "gpu": 7.0},
+            {"ts": now, "cpu": 70.0},
+            {"ts": now - 8000, "cpu": 99.0},  # before the range
+            {"ts": now - 500, "cpu": "bad"},
+        ])
+        s = self.sampler([], log=path)
+        s.refresh_log(now)
+        v = s.values("CPU", 3600, now=now)
+        self.assertEqual(len(v), 601)
+        self.assertEqual((v[0], v[-1]), (10.0, 70.0))
+        self.assertAlmostEqual(v[600 - round(1000 / 6)], 30.0)
+        self.assertIsNone(v[300], "no line for minutes: a gap, not the value held across it")
+        self.assertEqual(s.values("RAM", 3600, now=now)[0], 50.0)
+        gpu = s.values("GPU", 3600, now=now)
+        self.assertEqual({x for x in gpu if x is not None}, {7.0})
+        self.assertIsNone(gpu[0])
+
+    def test_short_range_shows_the_log_until_the_panels_own_samples_replace_it(self):
+        path = self.log_file([{"ts": 1000.0, "cpu": 30.0}, {"ts": 1015.0, "cpu": 31.0}])
+        s = self.sampler(["cpu 0 0 0 0", "cpu 100 0 0 100 0 0 0 0"], log=path)
+        self.tick_at(s, 1020.0)  # no CPU rate yet: the log's last value stands
+        v = s.values("CPU", 60, now=1020.0)
+        self.assertEqual((v[40], v[45], v[55], v[60]), (30.0, 30.0, 31.0, 31.0))
+        self.tick_at(s, 1021.0)
+        v = s.values("CPU", 60, now=1021.0)
+        self.assertAlmostEqual(v[60], 50.0)
+        self.assertEqual(v[54], 31.0, "older slots keep the log's value")
+
+    def test_log_is_read_incrementally_and_again_after_rotation(self):
+        path = self.log_file([{"ts": 1000.0, "cpu": 1.0}])
+        s = self.sampler([], log=path)
+        s.refresh_log(2000.0)
+        self.assertEqual([r[0] for r in s.log], [1000.0])
+        with open(path, "a") as f:
+            f.write(json.dumps({"ts": 1015.0, "cpu": 2.0}) + "\n" + '{"ts": 103')  # a line mid-write
+        s.refresh_log(2001.0)
+        self.assertEqual([r[0] for r in s.log], [1000.0], "at most one look every 5 s")
+        s.refresh_log(2006.0)
+        self.assertEqual([r[0] for r in s.log], [1000.0, 1015.0], "the partial line waits")
+        os.replace(path, path + ".1")  # rotation: the file the sampler follows moves to `.1`
+        with open(path, "w") as f:
+            f.write(json.dumps({"ts": 1030.0, "cpu": 3.0}) + "\n")
+        s.refresh_log(2012.0)
+        self.assertEqual([r[0] for r in s.log], [1000.0, 1015.0, 1030.0])
+
+    def test_missing_log_is_no_error(self):
+        s = self.sampler([])
+        s.refresh_log(5000.0)
+        self.assertEqual(s.values("CPU", 3600, now=5000.0), [None] * 601)
 
     def test_cpu_percent_from_successive_samples(self):
         s = self.sampler(["cpu 100 0 0 900 0 0 0 0", "cpu 130 0 0 960 10 0 0 0", "cpu 10 0 0 10 0 0 0 0"])

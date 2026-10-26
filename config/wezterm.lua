@@ -304,6 +304,7 @@ wezterm.on('update-status', function(window)
   local avail = total - used - 1
 
   cq.refresh_if_due(window)
+  ss.record() -- sample and log the system stats even when the header hides them
 
   -- Up to three visual groups: brand (left status), then right to left of the tabs
   --   [mode] [zoom]   B: quota   C: system

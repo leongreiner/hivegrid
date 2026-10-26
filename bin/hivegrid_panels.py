@@ -1,4 +1,5 @@
 """The four Hivegrid panels: settings, usage history, agent overview, system monitor."""
+import bisect
 import json
 import os
 import re
@@ -1297,7 +1298,44 @@ class AgentsPage(U.Page):
 
 # ---- monitor ------------------------------------------------------------------------
 
-MON_RANGES = [("1m", 60), ("5m", 300), ("15m", 900)]
+MON_RANGES = [("1m", 60), ("5m", 300), ("15m", 900), ("1h", 3600), ("6h", 21600), ("24h", 86400), ("7d", 604800)]
+LIVE_MAX = 900  # ranges up to this are drawn one slot per second, longer ones from the log alone
+LOG_EVERY = 15  # seconds between the lines config/sysstats.lua logs
+LOG_SLOTS = 600  # slots of a long range
+LOG_KEYS = ("CPU", "RAM", "DSK", "GPU")
+
+
+def sysstats_log_path():
+    """The file the header's sysstats.lua appends one line to every LOG_EVERY seconds, whether
+    this panel is open or not (and its rotated predecessor, `.1`)."""
+    env = os.environ.get("HIVEGRID_SYSSTATS_LOG")
+    if env:
+        return Path(env)
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "hivegrid" / "sysstats.jsonl"
+
+
+def read_sysstats_log(path, offset=0):
+    """-> (rows, end offset): `[ts, cpu, ram, dsk, gpu]` per complete line from `offset` on, a
+    value None where the line lacks the source. A line still being written is left for the next
+    read, and unreadable lines are skipped."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return [], offset
+    end = data.rfind(b"\n") + 1
+    rows = []
+    for line in data[:end].splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        if isinstance(d, dict) and num(d.get("ts")) is not None:
+            rows.append([d["ts"]] + [num(d.get(k.lower())) for k in LOG_KEYS])
+    return rows, offset + end
 
 
 def parse_cpu_line(text):
@@ -1315,11 +1353,12 @@ def parse_meminfo(text):
 
 
 class Sampler:
-    """CPU, RAM, GPU and disk of `/` every second; the last 15 minutes are kept."""
+    """CPU, RAM, GPU and disk of `/` every second while the panel is open (the last 15 minutes
+    are kept), plus what the header logged every LOG_EVERY seconds, panel open or not."""
 
     JETSON = ("/sys/devices/platform/gpu.0/load", "/sys/devices/gpu.0/load")
 
-    def __init__(self, keep=900):
+    def __init__(self, keep=900, log=None):
         self.hist = {k: deque(maxlen=keep) for k in ("CPU", "RAM", "GPU", "DSK")}
         self.times = deque(maxlen=keep)
         self.prev = None
@@ -1335,6 +1374,10 @@ class Sampler:
                 self.gpu_kind, self.gpu_path = "jetson", p
         if self.gpu_kind is None and shutil.which("nvidia-smi"):
             self.gpu_kind = "nvidia"
+        self.log_path = Path(log) if log else sysstats_log_path()
+        self.log = []  # [ts, cpu, ram, dsk, gpu] per logged line, oldest first
+        self.log_pos = None  # (inode, bytes read) of the current log file
+        self.log_t = 0
 
     def read(self, path):
         try:
@@ -1363,11 +1406,32 @@ class Sampler:
         except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
             self.gpu = None
 
+    def refresh_log(self, now):
+        """Pick up the lines the header appended since the last look (at most every 5 s); read
+        both files again when the current one was rotated away."""
+        if now - self.log_t < 5:
+            return
+        self.log_t = now
+        try:
+            st = os.stat(self.log_path)
+        except OSError:
+            st = None
+        pos = self.log_pos
+        if st and pos and pos[0] == st.st_ino and pos[1] <= st.st_size:
+            rows, end = read_sysstats_log(self.log_path, pos[1])
+        else:
+            self.log, _ = read_sysstats_log(str(self.log_path) + ".1")
+            rows, end = read_sysstats_log(self.log_path)
+        self.log_pos = (st.st_ino, end) if st else None
+        self.log.extend(rows)
+        self.log.sort(key=lambda r: r[0])  # sorted already unless two windows' lines interleaved
+
     def tick(self):
         now = time.time()
         if now - self.t < 1.0:
             return False
         self.t = now
+        self.refresh_log(now)
         cpu = parse_cpu_line(self.read("/proc/stat"))
         pct = None
         if cpu and self.prev:
@@ -1391,18 +1455,38 @@ class Sampler:
         return True
 
     def values(self, key, seconds, now=None):
-        """One slot per second of the last `seconds`, oldest first; None where nothing was
-        sampled yet (before the panel opened). A slot the loop's timing jitter skipped keeps the
-        value before it, so the graph has no false gaps."""
-        now = self.t if now is None else now
-        out = [None] * (seconds + 1)
-        for t, v in zip(self.times, self.hist[key]):
-            i = seconds - round(now - t)
-            if 0 <= i <= seconds:
-                out[i] = v
-        for i in range(1, len(out)):
-            if out[i] is None:
-                out[i] = out[i - 1]
+        """Slots of the last `seconds`, oldest first, None where nothing was sampled. Up to
+        LIVE_MAX seconds it is one slot per second, the panel's own samples over the log's;
+        longer ranges take LOG_SLOTS slots from the log alone, a slot's value the mean of its
+        lines. A slot with no sample keeps the value before it for up to three log intervals
+        (timing jitter, a skipped line), so the graph has no false gaps but a closed Hivegrid
+        shows as one."""
+        now = (self.t or time.time()) if now is None else now
+        width = 1.0 if seconds <= LIVE_MAX else seconds / LOG_SLOTS
+        n = round(seconds / width)
+        out = [None] * (n + 1)
+        k = LOG_KEYS.index(key) + 1
+        acc = {}
+        for row in self.log[bisect.bisect_left(self.log, [now - seconds - width]):]:
+            i = n - round((now - row[0]) / width)
+            if row[k] is not None and 0 <= i <= n:
+                s = acc.setdefault(i, [0.0, 0])
+                s[0] += row[k]
+                s[1] += 1
+        for i, (total, count) in acc.items():
+            out[i] = total / count
+        if seconds <= LIVE_MAX:
+            for t, v in zip(self.times, self.hist[key]):
+                i = n - round((now - t) / width)
+                if v is not None and 0 <= i <= n:
+                    out[i] = v
+        hold = int(3 * LOG_EVERY / width) + 1
+        last = None
+        for i in range(n + 1):
+            if out[i] is not None:
+                last = i
+            elif last is not None and i - last <= hold:
+                out[i] = out[last]
         return out
 
     def current(self, key):
@@ -1433,14 +1517,14 @@ class MonitorPage(U.Page):
         self.range = 1
 
     def hints(self):
-        return "←→/1-3 range  Tab next panel  q close"
+        return "←→/1-7 range  Tab next panel  q close"
 
     def key(self, ui, mods, key):
         if key == "RightArrow":
             self.range = min(self.range + 1, len(MON_RANGES) - 1)
         elif key == "LeftArrow":
             self.range = max(self.range - 1, 0)
-        elif key in ("1", "2", "3") and not mods:
+        elif key in ("1", "2", "3", "4", "5", "6", "7") and not mods:
             self.range = int(key) - 1
 
     def tick(self, ui):
@@ -1461,8 +1545,11 @@ class MonitorPage(U.Page):
             pos += U.chip(cv, p, pos, y, name, selected=i == self.range, bg=p["base"],
                           hit=lambda b, i=i: setattr(self, "range", i)) + 1
         gpu = {"nvidia": "nvidia-smi", "jetson": "Jetson gpu.0/load"}.get(self.sampler.gpu_kind)
-        cv.put(pos + 2, y, "sampled every second while the panel is open" + (f"; GPU from {gpu}" if gpu else "; no GPU found"),
-               p["dim"])
+        live = "live 1 s, header log 15 s"
+        extra = f"; GPU from {gpu}" if gpu else "; no GPU found"
+        if pos + 2 + len(live) + len(extra) + 2 <= x + w:
+            live += extra
+        cv.put(pos + 2, y, live, p["dim"])
         seconds = MON_RANGES[self.range][1]
         metrics = [("CPU", p["accent"]), ("RAM", p["green"]), ("DSK", p["amber"])]
         if self.sampler.gpu_kind:
@@ -1488,7 +1575,7 @@ class MonitorPage(U.Page):
                 cv.put(x + w - 3 - len(value), gy, value, vcol, None, BOLD)
                 if gh > 1:
                     pts = [(i, v) for i, v in enumerate(vals) if v is not None]
-                    rows = U.braille_chart(w - 6, gh - 1, [{"pts": pts, "color": color}], 0, seconds, 100.0)
+                    rows = U.braille_chart(w - 6, gh - 1, [{"pts": pts, "color": color}], 0, len(vals) - 1, 100.0)
                     for r, row in enumerate(rows):
                         for c, (ch, colour) in enumerate(row):
                             if ch != " ":

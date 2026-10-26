@@ -303,3 +303,59 @@ T.test('a Jetson load file is the GPU source and nvidia-smi is never run', funct
   local rich = wz.format(ss.tiers()[1].items)
   T.ok(rich:find('GPU', 1, true) and not rich:find('/16G', 1, true), 'no memory amount on Jetson: ' .. rich)
 end)
+
+-- History log ----------------------------------------------------------------------------------
+
+local function lines(path)
+  local out = {}
+  for l in (T.read(path) or ''):gmatch('[^\n]+') do out[#out + 1] = l end
+  return out
+end
+
+T.test('record() logs a line every 15 s with the mean CPU, with the header hiding the stats or not', function(wz)
+  local log = T.tmpdir() .. '/sysstats.jsonl'
+  T.setenv('HIVEGRID_SYSSTATS_LOG', log)
+  local ss, _, proc = setup(wz)
+  for s = 0, 29 do
+    T.clock(T0 + s)
+    if s == 2 then T.write(proc .. '/stat', stat(1200, 940)) end
+    ss.record()
+  end
+  T.eq(lines(log), {
+    string.format('{"ts":%d,"ram":50.0,"gpu":37.0}', T0), -- CPU needs two readings, the disk a second
+    string.format('{"ts":%d,"cpu":50.0,"ram":50.0,"dsk":25.0,"gpu":37.0}', T0 + 15),
+  })
+end)
+
+T.test('with the stats hidden the GPU is read once per log line, not every 3 s', function(wz)
+  local log = T.tmpdir() .. '/sysstats.jsonl'
+  T.setenv('HIVEGRID_SYSSTATS_LOG', log)
+  wz.GLOBAL.sysstats_visible = false
+  local ss = setup(wz)
+  for s = 0, 29 do
+    T.clock(T0 + s)
+    ss.record()
+  end
+  T.eq(spawned(wz, 'nvidia-smi'), 2)
+  T.eq(#lines(log), 2)
+end)
+
+T.test('the log file is created with its directory and rotates to .1 at 2 MiB', function(wz)
+  local dir = T.tmpdir() .. '/new/hivegrid'
+  local log = dir .. '/sysstats.jsonl'
+  T.setenv('HIVEGRID_SYSSTATS_LOG', log)
+  local ss = setup(wz, function(argv)
+    if argv[1] == 'mkdir' then return os.execute('mkdir -p ' .. T.sh_quote(argv[3])) == true, '' end
+    return false, ''
+  end)
+  ss.record()
+  T.eq(#lines(log), 1)
+  T.write(log, string.rep('x', 2 * 1024 * 1024))
+  T.clock(T0 + 15)
+  ss.record()
+  T.eq(T.read(log), nil, 'the full file moved away')
+  T.ok(#T.read(log .. '.1') > 2 * 1024 * 1024, 'the rotated file holds the old data and the line that filled it')
+  T.clock(T0 + 30)
+  ss.record()
+  T.eq(#lines(log), 1, 'a fresh file after the rotation')
+end)

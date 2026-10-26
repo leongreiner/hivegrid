@@ -4,19 +4,25 @@
 --   ss.segments(opts)   -> wezterm.format items, width in cells; opts.budget picks the richest
 --                          tier (bars, amounts) that fits; {} , 0 if none does
 --   ss.text(opts)       -> plain text of the same content, for tests
--- Sampling happens inside segments()/text() behind per-source caches, so no
--- update-status handler is registered and a hidden segment costs nothing.
+--   ss.record()         -> sample and log without rendering (the header calls it every tick)
+-- Sampling happens inside segments()/text() behind per-source caches, and the header's
+-- update-status handler calls record() every tick, so the stats keep being sampled and
+-- logged (see "History log" below) while the segment is hidden or the monitor panel closed.
 -- Units: all sizes are GiB (1024^3), printed with a "G" suffix.
 return function(config, wezterm)
   local theme = require 'theme'
   local P = theme.P
   local CPU_MEM_TTL, GPU_TTL, DISK_TTL, GPU_RETRY = 2, 3, 30, 60
+  local LOG_EVERY, LOG_MAX = 15, 2 * 1024 * 1024
   -- HIVEGRID_PROC_DIR / HIVEGRID_SYS_DIR point the readers at fixture trees in tests.
   local PROC = os.getenv('HIVEGRID_PROC_DIR') or '/proc'
   local SYS = os.getenv('HIVEGRID_SYS_DIR') or '/sys'
   local JETSON_LOAD = { SYS .. '/devices/platform/gpu.0/load', SYS .. '/devices/gpu.0/load' }
+  local LOG_PATH = os.getenv('HIVEGRID_SYSSTATS_LOG')
+    or ((os.getenv('XDG_CACHE_HOME') or (wezterm.home_dir .. '/.cache')) .. '/hivegrid/sysstats.jsonl')
 
   local cpu = { prev_total = nil, prev_idle = nil, t = 0, pct = nil }
+  local cpu_sum, cpu_n = 0, 0 -- CPU readings since the last log line, so a line is their mean
   local mem = { t = 0, total = nil, avail = nil }
   local disk = { t = 0, pct = nil, free_kib = nil }
   local gpu = { t = 0, kind = nil, retry_at = 0, util = nil, used_mib = nil, total_mib = nil }
@@ -110,6 +116,7 @@ return function(config, wezterm)
     -- After a long gap (segment hidden) the delta would average idle history: rebaseline.
     if cpu.prev_total and now - cpu.t <= 10 and total > cpu.prev_total then
       cpu.pct = 100 * (1 - (idle - cpu.prev_idle) / (total - cpu.prev_total))
+      cpu_sum, cpu_n = cpu_sum + cpu.pct, cpu_n + 1
     end
     cpu.prev_total, cpu.prev_idle, cpu.t = total, idle, now
   end
@@ -129,8 +136,13 @@ return function(config, wezterm)
     return ok, success and stdout or nil
   end
 
+  -- Hidden header segment: nobody watches the 3 s GPU reading, the log needs one per line.
+  local function gpu_ttl()
+    return wezterm.GLOBAL.sysstats_visible == false and LOG_EVERY or GPU_TTL
+  end
+
   local function refresh_gpu(now)
-    if now - gpu.t < GPU_TTL or now < gpu.retry_at or gpu.kind == 'none' then return false end
+    if now - gpu.t < gpu_ttl() or now < gpu.retry_at or gpu.kind == 'none' then return false end
     if gpu.kind == nil then
       for _, p in ipairs(JETSON_LOAD) do
         if io.open(p, 'r') then
@@ -175,6 +187,44 @@ return function(config, wezterm)
     end
   end
 
+  -- History log -------------------------------------------------------------------
+
+  -- One JSON line every LOG_EVERY seconds for the monitor panel's long ranges, written
+  -- whether the panel is open or not: {"ts":..,"cpu":..,"ram":..,"dsk":..,"gpu":..}, a
+  -- key missing where the source is. `ts` in GLOBAL spaces the lines across windows and
+  -- config reloads. The file rotates to `.1` at LOG_MAX bytes, so about 4 to 8 days remain.
+  local mkdir_at = -math.huge
+
+  local function append(line, now)
+    local f = io.open(LOG_PATH, 'a')
+    if not f and now - mkdir_at >= 60 then
+      mkdir_at = now
+      pcall(wezterm.run_child_process, { 'mkdir', '-p', (LOG_PATH:gsub('/[^/]*$', '')) })
+      f = io.open(LOG_PATH, 'a')
+    end
+    if not f then return end
+    f:write(line)
+    local size = f:seek('end')
+    f:close()
+    if size and size >= LOG_MAX then os.rename(LOG_PATH, LOG_PATH .. '.1') end
+  end
+
+  local function log_sample(now)
+    if now - (wezterm.GLOBAL.sysstats_logged or 0) < LOG_EVERY then return end
+    local parts = {}
+    local function add(key, v)
+      if v then parts[#parts + 1] = string.format('"%s":%.1f', key, v) end
+    end
+    add('cpu', cpu_n > 0 and cpu_sum / cpu_n or nil)
+    add('ram', mem.total and 100 * (mem.total - mem.avail) / mem.total or nil)
+    add('dsk', disk.pct)
+    add('gpu', gpu.kind ~= 'none' and gpu.util or nil)
+    if #parts == 0 then return end
+    wezterm.GLOBAL.sysstats_logged = now
+    cpu_sum, cpu_n = 0, 0
+    append(string.format('{"ts":%d,%s}\n', now, table.concat(parts, ',')), now)
+  end
+
   local function refresh()
     local now = os.time()
     refresh_cpu(now)
@@ -182,6 +232,7 @@ return function(config, wezterm)
     local spawned = refresh_gpu(now)
     if not spawned then refresh_disk(now) end
     save()
+    log_sample(now)
   end
 
   -- Model and rendering -----------------------------------------------------
@@ -281,6 +332,9 @@ return function(config, wezterm)
   end
 
   local api = {}
+
+  -- Sample and log without rendering: the header calls this every tick, visible or not.
+  function api.record() refresh() end
 
   function api.visible()
     return wezterm.GLOBAL.sysstats_visible ~= false
