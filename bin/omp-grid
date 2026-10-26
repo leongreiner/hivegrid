@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: omp-grid [ROWS] [COLS] [DIR] [CMD]
+       omp-grid [--layout grid|columns|main-side [N]] [options]
+
+Run inside a WezTerm pane (or anywhere with --tab and a reachable mux).
+Builds a layout of panes, one CMD (default omp) per pane.
+
+Layouts:
+  grid [ROWS COLS]    equal ROWSxCOLS grid (default; positional ROWS COLS)
+  columns N           N equal side-by-side columns
+  main-side N         one main pane (60% width) left, N equal panes stacked right
+
+Options:
+  --layout NAME [N]   layout (N is the count for columns / main-side)
+  --rows N, --cols N  grid dimensions (default 2x2)
+  --dirs d1,d2,...    per-pane directories, cycled if fewer than panes
+  --dir DIR           directory for every pane (default $PWD)
+  --cmd CMD           command to run in each pane (default omp)
+  --name-panes        set pane titles agent-1..N via OSC 2
+  --tab               build the layout in a new tab instead of the current pane
+  -h, --help          show this help
+EOF
+}
+
+rows=2 cols=2 dir=$PWD cmd=omp
+layout=grid count=""
+dirs_csv="" name_panes=0 new_tab=0
+pos=()
+
+while (($#)); do
+  case $1 in
+    -h | --help) usage; exit 0 ;;
+    --layout)
+      [ $# -ge 2 ] || { echo "--layout needs a value" >&2; exit 2; }
+      layout=$2; shift 2
+      if [ $# -gt 0 ] && [[ $1 =~ ^[0-9]+$ ]]; then count=$1; shift; fi ;;
+    --rows) rows=${2:?--rows needs a value}; shift 2 ;;
+    --cols) cols=${2:?--cols needs a value}; shift 2 ;;
+    --dirs) dirs_csv=${2:?--dirs needs a value}; shift 2 ;;
+    --dir) dir=${2:?--dir needs a value}; shift 2 ;;
+    --cmd) cmd=${2:?--cmd needs a value}; shift 2 ;;
+    --name-panes) name_panes=1; shift ;;
+    --tab) new_tab=1; shift ;;
+    --) shift; pos+=("$@"); break ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) pos+=("$1"); shift ;;
+  esac
+done
+
+# Positional form: [ROWS] [COLS] [DIR] [CMD]
+((${#pos[@]} > 0)) && rows=${pos[0]}
+((${#pos[@]} > 1)) && cols=${pos[1]}
+((${#pos[@]} > 2)) && dir=${pos[2]}
+((${#pos[@]} > 3)) && cmd=${pos[3]}
+
+num() { [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "$1 must be a positive integer: $2" >&2; exit 2; }; }
+case $layout in
+  grid) [ -z "$count" ] || { rows=$count; }
+        num ROWS "$rows"; num COLS "$cols" ;;
+  columns) num "columns N" "${count:-$cols}"; rows=1; cols=${count:-$cols} ;;
+  main-side) num "main-side N" "${count:-2}"; count=${count:-2} ;;
+  *) echo "unknown layout: $layout" >&2; exit 2 ;;
+esac
+
+wez=$(command -v wezterm || echo "$HOME/.local/bin/wezterm")
+cli() { "$wez" cli "$@"; }
+
+dirs=()
+if [ -n "$dirs_csv" ]; then
+  IFS=, read -ra dirs <<<"$dirs_csv"
+fi
+[ ${#dirs[@]} -gt 0 ] || dirs=("$dir")
+
+if ((new_tab)); then
+  base=$(cli spawn --cwd "${dirs[0]}")
+else
+  [ -n "${WEZTERM_PANE:-}" ] || { echo "run inside a WezTerm pane (or use --tab)" >&2; exit 1; }
+  base=$WEZTERM_PANE
+fi
+
+# Each split gives the new pane (k-1)/k of the remaining space so panes end up equal.
+# stack BASE DIRECTION N: appends N-1 new panes to `panes`, equal along DIRECTION.
+split_equal() {
+  local head=$1 direction=$2 n=$3 last=$1 i k
+  for ((i = 1; i < n; i++)); do
+    k=$((n - i + 1))
+    last=$(cli split-pane --pane-id "$last" "--$direction" --percent $((100 * (k - 1) / k)) --cwd "${dirs[0]}")
+    new_panes+=("$last")
+  done
+}
+
+panes=()
+case $layout in
+  grid | columns)
+    new_panes=("$base")
+    split_equal "$base" bottom "$rows"
+    row_heads=("${new_panes[@]}")
+    for head in "${row_heads[@]}"; do
+      panes+=("$head")
+      new_panes=()
+      split_equal "$head" right "$cols"
+      panes+=("${new_panes[@]}")
+    done ;;
+  main-side)
+    side=$(cli split-pane --pane-id "$base" --right --percent 40 --cwd "${dirs[0]}")
+    panes=("$base" "$side")
+    new_panes=()
+    split_equal "$side" bottom "$count"
+    panes+=("${new_panes[@]}") ;;
+esac
+
+idx=0
+for p in "${panes[@]}"; do
+  d=${dirs[idx % ${#dirs[@]}]}
+  line=""
+  ((name_panes)) && line+="printf '\\033]2;agent-$((idx + 1))\\007'; "
+  line+="cd $(printf '%q' "$d") && $cmd"
+  printf '%s\n' "$line" | cli send-text --pane-id "$p" --no-paste
+  idx=$((idx + 1))
+done
