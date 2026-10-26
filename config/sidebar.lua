@@ -1,4 +1,5 @@
--- Left sidebar: file explorer (yazi) or git view (lazygit) docked beside a narrow
+-- Left sidebar: file explorer (yazi) or git view (hivegrid-git: every repository of the
+-- directory, lazygit in the one you pick) docked beside a narrow
 -- handle pane. Wire: local sb = require('sidebar')(config, wezterm)
 --   Ctrl+F explorer   Ctrl+G git view   LEADER+Tab hide/show, remembering the view
 -- Layout is [handle][sidebar][leftmost pane...]: both are ordinary leaf splits of the
@@ -18,7 +19,7 @@ local function build(config, wezterm)
   local RUNTIME = os.getenv('XDG_RUNTIME_DIR') or '/tmp'
   local VIEWS = {
     files = { bin = wezterm.home_dir .. '/.local/bin/yazi' },
-    git = { bin = wezterm.home_dir .. '/.local/bin/lazygit' },
+    git = { bin = wezterm.home_dir .. '/.local/bin/hivegrid-git' },
   }
   local theme = require 'theme'
   local COLORS = { accent = theme.P.accent, muted = theme.P.muted }
@@ -228,15 +229,10 @@ done
     end
   end
 
-  -- Directory the sidebar view starts in: git shows the repository around the pane's
-  -- directory, and a directory outside any repository stays itself.
-  local function dir_of(pane, view)
-    local dir = pane and pane_dir(pane) or wezterm.home_dir
-    if view == 'git' then
-      local ok, out = wezterm.run_child_process { 'git', '-C', dir, 'rev-parse', '--show-toplevel' }
-      if ok and out ~= '' then return (out:gsub('%s+$', '')) end
-    end
-    return dir
+  -- Directory the sidebar view starts in: the pane's directory, else home. The git view
+  -- scans it for repositories itself (the one around it and those below it).
+  local function dir_of(pane)
+    return pane and pane_dir(pane) or wezterm.home_dir
   end
 
   -- Window rescales ---------------------------------------------------------------------
@@ -336,7 +332,7 @@ done
       if not ok then return end
       rec.handle = tonumber(out)
     end
-    local dir = dir_of(src, rec.view)
+    local dir = dir_of(src)
     -- PWD is set explicitly because tools such as yazi prefer the inherited $PWD over the cwd.
     local cmd = { 'env', 'PWD=' .. dir }
     if rec.view == 'files' then cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. YAZI_CONFIG_HOME end

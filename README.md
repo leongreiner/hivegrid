@@ -18,7 +18,7 @@ A WezTerm workspace for running many [`omp`](https://github.com/can1357/oh-my-pi
 - System stats in the header: CPU, RAM, disk, GPU, each with its percentage, a slim bar and, when the window is wide enough, the absolute amount (`11.7G/31G`, `165G free`).
 - Claude Code usage (5h and 7d windows) for every account as a header chip with numbers and slim bars (an account that needs a login shows only an amber `login` chip); accounts are discovered, so a new one appears on its own. Clicking an account starts omp with it, or moves the omp already running in that pane to it with the same chat.
 - Panels inside the window (logo click, `LEADER+,`, `+` menu): settings (themes, key bindings, accounts), usage history charts, agent overview and a system monitor.
-- Left sidebar with a yazi file explorer or lazygit, toggled by key or by clicking its handle.
+- Left sidebar with a yazi file explorer or a git view, toggled by key or by clicking its handle. The git view lists every repository of the working directory (like VS Code's Source Control repositories) with branch, ahead/behind and change counts, and opens lazygit in the one you pick.
 - Smart `Ctrl+C` (copy with a selection, interrupt otherwise), `Ctrl+V` paste, `Ctrl+Arrow` splits, `Alt+Arrow` focus.
 - Dark-blue theme with rounded tabs level with the header pills, the app icon's honeycomb of seven hexagons drawn at the left of the header (a click opens the settings panel), wide padding, and dimmed inactive panes.
 
@@ -54,6 +54,7 @@ The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `
 | | `LEADER+b` | toggle broadcast typing to all panes of the tab |
 | Sidebar | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | | `LEADER+Tab` | hide or show, remembering the view |
+| | `Enter` / click, `r`, `q` in the git view | open lazygit in the selected repository (quit lazygit to return to the list), rescan, close; `j`/`k` or arrows move |
 | | `Ctrl+C` in the explorer | copy the absolute path of the hovered file or folder, or of all selected entries one per line |
 | | double click in the explorer | open a terminal in that folder (a file's folder), split right of the last active grid pane, or below it when that pane is narrow; it takes focus |
 | Panels | `LEADER+,` | settings panel |
@@ -128,7 +129,7 @@ If the pane looks busy (agent working or asking), a dialog asks "switch anyway?"
 - Moving an omp chat to another account needs omp's per-terminal session record (omp 18); with several omp processes in one terminal it refuses rather than guess. The busy check uses the same heuristic as the agent states.
 - omp state detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
 - The sidebar takes the full window height only in a single-pane tab; in a grid it is docked beside the leftmost pane.
-- The sidebar views start in the working directory of the pane they were opened from (the git view in its repository root). A pane whose shell reports a path from another host, such as an ssh session, uses the directory of its local foreground process instead.
+- The sidebar views start in the working directory of the pane they were opened from (the git view scans it for repositories: the one around it and those below it, `HIVEGRID_GIT_DEPTH` levels deep, default 3; with a single repository it opens lazygit there directly). A pane whose shell reports a path from another host, such as an ssh session, uses the directory of its local foreground process instead.
 - The explorer copies paths with the terminal clipboard escape (OSC 52), which WezTerm accepts, and also through `wl-copy`, `xclip` or `xsel` when present.
 - `Ctrl+V` paste is not fanned out in broadcast mode, because the clipboard is not readable from Lua.
 
