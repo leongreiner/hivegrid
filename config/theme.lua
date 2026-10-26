@@ -257,16 +257,28 @@ function M.group(parts, bg)
   return M.pill(body, bg)
 end
 
--- The Hivegrid mark: Nerd md-hexagon-multiple (three hexagons, the bundled Symbols Nerd
--- Font draws it) in the accent colour, no text and no pill, with air before it and
--- after it so it never touches the first tab. opts.glyph and opts.color override the
--- defaults; opts.pill sits it on a raised pill. Returns wezterm.format items.
+-- The Hivegrid mark: the logo's seven hexagons as a row of ⬢ glyphs, centre strong
+-- blue and the others coloured by agent state as in the icon (done green, working
+-- light blue, needs input light red, waiting grey-blue). No text, no pill; air around it
+-- so it never touches the first tab. opts.glyph and opts.color switch to a single-colour
+-- glyph; opts.pill sits it on a raised pill. Returns wezterm.format items.
+local BRAND_CELLS = {
+  '#82f0c3', '#c4e0ff', '#ffbebe', '#1e90ff', '#cddaf0', '#7aa8ee', '#c4e0ff',
+}
 function M.brand(opts)
   opts = opts or {}
-  local mark = {
-    { Foreground = { Color = opts.color or M.P.accent } },
-    { Text = opts.glyph or '\u{f06e1}' },
-  }
+  local mark = {}
+  if opts.glyph or opts.color then
+    mark = {
+      { Foreground = { Color = opts.color or M.P.accent } },
+      { Text = opts.glyph or '\u{f06e1}' },
+    }
+  else
+    for _, c in ipairs(BRAND_CELLS) do
+      mark[#mark + 1] = { Foreground = { Color = c } }
+      mark[#mark + 1] = { Text = '\u{2b22}' }
+    end
+  end
   if opts.pill then
     local items = M.pill(mark, M.P.raised)
     items[#items + 1] = { Text = ' ' }
