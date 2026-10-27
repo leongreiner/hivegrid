@@ -182,8 +182,11 @@ def layout(n, avail):
     return 1
 
 
-def detail_of(p, name):
-    """The second line of a row and how to cut it ('start' for a path, whose end says more)."""
+def detail_of(p, name, mixed=False):
+    """The first and second line of a row and how to cut the second ('start' for a path, whose end
+    says more). An agent's own title is the first line: the directory name would only repeat
+    "hivegrid" on every row of a grid that works in one repository. The directory moves to the
+    second line when the panes work in different ones (`mixed`)."""
     # A shell titles its pane "user@host: dir"; the directory is the useful part.
     title = clean(p.get("title") or "")
     host, _, path = title.partition(": ")
@@ -191,16 +194,20 @@ def detail_of(p, name):
     title = U.home_path(path) if is_path else title
     # Without a title or reason the full directory, as shell rows show it.
     cwd = U.home_path(clean(p.get("cwd") or ""))
-    fallback = cwd if cwd and cwd != name else clean(p.get("proc") or "")
     # While the agent runs, what it is doing (a tool, a background job) says more than its
     # session title; otherwise the title does.
     reason = clean(p.get("reason") or "")
+    working = p.get("kind") in ("working", "busy")
+    if title and not is_path and title != name:
+        sub = reason if working else (cwd if mixed else "")
+        return title, sub, "start" if sub and sub == cwd else "end"
+    fallback = cwd if cwd and cwd != name else clean(p.get("proc") or "")
     named = title if title and title != name else ""
-    if p.get("kind") in ("working", "busy"):
+    if working:
         detail = reason or named or fallback
     else:
         detail = named or reason or fallback
-    return detail, "start" if detail and detail in (title if is_path else None, cwd) else "end"
+    return name, detail, "start" if detail and detail in (title if is_path else None, cwd) else "end"
 
 
 def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, digits="", scroll=None, sel=None,
@@ -261,6 +268,7 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
         else:
             start = min(max(scroll, 0), last)
         cv.start, cv.last = start, last
+    mixed = len({p.get("cwd") or p.get("name") for p in panes}) > 1  # panes in different directories
 
     # Numbers take as many columns as the widest one, so names line up past pane 9.
     num_w = max((len(str(p["num"])) for p in panes), default=1)
@@ -283,10 +291,12 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
         active = bool(p.get("active"))
         age = human(now - p["since"]) if p.get("since") else ""
         name = clean(p.get("name") or "").rstrip("/") or clean(p.get("proc") or "") or "?"
+        name, detail, how = detail_of(p, name, mixed)
         right = f"{p.get('text') or label} {age}".strip()
         if U.text_width(right) + 1 + U.text_width(name) > w - 1 - (5 + num_w):
             right = age  # the state word goes first when the dock is narrow
-        detail, how = detail_of(p, name) if lines > 1 and p["id"] != asked else ("", "end")
+        if lines == 1 or p["id"] == asked:
+            detail = ""
         # Dense lists (no blank line between rows) stripe every second row so rows stay apart.
         row_bg = stripe if rows_per < 3 and (start + k) % 2 else bg
         action, lit = None, max(hover.get(p["id"], 0.0), hover.get(("x", p["id"]), 0.0))

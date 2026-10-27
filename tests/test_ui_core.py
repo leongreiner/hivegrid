@@ -401,6 +401,19 @@ class TitleRowTest(unittest.TestCase):
         self.assertEqual(text(cv, 0), " ⬡ Overview        ?2  ⊞   ▦  ")
         self.assertEqual((cv.key_at(23, 0), cv.key_at(27, 0), cv.key_at(25, 0)), ("arrange", "equalize", None))
 
+    def test_chips_drop_from_the_left_instead_of_covering_the_title(self):
+        chips = [U.Chip("✕ tab", key="close"), U.Chip("⊞", key="arrange"), U.Chip("▦", key="equalize")]
+        rows = {}
+        for w in (30, 22, 18, 14, 8):
+            cv = canvas(w)
+            U.title_row(cv, PAL, "Overview", chips=chips)
+            rows[w] = text(cv, 0)
+        self.assertEqual(rows[30], " ⬡ Overview    ✕ tab   ⊞   ▦  ")
+        self.assertEqual(rows[22], " ⬡ Overview    ⊞   ▦  ")
+        self.assertEqual(rows[18], " ⬡ Overview    ▦  ")
+        self.assertEqual(rows[14], " ⬡ Overview   ")
+        self.assertEqual(rows[8], " ⬡ Ove… ")
+
 
 class ListRowTest(unittest.TestCase):
     def test_columns_and_selection_marker(self):

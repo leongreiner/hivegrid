@@ -429,6 +429,36 @@ class DockNumbersTest(unittest.TestCase):
         bgs = [cv.cells[y][20][2] for y in range(3, 6)]
         self.assertNotEqual(bgs[0], bgs[1])
         self.assertEqual(bgs[0], bgs[2])
+class RowTitleTest(unittest.TestCase):
+    """A row is named by the agent's own title; the directory is not repeated when every pane shares it."""
+
+    def doc(self, cwds):
+        return {"panes": [{"id": 10 + i, "num": i + 1, "kind": "working" if i == 0 else "idle", "name": "hivegrid",
+                           "cwd": cwd, "proc": "omp", "since": NOW - 5, "text": "", "title": f"Task {i + 1}",
+                           "reason": "edit x" if i == 0 else ""} for i, cwd in enumerate(cwds)]}
+
+    def test_title_replaces_the_directory_name_and_a_shared_directory_is_left_out(self):
+        lines = D.dump(D.render(self.doc(["~/p/hivegrid"] * 2), 40, 12, NOW))
+        self.assertIn("1 Task 1", lines[2])
+        self.assertEqual(lines[3].strip("▎ "), "edit x")  # working: what it is doing
+        self.assertIn("2 Task 2", lines[5])
+        self.assertEqual(lines[6].strip(), "")  # idle: nothing to add
+        self.assertFalse([line for line in lines if "hivegrid" in line and "⬡" not in line])
+
+    def test_directory_goes_to_the_second_line_when_panes_differ(self):
+        lines = D.dump(D.render(self.doc(["~/p/hivegrid", "~/p/other"]), 40, 12, NOW))
+        self.assertIn("2 Task 2", lines[5])
+        self.assertEqual(lines[6].strip(), "~/p/other")
+
+    def test_title_row_buttons_never_cover_the_title(self):
+        doc = self.doc(["~/p/hivegrid"])
+        for w in range(10, 40):
+            top = D.dump(D.render(doc, w, 12, NOW, lambda i: 0, lambda: 0, lambda: 0, None, close_tab=lambda: 0))[0]
+            if "Overview" not in top:  # too narrow for the whole title: the buttons are gone, not drawn over it
+                self.assertFalse(set(top) & set("✕⊞▦"), (w, top))
+            self.assertTrue(top.startswith(" ⬡ "), (w, top))
+
+
         roomy = D.render({"panes": self.DOC["panes"][:3]}, 40, 20, NOW)  # blank lines between: no stripes
         self.assertEqual(roomy.cells[5][20][2], roomy.cells[8][20][2])
 

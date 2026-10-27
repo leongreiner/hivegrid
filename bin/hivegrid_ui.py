@@ -704,7 +704,8 @@ def title_row(cv, pal, title, crumb="", right=(), *, chips=(), x=0, y=0, w=None,
               reserve=0, crumb_fit="path", rule=True):
     """The title row (§4.2 rule 1) at row y over x..x+w: " ⬡ Title" in accent bold, " · crumb" in
     muted, then `right` segments [(text, colour)] right-aligned 1 cell apart, then `chips`
-    [Chip] (left to right, 1 cell apart) at the right edge; 1 cell of padding is always kept, and
+    [Chip] (left to right, 1 cell apart) at the right edge, dropped from the left when they would
+    come within 2 cells of the title; 1 cell of padding is always kept, and
     `reserve` more cells are left free for anything the caller draws there. Row y+1 is the rule in
     rule_color on `rule_bg` (default `bg`). When narrow the crumb shrinks down to 8 cells
     (crumb_fit: 'path', 'start' or 'end'), then right segments drop from the end (list them
@@ -715,10 +716,16 @@ def title_row(cv, pal, title, crumb="", right=(), *, chips=(), x=0, y=0, w=None,
     bg = bg or pal["surface"]
     end = x + w
     cv.fill(x, y, w, 1, bg=bg)
-    lx = x + 1 + cv.put(x + 1, y, f"{TITLE_GLYPH} {title}", pal["accent"], bg, BOLD)
+    title_text = f"{TITLE_GLYPH} {title}"
+    lx = x + 1 + cv.put(x + 1, y, fit_cells(title_text, max(end - 1 - reserve - (x + 1), 0)), pal["accent"], bg, BOLD)
     sep = " · "
     right = [(t, c) for t, c in right if t]
     limit = end - 1 - reserve
+    # The chips never overdraw the title: when they do not fit beside it (2 cells apart) they drop
+    # from the left, so the first chip listed goes first (list them least important first).
+    chips = list(chips)
+    while chips and limit - (sum(chip_width(c.label, c.round) + 1 for c in chips) - 1) - 2 < lx:
+        chips = chips[1:]
     if chips:
         limit -= sum(chip_width(c.label, c.round) + 1 for c in chips) - 1
         cx = limit
