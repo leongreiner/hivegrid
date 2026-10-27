@@ -518,25 +518,18 @@ local layouts = require('layouts')(config, wezterm)
 local overview -- set at the end, once the dock module is loaded
 wezterm.on('user-var-changed', function(window, pane, name, value)
   if name == 'sidebar_click' then
-    -- The settings and overview buttons of the sidebar bar; its other buttons are handled
-    -- in sidebar.lua.
+    -- The settings, overview and browser buttons of the sidebar bar; its other buttons are
+    -- handled in sidebar.lua.
     if sb.is_sidebar(pane:pane_id()) then
       local button = tostring(value):match('^(%a+)')
       if button == 'settings' then
         window:perform_action(settings_action(), pane)
       elseif button == 'overview' and overview then
         overview.toggle(window, pane)
+      elseif button == 'browser' and web then
+        web.browser_button(window, pane)
       end
     end
-    return
-  end
-  if name == 'hivegrid_hive_equalize' then
-    -- The hive panel asks for the regular equalize after it spawned, moved or removed
-    -- agent panes; the value is the pane id that should keep the keyboard focus.
-    local id = tonumber(tostring(value):match('^(%d+)'))
-    -- The hive is an overlay, which is no pane of the mux: when the pane it names is gone
-    -- (it was just closed), the tab's own active pane stands in.
-    layouts.equalize(window, (id and wezterm.mux.get_pane(id)) or window:active_tab():active_pane())
     return
   end
   if name ~= 'hivegrid_capture' then return end

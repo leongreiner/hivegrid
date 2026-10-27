@@ -87,7 +87,7 @@ have_chrome() {
   done
   return 1
 }
-have_chrome || echo "warning: web panes need Google Chrome or Chromium (set HIVEGRID_CHROME to its path); the rest of Hivegrid works without it" >&2
+have_chrome || echo "warning: web panes need a Chromium-family browser such as Google Chrome or Chromium (Settings, Web, or HIVEGRID_CHROME, names another one); the rest of Hivegrid works without it" >&2
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT

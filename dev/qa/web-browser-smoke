@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""Browser button and browser choice smoke test in the QA sandbox (dev/qa/hgq, slot 13; local only:
+CI has no Xvfb, no fork build, no Chrome). It drives the real GUI (Xvfb, front_end=Software) and
+checks, with pixels, `wezterm cli` and a recording wrapper around Chrome:
+
+  1 the bar shows five buttons (the browser button between the dock and the settings gear) when the
+    settings name a browser, and four when that browser is missing (stock WezTerm behaves the same:
+    the config only asks for the button when it found a browser on the fork build); the buttons
+    come and go with settings.json, no restart
+  2 a click on the browser button in a tab without a web pane opens the location prompt; typing a
+    page and Enter opens a web pane that shows it, and the browser started is the one of
+    `web.browser` in settings.json (the wrapper script records its argv, then execs the real Chrome)
+  3 a click with a web pane in the tab focuses it instead (also while another pane is zoomed) and
+    opens nothing
+  4 `wezterm cli split-pane --url` without --browser uses the settings' browser, and `--browser PATH`
+    beats it (a second wrapper), for a profile of its own
+  5 an empty answer to the prompt opens `web.home`
+
+  dev/qa/web-browser-smoke [--keep]     --keep leaves slot 13 running for a look (hgq down 13 stops it)
+
+Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst), PIL, Chrome, and a fork build with web
+panes (HG_WEZTERM_DIR, e.g. OPT=/tmp/hgweb WRAPPER=/tmp/hgweb/hivegrid wezterm/build-hivegrid.sh).
+Screenshots land in /tmp/hivegrid-qa/s13/shots/web-browser.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit("web-browser-smoke: needs PIL (python3-pil)")
+
+SLOT = 13
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HGQ = os.path.join(ROOT, "dev", "qa", "hgq")
+QA = os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa")
+SHOTS = os.path.join(QA, f"s{SLOT}", "shots", "web-browser")
+HOME = os.path.join(QA, f"s{SLOT}", "home")
+WORK = os.path.join(QA, f"s{SLOT}", "work")
+SETTINGS = os.path.join(HOME, ".config", "hivegrid", "settings.json")
+REAL_CHROME = "/opt/google/chrome/chrome"
+KEEP = "--keep" in sys.argv
+
+for k in ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET"):
+    os.environ.pop(k, None)
+
+fails = []
+shots = 0
+
+
+def hgq(*args, check=True, timeout=60):
+    r = subprocess.run([HGQ, *map(str, args)], capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"hgq {' '.join(map(str, args))}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def cli(*args, **kw):
+    return hgq("cli", SLOT, *args, **kw)
+
+
+def panes():
+    return json.loads(cli("list", "--format", "json"))
+
+
+def waitfor(fn, timeout=15.0, every=0.25):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            got = fn()
+        except Exception:  # a poll that raises is a poll that is not there yet
+            got = None
+        if got:
+            return got
+        time.sleep(every)
+    return None
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  ({detail})" if detail and not ok else ""))
+    if not ok:
+        fails.append(f"{name} {detail}".strip())
+    return ok
+
+
+def shot(name, geo=None):
+    global shots
+    shots += 1
+    os.makedirs(SHOTS, exist_ok=True)
+    out = os.path.join(SHOTS, f"{shots:02d}-{name}.png")
+    hgq("shot", SLOT, out, *([geo] if geo else []))
+    return out
+
+
+def wrapper(name):
+    """A script that records its argv in WORK/<name>.log and execs the real Chrome."""
+    path = os.path.join(WORK, name)
+    with open(path, "w") as f:
+        f.write(f'#!/bin/sh\necho "$0 $*" >> "{path}.log"\nexec {REAL_CHROME} "$@"\n')
+    os.chmod(path, 0o755)
+    open(path + ".log", "w").close()
+    return path
+
+
+def launches(path):
+    with open(path + ".log") as f:
+        return [line for line in f.read().splitlines() if line]
+
+
+def write_settings(web):
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    with open(SETTINGS + ".tmp", "w") as f:
+        json.dump({"web": web}, f)
+    os.replace(SETTINGS + ".tmp", SETTINGS)
+
+
+def bar_pane():
+    return min((p for p in panes() if p["tty_name"]), key=lambda p: p["left_col"])
+
+
+def terminal_ids():
+    bar = bar_pane()["pane_id"]
+    return [p["pane_id"] for p in panes() if p["tty_name"] and p["pane_id"] != bar and p["size"]["cols"] > 20]
+
+
+def web_ids():
+    return [p["pane_id"] for p in panes() if p.get("is_web")]
+
+
+def win_origin():
+    """Window top-left on the display (hgq win)."""
+    x = y = 0
+    for line in hgq("win", SLOT).splitlines():
+        if "Absolute upper-left X" in line:
+            x = int(line.split()[-1])
+        if "Absolute upper-left Y" in line:
+            y = int(line.split()[-1])
+    return x, y
+
+
+def bar_icons():
+    """Pixel rows (top, bottom) of the button icons of the bar, below the header."""
+    png = shot("bar")
+    img = Image.open(png).convert("RGB")
+    surface = img.getpixel((2, img.height - 3))
+    bar = bar_pane()
+    cw = bar["size"]["pixel_width"] / bar["size"]["cols"]
+    ch = bar["size"]["pixel_height"] / bar["size"]["rows"]
+    x0, x1 = int(cw), int(cw * (bar["size"]["cols"] - 1))
+    start_y = next((y for y in range(img.height) if img.getpixel((2, y)) == surface), 0)
+    rows = []
+    for y in range(start_y, img.height):
+        rows.append(any(sum(abs(a - b) for a, b in zip(img.getpixel((x, y)), surface)) > 80 for x in range(x0, x1)))
+    clusters, begin = [], None
+    for y, busy in enumerate(rows):
+        if busy and begin is None:
+            begin = y
+        elif not busy and begin is not None:
+            clusters.append((start_y + begin, start_y + y))
+            begin = None
+    # An icon is a few text rows tall; merge fragments of one icon (a glyph with gaps) and drop specks.
+    merged = []
+    for c in clusters:
+        if merged and c[0] - merged[-1][1] < ch * 0.4:
+            merged[-1] = (merged[-1][0], c[1])
+        else:
+            merged.append(c)
+    return [c for c in merged if c[1] - c[0] >= ch * 0.5], png
+
+
+def click_bar_button(index_from_top, count):
+    icons, _ = bar_icons()
+    assert len(icons) == count, f"{len(icons)} buttons, expected {count}: {icons}"
+    top, bottom = icons[index_from_top]
+    ox, oy = win_origin()
+    hgq("x", SLOT, "click", ox + 20, oy + (top + bottom) // 2)
+
+
+def run():
+    shutil.rmtree(SHOTS, ignore_errors=True)
+    os.makedirs(SHOTS, exist_ok=True)
+    wez = os.path.join(os.environ.get("HG_WEZTERM_DIR", os.path.expanduser("~/.local/opt/hivegrid-wezterm")), "wezterm")
+    help_ = subprocess.run([wez, "cli", "split-pane", "--help"], capture_output=True, text=True).stdout
+    if "--browser" not in help_:
+        sys.exit("web-browser-smoke: this wezterm build has no --browser (HG_WEZTERM_DIR)")
+    if not os.access(REAL_CHROME, os.X_OK):
+        sys.exit(f"web-browser-smoke: needs {REAL_CHROME}")
+    hgq("down", SLOT, check=False)
+    shutil.rmtree(os.path.join(QA, f"s{SLOT}", "work"), ignore_errors=True)
+    os.makedirs(WORK, exist_ok=True)
+    profile = "hgq-browser-smoke"
+    shutil.rmtree(os.path.expanduser(f"~/.local/share/hivegrid/web/profile-{profile}"), ignore_errors=True)
+    chrome_a, chrome_b = wrapper("chrome-a"), wrapper("chrome-b")
+    home = "data:text/html," + urllib.parse.quote("<body style=background:#00aa44>")  # a location has no spaces
+    write_settings({"browser": chrome_a, "profile": profile, "home": home})
+    hgq("up", SLOT, 1600, 1000)
+    hgq("focus", SLOT)
+
+    # 1 ----------------------------------------------------------------------------------
+    n = None
+
+    def five():
+        nonlocal n
+        icons, _ = bar_icons()
+        n = len(icons)
+        return n == 5
+
+    check("1 the bar shows five buttons with a browser in the settings", bool(waitfor(five, 20)), f"saw {n}")
+    run_dir = os.path.join(QA, f"s{SLOT}", "run")
+    state = [f for f in os.listdir(run_dir) if f.startswith("wezterm-sidebar-") and not f.endswith(".ov")]
+    check("1 the bar state file asks for it", bool(state) and "web" in open(os.path.join(run_dir, state[0])).read().split())
+
+    write_settings({"browser": "/nonexistent/browser", "profile": profile})
+
+    def four():
+        nonlocal n
+        icons, _ = bar_icons()
+        n = len(icons)
+        return n == 4
+
+    check("1 no browser found: the button is gone again, without a restart", bool(waitfor(four, 20)), f"saw {n}")
+    write_settings({"browser": chrome_a, "profile": profile, "home": home})
+    check("1 and back with it", bool(waitfor(five, 20)), f"saw {n}")
+
+    # 2 ----------------------------------------------------------------------------------
+    term = terminal_ids()[0]
+    click_bar_button(3, 5)
+    time.sleep(1.5)
+    shot("prompt")
+    page = "data:text/html," + urllib.parse.quote("<body style=background:#ff00ff><title>mg</title>")
+    hgq("x", SLOT, "type", page)
+    hgq("x", SLOT, "key", "Return")
+    web = waitfor(lambda: web_ids() or None, 15)
+    check("2 click, location, Enter: a web pane opens", bool(web), f"panes {len(panes())}")
+    if not web:
+        return
+    web = web[0]
+    ran = waitfor(lambda: launches(chrome_a) or None, 15)
+    check("2 the browser of settings.json is the one launched", bool(ran) and "--remote-debugging-pipe" in ran[0], str(ran))
+    check("2 and it got the default profile of the settings",
+          bool(ran) and any(f"profile-{profile}" in line for line in ran), str(ran))
+    check("2 the other wrapper was not used", launches(chrome_b) == [])
+    time.sleep(2.0)
+    shot("web-open")
+    p = next(p for p in panes() if p["pane_id"] == web)
+    check("2 the page is shown (title mg)", p["title"].startswith("mg") or "data:" in p["title"], p["title"])
+
+    # 3 ----------------------------------------------------------------------------------
+    cli("activate-pane", "--pane-id", term)
+    time.sleep(0.5)
+    check("3 a terminal is active first", next(p for p in panes() if p["pane_id"] == term)["is_active"])
+    count = len(panes())
+    click_bar_button(3, 5)
+    time.sleep(1.0)
+    focused = waitfor(lambda: next(p for p in panes() if p["pane_id"] == web)["is_active"], 5)
+    check("3 a click with a web pane in the tab focuses it", bool(focused))
+    check("3 and opens nothing", len(panes()) == count and web_ids() == [web], f"{len(panes())} vs {count}")
+    shot("focused")
+    cli("activate-pane", "--pane-id", term)
+    cli("zoom-pane", "--pane-id", term, "--zoom")
+    time.sleep(0.5)
+    click_bar_button(3, 5)
+    focused = waitfor(lambda: next(p for p in panes() if p["pane_id"] == web)["is_active"], 5)
+    check("3 a zoomed terminal: the click still brings the web pane to the front", bool(focused))
+    check("3 the bar is still there", bar_pane()["size"]["cols"] <= 8)
+    shot("zoomed-focus")
+    cli("zoom-pane", "--pane-id", web, "--unzoom")
+
+    # 4 ----------------------------------------------------------------------------------
+    for url_flags, wrapper_path, other, what in (
+        (["--profile", "hgq-cli-settings"], chrome_a, chrome_b, "no --browser: the settings' browser"),
+        (["--profile", "hgq-cli-flag", "--browser", chrome_b], chrome_b, None, "--browser beats the settings"),
+    ):
+        shutil.rmtree(os.path.expanduser(f"~/.local/share/hivegrid/web/profile-{url_flags[1]}"), ignore_errors=True)
+        before = len(launches(wrapper_path))
+        pid = cli("split-pane", "--pane-id", term, "--bottom", "--url", "about:blank", *url_flags).strip()
+        got = waitfor(lambda: len(launches(wrapper_path)) > before, 15)
+        check(f"4 {what}", bool(got) and any(url_flags[1] in line for line in launches(wrapper_path)[before:]), pid)
+        if other:
+            check("4   and not the other one", all(url_flags[1] not in line for line in launches(other)))
+
+    # 5 ----------------------------------------------------------------------------------
+    for p in panes():
+        if p.get("is_web"):
+            cli("kill-pane", "--pane-id", p["pane_id"])
+    waitfor(lambda: not web_ids() or None, 10)
+    cli("activate-pane", "--pane-id", term)
+    time.sleep(1.0)
+    click_bar_button(3, 5)
+    time.sleep(1.0)
+    hgq("x", SLOT, "key", "Return")
+    web = waitfor(lambda: web_ids() or None, 15)
+    check("5 an empty answer opens a web pane", bool(web))
+    if web:
+        time.sleep(3.0)
+        shot("home")
+        png = os.path.join(SHOTS, f"{shots:02d}-home.png")
+        p = next(p for p in panes() if p["pane_id"] == web[0])
+        cell_w = p["size"]["pixel_width"] / p["size"]["cols"]
+        cell_h = p["size"]["pixel_height"] / p["size"]["rows"]
+        x = int(win_origin()[0] + (p["left_col"] + p["size"]["cols"] / 2) * cell_w)
+        y = int(win_origin()[1] + 70 + (p["top_row"] + p["size"]["rows"] / 2) * cell_h)
+        green = Image.open(png).convert("RGB").getpixel((min(x, 1590), min(y, 990)))
+        check("5 and it shows web.home (green)", green[1] > 140 and green[0] < 60, str(green))
+
+    log = os.path.join(QA, f"s{SLOT}", "wezterm.log")
+    bad = [l for l in open(log, errors="replace") if " ERROR " in l and ("lua" in l.lower() or "runtime error" in l)]
+    check("no Lua errors in the GUI log", not bad, bad[0].strip() if bad else "")
+
+
+try:
+    run()
+finally:
+    if not KEEP:
+        hgq("down", SLOT, check=False)
+
+print(f"screenshots: {SHOTS}")
+if fails:
+    print(f"web-browser-smoke: {len(fails)} failed")
+    sys.exit(1)
+print("web-browser-smoke passed")

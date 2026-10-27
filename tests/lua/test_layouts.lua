@@ -1,5 +1,5 @@
--- config/layouts.lua through its public surface: api.arrange / api.equalize, the
--- 'update-status' auto-arrange handler and the key bindings / key tables it installs.
+-- config/layouts.lua through its public surface: api.arrange / api.equalize and the key
+-- bindings / key tables it installs. Nothing in it runs on its own (no event handlers).
 -- `wezterm cli` is answered by tests/lua/fakemux.lua, a model of WezTerm's split tree.
 local T = require 'tests.lua.t'
 local FM = require 'tests.lua.fakemux'
@@ -200,133 +200,78 @@ test('pane mode s swaps with the chosen pane, keyboard stays on the moved pane',
   T.eq(mux.tabs[1].active, 1)
 end)
 
--- Auto arrange ------------------------------------------------------------------------
+-- Nothing re-tiles by itself ---------------------------------------------------------
+-- A split, a close or a resize leaves every pane where it is: the only commands the mux
+-- sees come from the user's own actions (arrange, equalize, rotate, swap).
 
-local function tick(wz, mux, n)
-  for _ = 1, n or 1 do wz.stub.call('update-status', mux.window, mux.window:active_pane()) end
+local function moves(mux)
+  local bad = {}
+  for _, c in ipairs(mux:commands()) do
+    if c:find('move%-pane') or c:find('%-%-move%-pane%-id') or c:find('^adjust%-pane%-size') then
+      bad[#bad + 1] = c
+    end
+  end
+  return bad
 end
 
-test('auto-arrange: a tidy strip that gains a pane is re-tiled after 3 steady ticks', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
-  mux:split(2, 'h', 50)
-  mux:sync()
-  mux.log = {}
-  tick(wz, mux, 2)
-  T.eq(mux:commands(), {}, 'count must hold before acting')
-  tick(wz, mux)
-  T.eq(count(mux, 'move-pane-to-new-tab'), 2, 'arranged on the third tick')
-  local _, counts, ordered = reading(mux)
-  T.eq(counts, { 3 })
-  T.ok(spread(field(ordered, 'width')) <= 1, 'widths evened: ' .. T.show(field(ordered, 'width')))
-  mux.log = {}
-  tick(wz, mux, 5)
-  T.eq(mux:commands(), {}, 'settled: no further arranging')
+test('layouts registers no event handler: nothing runs on status ticks or window resizes', function(wz)
+  setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
+  for _, event in ipairs { 'update-status', 'window-resized', 'window-config-reloaded', 'user-var-changed' } do
+    T.eq(wz.stub.handlers[event] or {}, {}, event)
+  end
 end)
 
-test('auto-arrange: a count that flips back restarts the wait', function(wz)
+test('a pane gained or lost keeps every other pane where it is', function(wz)
   local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
+  local before = mux:geometry(1)
   local _, new = mux:split(2, 'h', 50)
   mux:sync()
-  tick(wz, mux, 2)
+  T.eq(mux:commands(), {}, 'a split issues no layout command')
+  T.eq(mux:geometry(1), before, 'the first pane stayed')
   mux:kill(new)
-  tick(wz, mux)
-  mux:split(2, 'h', 50)
   mux:sync()
-  mux.log = {}
-  tick(wz, mux, 2)
-  T.eq(count(mux, 'move-pane-to-new-tab'), 0, 'two ticks after the flip are not enough')
-  tick(wz, mux)
-  T.eq(count(mux, 'move-pane-to-new-tab'), 2)
+  T.eq(mux:commands(), {}, 'closing a pane issues no layout command either')
+  T.eq(#mux.tabs, 1)
 end)
 
-test('auto-arrange: an ideal grid losing a pane is re-tiled', function(wz)
+test('a hand-built or tidy grid that gains a pane is neither re-tiled nor evened', function(wz)
   local root = FM.v(29, FM.strip('h', { 1, 2, 3 }, 250), FM.strip('h', { 4, 5 }, 250))
   local mux = setup(wz, { cols = 250, rows = 60, root = root })
-  tick(wz, mux)
-  mux:kill(3)
-  mux.log = {}
-  tick(wz, mux, 3)
-  T.ok(count(mux, 'move-pane-to-new-tab') > 0, 'arranged')
-  local ids, counts, ordered = reading(mux)
-  T.eq(counts, { 2, 2 })
-  T.eq(ids, { 1, 2, 4, 5 })
-  T.ok(spread(field(ordered, 'width')) <= 1)
-end)
-
-test('auto-arrange leaves a jump by two panes (omp-grid) alone', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
-  mux:split(2, 'h', 50)
-  mux:split(1, 'h', 50)
+  mux:split(3, 'h', 50)
   mux:sync()
-  mux.log = {}
-  tick(wz, mux, 6)
-  T.eq(count(mux, 'move-pane-to-new-tab'), 0)
+  T.eq(moves(mux), {})
   T.eq(count(mux, 'split-pane'), 0)
-end)
-
-test('auto-arrange leaves a hand-built layout alone', function(wz)
-  -- Main pane plus a stacked side column: not aligned rows.
-  local root = FM.h(124, FM.leaf(1), FM.v(29, FM.leaf(2), FM.leaf(3)))
-  local mux = setup(wz, { cols = 250, rows = 60, root = root })
-  tick(wz, mux)
-  mux:split(3, 'v', 50)
-  mux:sync()
-  mux.log = {}
-  tick(wz, mux, 6)
   T.eq(count(mux, 'move-pane-to-new-tab'), 0)
 end)
 
-test('auto-arrange waits while an overlay (panel) is the active pane', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
-  mux:split(2, 'h', 50)
-  mux:sync()
-  mux.log = {}
-  mux.window.active_pane_override = wz.fake.pane { id = 777 }
-  tick(wz, mux, 5)
-  T.eq(mux:commands(), {}, 'nothing while the overlay shows')
-end)
-
-test('auto-arrange skips a tab with a zoomed pane', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
-  mux:split(2, 'h', 50)
-  mux.tabs[1].zoomed = 1
-  mux:sync()
-  mux.log = {}
-  tick(wz, mux, 5)
-  T.eq(mux:commands(), {})
-end)
-
-test('sidebar opening beside an even grid re-evens it; no re-tiling', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  tick(wz, mux)
-  -- The sidebar view is a top-level split at the left: the grid loses 31 columns, which
-  -- WezTerm takes from the last pane.
+test('the sidebar opening beside the grid does not even it or move a pane', function(wz)
+  local mux = setup(wz, { cols = 250, rows = 60, root = FM.h(60, FM.leaf(1), FM.leaf(2)) })
   mux.tabs[1].root = FM.h(30, FM.leaf(99), mux.tabs[1].root)
   dock(wz, mux.tab:tab_id(), 99)
   mux:sync()
-  mux.log = {}
-  tick(wz, mux, 4)
-  T.eq(count(mux, 'move-pane-to-new-tab'), 0, 'not re-tiled')
-  local _, _, ordered = reading(mux, { [99] = true })
-  T.ok(spread(field(ordered, 'width')) <= 1, 'evened: ' .. T.show(field(ordered, 'width')))
+  T.eq(mux:commands(), {})
+  T.eq(mux:geometry(1).width, 60)
   T.eq(mux:geometry(99).width, 30)
 end)
 
-test('a hand-sized grid is not evened when the sidebar opens', function(wz)
-  local mux = setup(wz, { cols = 250, rows = 60, root = FM.h(60, FM.leaf(1), FM.leaf(2)) })
-  tick(wz, mux)
-  mux.tabs[1].root = FM.h(30, FM.leaf(99), mux.tabs[1].root)
-  dock(wz, mux.tab:tab_id(), 99)
+test('equalize still moves dividers when asked for', function(wz)
+  local mux, api = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3 }, 250) })
+  mux:split(3, 'h', 50)
   mux:sync()
   mux.log = {}
-  tick(wz, mux, 4)
-  T.eq(count(mux, 'adjust-pane-size'), 0)
-  T.eq(mux:geometry(1).width, 60)
+  api.equalize(mux.window, mux.window:active_pane())
+  T.ok(count(mux, 'adjust-pane-size') > 0, 'equalize resizes the dividers')
+  local _, _, ordered = reading(mux)
+  T.ok(spread(field(ordered, 'width')) <= 1, 'widths even: ' .. T.show(field(ordered, 'width')))
+end)
+
+test('arrange still re-tiles when asked for', function(wz)
+  local mux, api = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3, 4, 5 }, 250) })
+  mux.log = {}
+  api.arrange(mux.window, mux.window:active_pane())
+  T.ok(count(mux, 'move-pane-to-new-tab') > 0, 'arrange moves panes')
+  local _, counts = reading(mux)
+  T.eq(counts, { 3, 2 })
 end)
 
 -- Equalize --------------------------------------------------------------------------
@@ -383,6 +328,45 @@ test('equalize: a row of 2 beside a row of 3 gets halves and thirds', function(w
   T.eq(#mux.window.toasts, 0, T.show(mux.window.toasts))
 end)
 
+-- A window resize that lands while equalize runs (the run takes seconds: every step is a
+-- `wezterm cli` process) used to leave its targets, computed for the old area, pointing past
+-- the new edge: the row divider was pushed to the far end and the panes behind it kept a
+-- row or two. The Hivegrid build scales every split in proportion on a resize; the model
+-- here does the same for the rows when the hook below resizes the window.
+test('equalize: a window resize in the middle of the run does not collapse a row', function(wz)
+  local root = FM.v(37, FM.h(50, FM.leaf(1), FM.h(80, FM.leaf(2), FM.leaf(3))),
+    FM.h(100, FM.leaf(4), FM.h(30, FM.leaf(5), FM.leaf(6))))
+  local mux, api = setup(wz, { cols = 200, rows = 54, root = root })
+  local function shrink(rows)
+    local ratio = rows / mux.rows
+    local function walk(node)
+      if not node.id then
+        if node.dir == 'v' then node.first = math.max(1, math.floor(node.first * ratio)) end
+        walk(node.a)
+        walk(node.b)
+      end
+    end
+    walk(mux.tabs[1].root)
+    mux.rows = rows
+  end
+  local adjusts = 0
+  mux.fail = function(args)
+    if args[1] == 'adjust-pane-size' then
+      adjusts = adjusts + 1
+      if adjusts == 4 then shrink(30) end
+    end
+    return false
+  end
+  api.equalize(mux.window, wz.mux.get_pane(1))
+  T.ok(adjusts > 4, 'the resize came during the run')
+  local _, counts, ordered = reading(mux)
+  T.eq(counts, { 3, 3 })
+  T.ok(spread(field(ordered, 'height')) <= 1, 'heights: ' .. T.show(field(ordered, 'height')))
+  T.ok(ordered[4].height >= 8, 'bottom row: ' .. T.show(field(ordered, 'height')))
+  T.ok(spread(field({ ordered[4], ordered[5], ordered[6] }, 'width')) <= 1,
+    'bottom widths: ' .. T.show(field(ordered, 'width')))
+end)
+
 -- The explorer view as sidebar.lua docks it: a leaf split left of the leftmost grid pane,
 -- recorded as the tab's sidebar content.
 local function open_view(wz, mux, pane, cols)
@@ -395,24 +379,11 @@ test('equalize: an arranged grid stays put when the explorer view opens beside i
   -- 83 | 82 | 83: the widths arrange gives three panes in 250 columns.
   local root = FM.h(83, FM.leaf(1), FM.h(82, FM.leaf(2), FM.leaf(3)))
   local mux, api = setup(wz, { cols = 250, rows = 60, root = root })
-  tick(wz, mux)
   local view = open_view(wz, mux, 1, 30)
-  tick(wz, mux, 4)
-  T.eq(mux:commands('adjust-pane-size'), {}, 'no re-even fight when the view opens')
+  T.eq(mux:commands('adjust-pane-size'), {}, 'nothing re-evens when the view opens')
   api.equalize(mux.window, wz.mux.get_pane(2))
   T.eq(mux:commands('adjust-pane-size'), {}, 'view + first pane count as one column')
   T.eq(mux:geometry(view).width, 30)
-  T.eq(#mux.window.toasts, 0, T.show(mux.window.toasts))
-end)
-
-test('opening the view beside an omp-grid grid (1 cell off exact) neither resizes nor toasts', function(wz)
-  -- omp-grid's split-pane --percent 66 then 50 gives 84 | 82 | 82 in 250 columns.
-  local root = FM.h(84, FM.leaf(1), FM.h(82, FM.leaf(2), FM.leaf(3)))
-  local mux = setup(wz, { cols = 250, rows = 60, root = root })
-  tick(wz, mux)
-  open_view(wz, mux, 1, 30)
-  tick(wz, mux, 4)
-  T.eq(mux:commands('adjust-pane-size'), {})
   T.eq(#mux.window.toasts, 0, T.show(mux.window.toasts))
 end)
 

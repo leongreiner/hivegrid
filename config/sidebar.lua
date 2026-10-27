@@ -3,7 +3,8 @@
 -- narrow bar pane. Wire: local sb = require('sidebar')(config, wezterm)
 --   Ctrl+F explorer   Ctrl+G git view   LEADER+Tab hide/show, remembering the view
 -- The bar is permanent: every tab gets one (see ensure_handle), with buttons for the
--- explorer, the git view and the settings panel.
+-- explorer, the git view, the overview dock and the settings panel, and a browser button on the
+-- Hivegrid build when a browser is installed (config/web.lua).
 -- Hivegrid build: [bar][view][grid...], the bar and the view one full-height column left of
 -- the whole grid (tree: Split(Split(bar, view), grid)). The bar is a `--top-level` split;
 -- the view is made by widening the bar by the view's width plus a divider and splitting the
@@ -12,10 +13,10 @@
 -- bar, so the overview dock and zoom leave the column alone. Its width is 22% of the window
 -- (28 to 60 columns) and follows window resizes, until a divider drag sets one: that width
 -- stays for the tab, and tabs without a drag of their own take it too, both scaled with the
--- window width. Closing the view
--- gives its columns to the bar, which settle hands back to the grid. Switching the view, or
--- the git view following another directory, replaces it in place (the new view split off
--- the old one, which then closes), so the grid does not move.
+-- window width. Closing the view gives its columns straight back to the grid (the mux does it,
+-- see wezterm/HIVEGRID.md: the bar keeps its width, no round trip through settle). Switching
+-- the view, or the git view following another directory, replaces it in place (the new view
+-- split off the old one, which then closes), so the grid does not move.
 -- Stock WezTerm 20240203: [bar][view][leftmost pane...]: the view is an ordinary leaf split
 -- of the leftmost grid pane, so a killed view's columns return to that pane. There
 -- `--top-level` on a tab with 2+ panes leaves the pane tree (cells + 1) columns wider than
@@ -23,7 +24,7 @@
 -- The bar script turns on mouse reporting, so WezTerm forwards clicks to it and
 -- no mouse_bindings are needed; every default selection/link/bypass binding stays.
 -- The script announces a left press on a button as the user var `sidebar_click`
--- (files, git or settings, plus a salt so repeated clicks are changes).
+-- (files, git, overview, settings or browser, plus a salt so repeated clicks are changes).
 -- The explorer asks for a terminal (user var hivegrid_open_dir) or an editor on files
 -- (hivegrid_open_file) in a new grid pane; see open_in_grid.
 local M = {}
@@ -165,7 +166,7 @@ local function build(config, wezterm)
   local function reconcile(rec, rs)
     local r = {
       view = rec.view, handle = rec.handle, content = rec.content, last = rec.last, dir = rec.dir,
-      width = rec.width, width_of = rec.width_of, nudge = rec.nudge,
+      width = rec.width, width_of = rec.width_of, nudge = rec.nudge, web = rec.web,
     }
     for _, k in ipairs { 'handle', 'content', 'last' } do
       if r[k] and not find(rs, r[k]) then r[k] = nil end
@@ -185,15 +186,17 @@ local function build(config, wezterm)
   local function same(a, b)
     return a.view == b.view and a.handle == b.handle and a.content == b.content
       and a.last == b.last and a.dir == b.dir and a.width == b.width and a.width_of == b.width_of
-      and a.nudge == b.nudge
+      and a.nudge == b.nudge and a.web == b.web
   end
 
-  -- The bar's state file: "<open|closed> <view> [nudge]".
+  -- The bar's state file: "<open|closed> <view>" and then, in any order, the nudge (an integer) and
+  -- `web` (the browser button is to be shown: config/web.lua found a browser, which also means this
+  -- is the Hivegrid build; bin/hivegrid-bar is a process of its own and cannot tell).
   local function write_state(rec)
     local f = rec.handle and io.open(('%s/wezterm-sidebar-%d'):format(RUNTIME, rec.handle), 'w')
     if f then
       local nudge = (rec.nudge or 0) ~= 0 and (' ' .. rec.nudge) or ''
-      f:write((rec.content and 'open ' or 'closed ') .. (rec.view or 'files') .. nudge .. '\n')
+      f:write((rec.content and 'open ' or 'closed ') .. (rec.view or 'files') .. nudge .. (rec.web and ' web' or '') .. '\n')
       f:close()
     end
   end
@@ -327,11 +330,26 @@ local function build(config, wezterm)
   -- resizes the given pane), so the pane to resize is activated first and the user's restored.
   -- A divider drag sets the tab's view width (rec.width, with the window width it was set at)
   -- and the width views of other tabs take.
-  local function settle(window, tab, rs, rec)
-    if settling or not rec.handle or not find(rs, rec.handle) then return end
+  -- Every handler (status tick, window resize, a click) reads the tab and then calls something
+  -- that lets the others run, so what a caller read can be old by the time it gets here: the
+  -- same resize ran twice from the same rows, the second aimed at columns the first had already
+  -- moved (it closed the view up to its minimum), and the rows read as a divider drag. settle
+  -- therefore reads the tab again itself and takes the width another handler may have pinned.
+  local stuck = {} -- tab id -> the widths a step was tried at without moving anything
+  local function widths_of(rs, rec)
+    local h, c = find(rs, rec.handle), rec.content and find(rs, rec.content)
+    return table.concat({ h and h.width or '', c and c.width or '', total_width(rs) }, ':')
+  end
+
+  local function settle(window, tab, rec)
+    if settling or not rec.handle then return end
     -- layouts.lua rebuilds or resizes the grid through `wezterm cli` as well; the two must
     -- not interleave their activate/adjust pairs. The next status tick settles.
     if wezterm.GLOBAL.layout_busy then return end
+    local rs = rows(tab:panes_with_info())
+    if not find(rs, rec.handle) then return end
+    local saved = load(tab:tab_id())
+    rec.width, rec.width_of = saved.width, saved.width_of
     local key = tostring(tab:tab_id())
     local seen = seen_all()[key]
     local c = rec.content and find(rs, rec.content)
@@ -345,6 +363,10 @@ local function build(config, wezterm)
 
     local target = view_target(rec)
     local step = next_step(rs, rec, target)
+    -- A step that moved nothing (the divider is at a minimum) is not tried again on every
+    -- status tick; it is, as soon as a width changes.
+    local before = widths_of(rs, rec)
+    if step and stuck[key] == before then step = nil end
     if step then
       settling = true
       local ok = pcall(function()
@@ -369,6 +391,7 @@ local function build(config, wezterm)
       if not ok then return end
       rs = rows(tab:panes_with_info())
       c = rec.content and find(rs, rec.content)
+      stuck[key] = widths_of(rs, rec) == before and before or nil
     end
 
     local all = seen_all()
@@ -388,7 +411,7 @@ local function build(config, wezterm)
     local tab = window:active_tab()
     if not tab then return end
     local rs = rows(tab:panes_with_info())
-    settle(window, tab, rs, reconcile(load(tab:tab_id()), rs))
+    settle(window, tab, reconcile(load(tab:tab_id()), rs))
   end)
 
   -- Actions ---------------------------------------------------------------------------
@@ -520,18 +543,15 @@ local function build(config, wezterm)
     end
   end
 
-  -- While the sidebar rearranges panes, layouts.lua and the next status tick keep out
-  -- (published as wezterm.GLOBAL.sidebar_busy): a `wezterm cli` call can let other
-  -- callbacks run before it returns.
+  -- While the sidebar rearranges panes, a second call keeps out: a `wezterm cli` call can
+  -- let other callbacks run before it returns.
   local busy = false
   local function exclusive(fn)
     return function(...)
       if busy then return end
       busy = true
-      wezterm.GLOBAL.sidebar_busy = true
       local ok, err = pcall(fn, ...)
       busy = false
-      wezterm.GLOBAL.sidebar_busy = false
       if not ok then wezterm.log_error('sidebar: ' .. tostring(err)) end
     end
   end
@@ -570,8 +590,7 @@ local function build(config, wezterm)
     save(tab:tab_id(), rec)
     write_state(rec)
     -- Showing or hiding the view changes the bar's width for a moment; put it back at once.
-    rs = rows(tab:panes_with_info())
-    settle(window, tab, rs, rec)
+    settle(window, tab, rec)
   end)
 
   local S = require('settings')(config, wezterm)
@@ -598,6 +617,7 @@ local function build(config, wezterm)
 
   api.is_sidebar = M.is_sidebar
   api.is_dock = M.is_dock
+  api.set_web_button = M.set_web_button
   api.make_cli = make_cli
 
   function api.toggle(window, pane, view) apply(window, pane, view) end
@@ -607,7 +627,7 @@ local function build(config, wezterm)
   -- status tick would notice; callers that changed the layout call this instead of waiting.
   function api.restore(window, tab)
     local rs = rows(tab:panes_with_info())
-    settle(window, tab, rs, reconcile(load(tab:tab_id()), rs))
+    settle(window, tab, reconcile(load(tab:tab_id()), rs))
   end
 
   -- True while `name` runs in the pane: its foreground process or one below it
@@ -675,6 +695,7 @@ local function build(config, wezterm)
     local old = load(tab:tab_id())
     local rec = reconcile(old, rs)
     rec.nudge = gear_nudge(window)
+    rec.web = M.web_button or nil
     -- The last grid pane is gone (its shell exited, it was closed): the bar, a view and the
     -- dock alone are no tab worth keeping, so the tab closes as WezTerm's last pane would.
     if rec.handle and find(rs, rec.handle) and not leftmost(rs, M.is_dock) then
@@ -698,8 +719,8 @@ local function build(config, wezterm)
       local back = find(rs, rec.last) or leftmost(rs, M.is_dock) or find(rs, rec.content)
       if back then back.pane:activate() end
     end
-    rs = follow_git(window, tab, rs, rec)
-    settle(window, tab, rs, rec)
+    follow_git(window, tab, rs, rec)
+    settle(window, tab, rec)
     if not same(old, rec) then
       save(tab:tab_id(), rec)
       write_state(rec)
@@ -784,7 +805,8 @@ local function build(config, wezterm)
 
   wezterm.on('user-var-changed', function(window, pane, name, value)
     if name == 'sidebar_click' and api.is_sidebar(pane:pane_id()) then
-      -- A click on a button of the bar. The settings button is handled in wezterm.lua.
+      -- A click on a button of the bar. The overview, settings and browser buttons are handled in
+      -- wezterm.lua.
       local view = tostring(value):match('^(%a+)')
       if view == 'files' or view == 'git' then apply(window, pane, view) end
     elseif name == 'hivegrid_open_dir' then
@@ -795,6 +817,12 @@ local function build(config, wezterm)
   end)
 
   return api
+end
+
+-- config/web.lua says whether the bar shows its browser button: only the Hivegrid build can open a
+-- web pane, and only with a browser installed. Set once per config load, before any tab syncs.
+function M.set_web_button(on)
+  M.web_button = on and true or nil
 end
 
 -- Standalone so other modules can skip sidebar panes without holding the api table:

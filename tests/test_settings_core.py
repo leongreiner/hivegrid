@@ -115,9 +115,12 @@ class SettingsFileNormalisation(TempHome):
         self.assertEqual([p.name for p in path.parent.iterdir()], ["settings.json"])  # no temp left
 
     def test_web_settings_default_and_stored_values(self):
-        self.assertEqual(S.Settings(self.settings_file({})).web(), {"links": "pane", "search": "", "profile": "main"})
-        s = S.Settings(self.settings_file({"web": {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2"}}))
-        self.assertEqual(s.web(), {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2"})
+        self.assertEqual(S.Settings(self.settings_file({})).web(),
+                         {"links": "pane", "search": "", "profile": "main", "home": "about:blank", "browser": "auto"})
+        s = S.Settings(self.settings_file({"web": {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
+                                                    "home": "https://start.test/", "browser": "/usr/bin/brave-browser"}}))
+        self.assertEqual(s.web(), {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
+                                   "home": "https://start.test/", "browser": "/usr/bin/brave-browser"})
         self.assertEqual(s.effective()["web"], s.web())
 
     def test_invalid_web_settings_fall_back_per_field(self):
@@ -126,7 +129,26 @@ class SettingsFileNormalisation(TempHome):
         for stored in ("text", 5, ["pane"], None):
             self.assertEqual(S.Settings(self.settings_file({"web": stored})).web(), S.WEB_DEFAULTS, repr(stored))
         s = S.Settings(self.settings_file({"web": {"links": "system", "profile": 7, "search": ["x"]}}))
-        self.assertEqual(s.web(), {"links": "system", "search": "", "profile": "main"})
+        self.assertEqual(s.web(), dict(S.WEB_DEFAULTS, links="system"))
+
+    def test_a_stored_home_must_be_an_address_and_a_stored_browser_a_path(self):
+        for home in ("javascript:alert(1)", "two words", "", 5, ["https://x.test"]):
+            with self.subTest(home=home):
+                self.assertEqual(S.Settings(self.settings_file({"web": {"home": home}})).web()["home"], "about:blank")
+        for browser in ("chromium", "~/chrome", "", 7, None, ["/usr/bin/chromium"]):
+            with self.subTest(browser=browser):
+                self.assertEqual(S.Settings(self.settings_file({"web": {"browser": browser}})).web()["browser"], "auto")
+        self.assertEqual(S.Settings(self.settings_file({"web": {"browser": " /usr/bin/chromium "}})).web()["browser"],
+                         "/usr/bin/chromium")
+
+    def test_the_browser_and_home_are_written_only_when_they_differ_from_the_defaults(self):
+        path = self.settings_file({})
+        s = S.Settings(path)
+        web = dict(s.web(), browser="/usr/bin/vivaldi", home="https://start.test/")
+        s.write(s.theme(), s.keys(), [], web)
+        self.assertEqual(json.loads(path.read_text())["web"], {"browser": "/usr/bin/vivaldi", "home": "https://start.test/"})
+        s.write(s.theme(), s.keys(), [], dict(web, browser="auto", home="about:blank"))
+        self.assertNotIn("web", json.loads(path.read_text()))
 
     def test_a_stored_search_template_must_pass_valid_search(self):
         for bad in ("javascript:alert(%s)", "chrome://settings/?q=%s", "ftp://x.test/%s", "x.test/?q=%s"):
@@ -144,6 +166,87 @@ class SettingsFileNormalisation(TempHome):
         self.assertIsNone(S.valid_search("http://localhost:8080/s?q=%s"))
         for bad in ("https://x.test/", "x.test/?q=%s", "ftp://x/%s"):
             self.assertTrue(S.valid_search(bad), bad)
+
+    def make_exe(self, relative, text="#!/bin/sh\necho 'Chromium 120.0.1'\n"):
+        path = self.home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        path.chmod(0o755)
+        return str(path)
+
+    def setUp(self):
+        super().setUp()
+        # The /opt/google/chrome/chrome of the machine running the tests is not part of these.
+        families = [(label, tuple(p for p in places if not os.path.isabs(p))) for label, places in S.BROWSER_FAMILIES]
+        patcher = mock.patch.object(S, "BROWSER_FAMILIES", tuple(families))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_detected_browsers_are_one_per_product_in_the_order_of_the_families(self):
+        bin1, bin2 = self.home / "bin1", self.home / "bin2"
+        brave = self.make_exe("bin1/brave-browser")
+        self.make_exe("bin1/chromium-browser")
+        chromium = self.make_exe("bin2/chromium")
+        self.make_exe("bin2/vivaldi-stable")
+        self.make_exe("bin2/firefox")
+        self.make_exe("bin2/notes.txt")
+        (bin2 / "microsoft-edge").write_text("not executable")
+        found, skipped = S.detect_browsers(os.pathsep.join(["", str(bin1), str(bin2)]))
+        paths = dict(found)
+        self.assertEqual(paths["Brave"], brave)
+        self.assertEqual(paths["Chromium"], chromium, "names are tried in order, `chromium` before `chromium-browser`")
+        self.assertEqual(paths["Vivaldi"], str(bin2 / "vivaldi-stable"))
+        self.assertNotIn("Microsoft Edge", paths, "a file that is not executable is not a browser")
+        self.assertFalse([p for _, p in found if "firefox" in p], "Firefox is never offered")
+        self.assertEqual(skipped, [])
+        self.assertEqual([label for label, _ in found], [l for l, _ in S.BROWSER_FAMILIES if l in paths], "family order")
+
+    def test_snap_and_flatpak_browsers_are_skipped_with_a_reason(self):
+        snap_stub = self.make_exe("bin/chromium-browser", "#!/bin/sh\necho 'Command requires the chromium snap to be installed' >&2\nexec snap install chromium\n")
+        flatpak = self.make_exe("bin/brave-browser", "#!/bin/sh\nexec flatpak run --branch=stable com.brave.Browser \"$@\"\n")
+        real = self.make_exe("bin/vivaldi", "#!/bin/sh\nexec /opt/vivaldi/vivaldi \"$@\"\n")
+        link = self.home / "bin" / "microsoft-edge"
+        link.symlink_to("/usr/bin/snap")
+        found, skipped = S.detect_browsers(str(self.home / "bin"))
+        self.assertEqual([p for _, p in found], [real])
+        self.assertEqual(sorted(p for p, _ in skipped), sorted([snap_stub, flatpak, str(link)]))
+        self.assertTrue(all(why == S.CONFINED_WHY for _, why in skipped))
+        self.assertEqual(S.confined_browser("/snap/chromium/current/usr/lib/chromium-browser/chrome"), S.CONFINED_WHY)
+        self.assertEqual(S.confined_browser(str(self.home / ".local/share/flatpak/exports/bin/org.x")), S.CONFINED_WHY)
+        self.assertIsNone(S.confined_browser(real))
+
+    def test_a_custom_browser_must_exist_be_executable_and_answer_version(self):
+        ok = self.make_exe("my/chrome")
+        error, path, version = S.check_browser(ok)
+        self.assertEqual((error, path, version), (None, ok, "Chromium 120.0.1"))
+        self.assertEqual(S.check_browser("~/my/chrome")[1], ok, "a leading ~ is the home directory")
+        cases = {
+            "nothing typed": "",
+            "relative": "my/chrome",
+            "missing": str(self.home / "gone"),
+            "a directory": str(self.home / "my"),
+            "not executable": self.make_exe("my/plain") and (self.home / "my" / "plain").chmod(0o644) or str(self.home / "my" / "plain"),
+            "version fails": self.make_exe("my/broken", "#!/bin/sh\nexit 3\n"),
+            "version prints nothing": self.make_exe("my/silent", "#!/bin/sh\nexit 0\n"),
+            "not runnable": self.make_exe("my/nobin", "no shebang, not a binary"),
+            "firefox": self.make_exe("my/ff", "#!/bin/sh\necho 'Mozilla Firefox 130.0'\n"),
+            "firefox by name": self.make_exe("my/firefox"),
+            "snap": self.make_exe("my/snapped", "#!/bin/sh\nexec snap run chromium \"$@\"\n"),
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                error, path, version = S.check_browser(text)
+                self.assertTrue(error, "an error text")
+                self.assertEqual((path, version), (None, None))
+        self.assertIn("Firefox", S.check_browser(cases["firefox"])[0])
+        self.assertIn("snap", S.check_browser(cases["snap"])[0])
+
+    def test_a_browser_that_hangs_on_version_is_refused_not_waited_for(self):
+        def hang(*args, **kwargs):
+            raise S.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+        error, path, _ = S.check_browser(self.make_exe("my/slow"), run=hang)
+        self.assertEqual(path, None)
+        self.assertIn("did not answer", error)
 
     def test_web_leader_is_a_leader_binding_with_the_documented_default(self):
         self.assertEqual(S.Settings(self.settings_file({})).keys()["web_leader"], "LEADER+w")

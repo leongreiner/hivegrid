@@ -93,10 +93,13 @@ def scene_tasks(d):
 
 
 def scene_grid(d):
-    d.caption("Split a pane: the grid re-tiles itself, panes keep their numbers", 5)
+    d.caption("Split a pane: it stays where the split puts it; nothing re-tiles by itself", 5)
     d.click(*dock_row(4))
     time.sleep(0.6)
     d.key("ctrl+Right", gap=2.5)
+    time.sleep(2.0)
+    d.caption("Press Ctrl+Shift+A to arrange the grid on demand", 4)
+    d.key("ctrl+shift+a", gap=2.5)
     time.sleep(2.0)
     d.caption("Drag a divider out of shape, then press ▦: every divider is even again", 6)
     d.drag(500, 549, 500, 790)

@@ -27,7 +27,8 @@
 | | `q` in the explorer | close it; the keyboard returns to the grid pane (yazi's other keys are unchanged: `.` shows hidden files, `F1` or `~` help) |
 | | drag a column border in the explorer | resize the parent / current / preview columns (the pointer turns into a resize cursor over a border; Hivegrid build only). Until a border is dragged the columns follow the sidebar width: below 32 columns only the file list, below 64 file list and preview, then the parent column too |
 | Web | `LEADER+w`, then `l` | location: type a URL or search words (opens a web pane when the tab has none) |
-| | `LEADER+w`, then `n` | new web pane beside the last grid pane (asks for the URL) |
+| | `LEADER+w`, then `n` | new web pane beside the last grid pane (asks for the URL; Enter alone opens the home page) |
+| | browser button of the left bar | focus the tab's web pane; without one, ask for a location and open it |
 | | `LEADER+w`, then `b` / `f` | back / forward |
 | | `LEADER+w`, then `r` / `R` | reload / hard reload (`s` stops loading) |
 | | `LEADER+w`, then `y` / `o` | copy the page URL / open it in the system browser |

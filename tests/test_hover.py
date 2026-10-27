@@ -239,7 +239,8 @@ class BarTest(unittest.TestCase):
         self.bar.draw(30, 5, (None, False), True)
         out = self.bar.out.take()
         self.assertIn("\x1b[2J", out)
-        for name in B.BUTTONS:
+        self.assertEqual(sorted(self.bar.drawn), sorted(set(B.BUTTONS) - {"browser"}), "no browser button unless asked for")
+        for name in self.bar.drawn:
             self.assertEqual(self.bar.drawn[name][:2], (False, 0), name)
         self.assertIn("\x1b[27;", out, "the settings button moved with the new height (row 30 - 4 + 1)")
 
@@ -249,10 +250,93 @@ class BarTest(unittest.TestCase):
             path = os.path.join(d, "wezterm-sidebar-1")
             with open(path, "w") as f:
                 f.write("open git -6\n")
-            self.assertEqual(B.read_state(path), ("git", False, -6))
+            self.assertEqual(B.read_state(path), ("git", False, -6, False))
             with open(path, "w") as f:
                 f.write("closed files\n")
-            self.assertEqual(B.read_state(path), (None, False, 0), "older config: no nudge")
+            self.assertEqual(B.read_state(path), (None, False, 0, False), "older config: no nudge, no browser button")
+
+    def test_state_file_asks_for_the_browser_button_with_or_without_a_nudge(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "wezterm-sidebar-1")
+            for text, want in (("closed files web\n", (None, False, 0, True)), ("open git -6 web\n", ("git", False, -6, True)),
+                               ("open git web -6\n", ("git", False, -6, True)), ("open git 4\n", ("git", False, 4, False)),
+                               ("closed files webs\n", (None, False, 0, False)), ("", (None, False, 0, False))):
+                with open(path, "w") as f:
+                    f.write(text)
+                self.assertEqual(B.read_state(path), want, repr(text))
+        self.assertEqual(B.read_state(os.path.join(d, "gone")), (None, False, 0, False), "no file yet")
+
+    def test_the_browser_button_sits_below_the_overview_button_and_the_gear_stays_at_rows_minus_4(self):
+        # Under 14 rows even the three older buttons meet the gear (a window that small has no use for a bar).
+        for rows in range(14, 60):
+            with self.subTest(rows=rows):
+                plain, web = B.tops(rows), B.tops(rows, web=True)
+                self.assertEqual(plain["settings"], rows - 4)
+                self.assertEqual(web["settings"], rows - 4, "pinned either way")
+                self.assertNotIn("browser", plain)
+                for name in ("files", "git", "overview"):
+                    self.assertEqual(web[name], plain[name], "the cadence of the others does not move")
+                if rows >= 17:
+                    self.assertEqual(web["browser"], 10)
+                else:
+                    self.assertNotIn("browser", web, "no room: left out rather than meeting the gear")
+                spans = sorted((t, t + 3, n) for n, t in web.items())
+                for (_, end, name), (start, _, nxt) in zip(spans, spans[1:]):
+                    self.assertLessEqual(end, start, f"{name} overlaps {nxt}")
+                self.assertLessEqual(spans[-1][1], rows - 1, "the last row stays free")
+
+    def test_every_row_of_every_button_belongs_to_exactly_that_button(self):
+        for rows in (16, 17, 24, 40):
+            for web in (False, True):
+                names = [B.button_at(y, rows, web) for y in range(rows)]
+                for name, top in B.tops(rows, web).items():
+                    self.assertEqual(names[top:top + 3], [name] * 3, (rows, web, name))
+                self.assertEqual(len([n for n in names if n]), 3 * len(B.tops(rows, web)))
+        self.assertIsNone(B.button_at(10, 24), "no browser button: the row is air")
+        self.assertEqual(B.button_at(11, 24, True), "browser")
+
+    def test_a_click_on_the_browser_button_is_announced_only_where_it_is_shown(self):
+        self.bar.web = True
+        self.bar.handle(mouse("press", 2, 11), 24)
+        out = self.bar.out.take()
+        self.assertIn("SetUserVar=sidebar_click=", out)
+        value = out.split("sidebar_click=")[1].split("\x07")[0]
+        self.assertTrue(base64.b64decode(value).decode().startswith("browser:"))
+        self.bar.web = False
+        self.bar.handle(mouse("press", 2, 11), 24)
+        self.assertNotIn("sidebar_click", self.bar.out.take(), "no button there without the web state")
+        self.bar.web = True
+        self.bar.handle(mouse("press", 2, 11), 12)  # a bar too short for it
+        self.assertNotIn("sidebar_click", self.bar.out.take())
+
+    def test_the_browser_button_appears_and_disappears_with_the_state_without_a_resize(self):
+        self.bar.font_path = None
+        self.bar.draw(24, 5, (None, False, 0, False), True)
+        self.assertNotIn("browser", self.bar.drawn)
+        self.bar.out.take()
+        self.bar.draw(24, 5, (None, False, 0, True), False)
+        out = self.bar.out.take()
+        self.assertIn("browser", self.bar.drawn)
+        self.assertIn("\x1b[2J", out, "a changed set of buttons is repainted in full")
+        self.assertIn("\uf0ac", out)
+        self.bar.draw(24, 5, (None, False, 0, False), False)
+        self.assertNotIn("browser", self.bar.drawn)
+        self.assertIn("\x1b[2J", self.bar.out.take())
+
+    def test_the_browser_button_hides_on_a_short_bar_and_returns_on_a_taller_one(self):
+        self.bar.font_path = None
+        state = (None, False, 0, True)
+        self.bar.draw(16, 5, state, True)
+        self.assertNotIn("browser", self.bar.drawn)
+        self.assertEqual(self.bar.layout, B.tops(16, True))
+        self.bar.draw(17, 5, state, True)
+        self.assertIn("browser", self.bar.drawn)
+
+    def test_the_gear_takes_its_tall_image_only_with_a_free_row_above_it(self):
+        for rows, web, tall in ((15, False, False), (16, False, True), (24, True, True), (18, True, False), (19, True, True)):
+            layout = B.tops(rows, web)
+            self.assertEqual(B.gear_is_tall(layout, layout["settings"]), tall, (rows, web))
 
     @unittest.skipUnless(B.Image and B.find_font(), "needs PIL and the icon font")
     def test_the_gear_moves_by_the_nudge_inside_its_five_rows(self):
@@ -345,6 +429,36 @@ class DockTest(unittest.TestCase):
         self.assertEqual(dock.out.take(), "\x1b]22;\x07")
 
 
+class RowTitleTest(unittest.TestCase):
+    """A row is named by the agent's own title; the directory is not repeated when every pane shares it."""
+
+    def doc(self, cwds):
+        return {"panes": [{"id": 10 + i, "num": i + 1, "kind": "working" if i == 0 else "idle", "name": "hivegrid",
+                           "cwd": cwd, "proc": "omp", "since": NOW - 5, "text": "", "title": f"Task {i + 1}",
+                           "reason": "edit x" if i == 0 else ""} for i, cwd in enumerate(cwds)]}
+
+    def test_title_replaces_the_directory_name_and_a_shared_directory_is_left_out(self):
+        lines = D.dump(D.render(self.doc(["~/p/hivegrid"] * 2), 40, 12, NOW))
+        self.assertIn("1 Task 1", lines[2])
+        self.assertEqual(lines[3].strip("▎ "), "edit x")  # working: what it is doing
+        self.assertIn("2 Task 2", lines[5])
+        self.assertEqual(lines[6].strip(), "")  # idle: nothing to add
+        self.assertFalse([line for line in lines if "hivegrid" in line and "⬡" not in line])
+
+    def test_directory_goes_to_the_second_line_when_panes_differ(self):
+        lines = D.dump(D.render(self.doc(["~/p/hivegrid", "~/p/other"]), 40, 12, NOW))
+        self.assertIn("2 Task 2", lines[5])
+        self.assertEqual(lines[6].strip(), "~/p/other")
+
+    def test_title_row_buttons_never_cover_the_title(self):
+        doc = self.doc(["~/p/hivegrid"])
+        for w in range(10, 40):
+            top = D.dump(D.render(doc, w, 12, NOW, lambda i: 0, lambda: 0, lambda: 0, None, close_tab=lambda: 0))[0]
+            if "Overview" not in top:  # too narrow for the whole title: the buttons are gone, not drawn over it
+                self.assertFalse(set(top) & set("✕⊞▦"), (w, top))
+            self.assertTrue(top.startswith(" ⬡ "), (w, top))
+
+
 class DockNumbersTest(unittest.TestCase):
     """Past pane 9 the numbers take two columns and a typed digit may start a longer number."""
 
@@ -431,36 +545,6 @@ class DockNumbersTest(unittest.TestCase):
         self.assertEqual(bgs[0], bgs[2])
         roomy = D.render({"panes": self.DOC["panes"][:3]}, 40, 20, NOW)  # blank lines between: no stripes
         self.assertEqual(roomy.cells[5][20][2], roomy.cells[8][20][2])
-
-
-class RowTitleTest(unittest.TestCase):
-    """A row is named by the agent's own title; the directory is not repeated when every pane shares it."""
-
-    def doc(self, cwds):
-        return {"panes": [{"id": 10 + i, "num": i + 1, "kind": "working" if i == 0 else "idle", "name": "hivegrid",
-                           "cwd": cwd, "proc": "omp", "since": NOW - 5, "text": "", "title": f"Task {i + 1}",
-                           "reason": "edit x" if i == 0 else ""} for i, cwd in enumerate(cwds)]}
-
-    def test_title_replaces_the_directory_name_and_a_shared_directory_is_left_out(self):
-        lines = D.dump(D.render(self.doc(["~/p/hivegrid"] * 2), 40, 12, NOW))
-        self.assertIn("1 Task 1", lines[2])
-        self.assertEqual(lines[3].strip("▎ "), "edit x")  # working: what it is doing
-        self.assertIn("2 Task 2", lines[5])
-        self.assertEqual(lines[6].strip(), "")  # idle: nothing to add
-        self.assertFalse([line for line in lines if "hivegrid" in line and "⬡" not in line])
-
-    def test_directory_goes_to_the_second_line_when_panes_differ(self):
-        lines = D.dump(D.render(self.doc(["~/p/hivegrid", "~/p/other"]), 40, 12, NOW))
-        self.assertIn("2 Task 2", lines[5])
-        self.assertEqual(lines[6].strip(), "~/p/other")
-
-    def test_title_row_buttons_never_cover_the_title(self):
-        doc = self.doc(["~/p/hivegrid"])
-        for w in range(10, 40):
-            top = D.dump(D.render(doc, w, 12, NOW, lambda i: 0, lambda: 0, lambda: 0, None, close_tab=lambda: 0))[0]
-            if "Overview" not in top:  # too narrow for the whole title: the buttons are gone, not drawn over it
-                self.assertFalse(set(top) & set("✕⊞▦"), (w, top))
-            self.assertTrue(top.startswith(" ⬡ "), (w, top))
 
 
 class DockCloseTest(unittest.TestCase):

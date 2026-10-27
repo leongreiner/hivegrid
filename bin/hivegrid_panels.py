@@ -14,9 +14,9 @@ import hivegrid_ui as U
 from hivegrid_agents import (AGENT_PROCS, SHELLS, format_cost, format_tokens, is_chrome, is_web, parse_usage, state_dir,
                              totals_text, usage_totals, web_build_cached, web_label)
 from hivegrid_settings_core import (
-    BINDINGS, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding, current_entry,
-    discover_accounts, effective_keys, format_combo, merge_accounts, normalize, omp_profiles, pair_profile, quota_state,
-    remove_account, tilde, untilde,
+    BINDINGS, BROWSER_AUTO, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding,
+    check_browser, current_entry, detect_browsers, discover_accounts, effective_keys, format_combo, merge_accounts,
+    normalize, normalize_home, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
     valid_label, valid_profile, valid_search, wezterm_defaults,
 )
 
@@ -94,8 +94,11 @@ class CaptureModal(U.Modal):
         return True
 
 
-WEB_ROWS = ("links", "search", "profile")
-WEB_LABELS = {"links": "Open links in", "search": "Search engine", "profile": "Default profile"}
+WEB_ROWS = ("links", "browser", "home", "search", "profile")
+WEB_LABELS = {"links": "Open links in", "browser": "Browser", "home": "Home page", "search": "Search engine",
+              "profile": "Default profile"}
+AUTO_BROWSER = "Auto (Google Chrome, then Chromium)"
+CONFINED_SHORT = "their sandbox hides the profile directory and their launcher does not reliably pass on the DevTools pipe"
 
 
 class SettingsPage(U.Page):
@@ -115,6 +118,7 @@ class SettingsPage(U.Page):
         self.found = []
         self.two_pane = False  # set by render: the wide layout (section list, list + detail)
         self.web_built = None  # does this WezTerm have the web pane? (looked up when the Web section draws)
+        self.browsers = None  # (installed browsers, skipped confined ones), scanned when the Web section first draws
         self.rescan(None, quiet=True)
 
     # data ---------------------------------------------------------------------
@@ -759,21 +763,68 @@ class SettingsPage(U.Page):
         if name == "links":  # two choices: a click switches
             self.set_web(ui, name, "system" if self.model.web["links"] == "pane" else "pane")
             return
+        if name == "browser":
+            self.choose_browser(ui)
+            return
 
         def ok(text):
             text = text.strip()
-            err = valid_profile(text) if name == "profile" else valid_search(text)
+            if name == "home":
+                value, err = normalize_home(text)
+            else:
+                value, err = text, valid_profile(text) if name == "profile" else valid_search(text)
             if err:
                 return err
-            self.set_web(ui, name, text)
+            self.set_web(ui, name, value)
             return None
-        hint = "e.g. work, private-research" if name == "profile" else "e.g. https://duckduckgo.com/?q=%s ; empty = no search"
+        hint = {"profile": "e.g. work, private-research", "home": "e.g. https://duckduckgo.com or about:blank",
+                "search": "e.g. https://duckduckgo.com/?q=%s ; empty = no search"}[name]
         ui.open_modal(U.PromptModal(f"Web: {WEB_LABELS[name].lower()}", self.model.web[name], ok, hint))
+
+    def installed_browsers(self):
+        if self.browsers is None:
+            self.browsers = detect_browsers()
+        return self.browsers
+
+    def choose_browser(self, ui):
+        """Auto, one of the installed browsers, or a path of one's own (checked: exists, executable,
+        answers --version). Firefox is not offered (no screencast API), nor are snap or Flatpak ones."""
+        found = self.installed_browsers()[0]
+        current = self.model.web["browser"]
+        options = [AUTO_BROWSER] + [f"{label}  {tilde(path)}" for label, path in found] + ["Custom path…"]
+        paths = [path for _, path in found]
+        cur = 0 if current == BROWSER_AUTO else (1 + paths.index(current) if current in paths else len(options) - 1)
+
+        def pick(idx):
+            if idx == 0:
+                self.set_web(ui, "browser", BROWSER_AUTO)
+            elif idx <= len(found):
+                self.set_web(ui, "browser", paths[idx - 1])
+            else:
+                self.custom_browser(ui)
+        ui.open_modal(U.ChoiceModal("Web: browser", options, cur, pick))
+
+    def custom_browser(self, ui):
+        current = self.model.web["browser"]
+
+        def ok(text):
+            err, path, _version = check_browser(text)
+            if err:
+                return err
+            self.set_web(ui, "browser", path)
+            return None
+        ui.open_modal(U.PromptModal("Web: browser path", "" if current == BROWSER_AUTO else current, ok,
+                                    "full path of a Chrome, Chromium, Brave, Edge or Vivaldi binary"))
 
     def web_value(self, name):
         value = self.model.web[name]
         if name == "links":
             return "a web pane beside the terminal" if value == "pane" else "the system browser"
+        if name == "browser":
+            if value == BROWSER_AUTO:
+                return AUTO_BROWSER
+            named = {path: label for label, path in self.installed_browsers()[0]}
+            return f"{named[value]}  {tilde(value)}" if value in named else f"Custom  {tilde(value)}"
         return value or "(none: a location that is no URL is refused)"
 
     WEB_TW = 74  # label 34, value 38, plus the marker columns
@@ -793,19 +844,30 @@ class SettingsPage(U.Page):
                    BOLD if changed else 0)
             cv.hit(x + 36, row, tw - 38, 1, lambda b, n=name, i=i: (self.cursor.__setitem__(3, i), self.edit_web(ui, n)))
             bx = x + tw + 2
-            bx += ui.button(cv, bx, row, "Switch" if name == "links" else "Edit…", lambda b, n=name: self.edit_web(ui, n),
-                            accent=sel) + 1
+            bx += ui.button(cv, bx, row, {"links": "Switch", "browser": "Choose…"}.get(name, "Edit…"),
+                            lambda b, n=name: self.edit_web(ui, n), accent=sel) + 1
             if changed:
                 ui.button(cv, bx, row, "Reset", lambda b, n=name: self.reset_web(ui, n))
-        note = ("Web panes need Google Chrome or Chromium (HIVEGRID_CHROME names another). Cookies and logins of a "
-                "profile live in ~/.local/share/hivegrid/web/profile-<name>. Save writes settings.json and WezTerm reloads it.")
-        lines = textwrap.wrap(note, max(tw - 2, 20))
-        for k, line in enumerate(lines):
-            cv.put(x + 2, y + 3 + len(WEB_ROWS) + k, line, p["muted"])
+        skipped = [os.path.basename(path) for path, _ in self.installed_browsers()[1]]
+        notes = [
+            "Chromium-family browsers only (Chrome, Chromium, Brave, Edge, Vivaldi): the page is shown from the "
+            "browser's screencast, which Firefox does not have. Snap and Flatpak browsers are not offered: "
+            + CONFINED_SHORT + (f" (skipped here: {', '.join(skipped)})." if skipped else "."),
+            "HIVEGRID_CHROME overrides the choice. A browser already running for a profile stays until its last web "
+            "pane closes; the next one starts with the new choice.",
+            "Cookies and logins of a profile live in ~/.local/share/hivegrid/web/profile-<name>. Save writes "
+            "settings.json and WezTerm reloads it.",
+        ]
+        ny = y + 3 + len(WEB_ROWS)
+        for note in notes:
+            for line in textwrap.wrap(note, max(tw - 2, 20)):
+                cv.put(x + 2, ny, line, p["muted"])
+                ny += 1
+            ny += 1
         if self.web_built is None:
             self.web_built = web_build_cached()  # None while a thread scans the binaries: no hint yet
         if self.web_built is False:
-            cv.put(x + 2, y + 4 + len(WEB_ROWS) + len(lines),
+            cv.put(x + 2, ny,
                    fit("This WezTerm has no web pane (the Hivegrid build with the web feature adds it): these settings "
                        "apply once it does.", max(w - 4, 20)), p["amber"])
 

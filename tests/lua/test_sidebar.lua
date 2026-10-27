@@ -177,6 +177,35 @@ T.test('the bar learns how far to move its bottom button to centre the stack', f
   T.eq(T.read(os.getenv('XDG_RUNTIME_DIR') .. '/wezterm-sidebar-5'), 'closed files 3\n')
 end)
 
+T.test('the bar state file says `web` when the browser button is to be shown, and follows a change', function(wz)
+  T.clock(T0)
+  local sb = require 'sidebar'
+  local api = sb({}, wz)
+  local win, tab = wz.fake.grid { { id = 5, width = 5 }, { id = 1, left = 6, width = 100, active = true } }
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 5 } }
+  local file = os.getenv('XDG_RUNTIME_DIR') .. '/wezterm-sidebar-5'
+  api.sync(win)
+  T.eq(T.read(file), 'closed files\n', 'stock WezTerm, or no browser: the bar has no browser button')
+  sb.set_web_button(true)
+  api.sync(win)
+  T.eq(T.read(file), 'closed files web\n')
+  sb.set_web_button(false)
+  api.sync(win)
+  T.eq(T.read(file), 'closed files\n', 'a reload that lost the browser takes the button away again')
+end)
+
+T.test('the web flag follows the nudge in the state file', function(wz)
+  T.clock(T0)
+  local sb = require 'sidebar'
+  local api = sb({}, wz)
+  sb.set_web_button(true)
+  local win, tab = wz.fake.grid({ { id = 5, width = 5 }, { id = 1, left = 6, width = 100, active = true } },
+    { dims = { pixel_width = 1280, pixel_height = 720, dpi = 96, tab_bar_height = 40, content_top = 64, content_bottom = 693 } })
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 5 } }
+  api.sync(win)
+  T.eq(T.read(os.getenv('XDG_RUNTIME_DIR') .. '/wezterm-sidebar-5'), 'closed files 3 web\n')
+end)
+
 T.test('the bar never keeps the keyboard: focus goes back to the grid pane used last', function(wz)
   T.clock(T0)
   local api = require('sidebar')({}, wz)
@@ -367,6 +396,38 @@ T.test('column layout: the view follows the window size until a drag sets its wi
   layout()
   api.sync(win)
   T.eq(widths(panes), '5:5 6:60 1:172')
+end)
+
+-- Every handler reads the tab, then calls something that lets the others run (a window
+-- method, a `wezterm cli` process). A window resize that lands while the status tick is
+-- between its read and its settle ran the same resize twice from the same rows: the second
+-- one, aimed at columns the first had already moved, closed the view up to its minimum.
+T.test('column layout: a resize settled while a status tick holds old rows is not applied twice', function(wz)
+  T.clock(T0)
+  wz.stub.fork = true
+  local api = require('sidebar')({}, wz)
+  local win, tab = wz.fake.grid {}
+  local panes = column_mux(wz, tab,
+    { { id = 5, width = 5 }, { id = 6, width = 43 }, { id = 1, width = 76, active = true } }, 100)
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 5, content = 6, view = 'git', last = 1 } }
+  -- The tick reads the window (the bar's nudge) after it has read the rows; the resize
+  -- handler runs in that gap.
+  local resized = false
+  local get_dimensions = win.get_dimensions
+  function win:get_dimensions()
+    if not resized then
+      resized = true
+      wz.emit('window-resized', self)
+    end
+    return get_dimensions(self)
+  end
+  api.sync(win)
+  T.ok(resized, 'the resize came during the tick')
+  T.eq(widths(panes), '5:5 6:28 1:91', 'the view at its width for a 126 column window, once')
+  T.eq(#cli_calls(wz, 'adjust-pane-size'), 1, 'one resize, not the same one twice')
+  local key = tostring(tab:tab_id())
+  T.eq({ wz.GLOBAL.sidebar[key].width, wz.GLOBAL.sidebar_width }, {},
+    'the rows the tick held were no divider drag: no width is pinned')
 end)
 
 T.test('the git view does not follow the grid while lazygit runs in it', function(wz)

@@ -5,7 +5,9 @@
 --   S.key(name, default) -> { key = 'f', mods = 'CTRL' } from "CTRL+f" style strings (mods nil
 --                           when the binding has none); `default` is used when the file has no entry
 --   S.web               -> { links = 'pane' | 'system', search = URL template with %s or '',
---                          profile = browser profile name } (see below)
+--                          profile = browser profile name, home = location the browser button and
+--                          "new web pane" open on an empty answer, browser = 'auto' or the absolute
+--                          path of a Chromium-family binary } (see below)
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
 --                          list plus any ~/.claude[-X] directory holding a .credentials.json that
 --                          the list does not mention (main first, then by label). An account pairs
@@ -92,7 +94,11 @@ local function build(wezterm)
   -- Web pane settings (key "web" of the file): links = 'pane' opens http(s) links clicked in a
   -- terminal inside a web pane, 'system' leaves them to the system browser; search is the
   -- http(s) URL template (with %s) a location that is no URL becomes, empty = no search; profile
-  -- names the browser profile (cookies and logins) new web panes use.
+  -- names the browser profile (cookies and logins) new web panes use; home is the location a
+  -- new web pane opens when nothing is typed (checked by web.lua's normalize_url, which this
+  -- file cannot call: an unusable one is about:blank there); browser is 'auto' (the fork's own
+  -- search) or the absolute path the Settings panel validated. The fork reads the same key itself
+  -- when it starts a browser (mux/src/webpane.rs), so every way of opening a web pane agrees.
   local web = type(data.web) == 'table' and data.web or {}
   S.web = {
     links = web.links == 'system' and 'system' or 'pane',
@@ -100,6 +106,8 @@ local function build(wezterm)
       and web.search or '',
     profile = (type(web.profile) == 'string' and web.profile:match('^%w[%w._-]*$') and #web.profile <= 32)
       and web.profile or 'main',
+    home = (type(web.home) == 'string' and web.home:find('%S')) and web.home:match('^%s*(.-)%s*$') or 'about:blank',
+    browser = type(web.browser) == 'string' and web.browser:match('^%s*(/.-)%s*$') or 'auto',
   }
 
   -- Accounts ------------------------------------------------------------------

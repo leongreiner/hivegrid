@@ -566,7 +566,8 @@ class SettingsLayoutTest(Env):
 
 
 class WebSettingsTest(Env):
-    """The Web section: links target, search engine and default profile, saved as settings.json "web"."""
+    """The Web section: links target, browser, home page, search engine and default profile, saved as
+    settings.json "web"."""
 
     def setUp(self):
         super().setUp()
@@ -578,6 +579,7 @@ class WebSettingsTest(Env):
         self.page.about = SettingsLayoutTest.ABOUT
         self.page.sub = self.page.SUBS.index("Web")
         self.page.web_built = True
+        self.page.browsers = ([], [])  # not what this machine has installed
         self.ui = mock.Mock()
 
     def modal_for(self, row):
@@ -594,7 +596,8 @@ class WebSettingsTest(Env):
         return ["".join(c[0] for c in row) for row in ui.cv.cells]
 
     def test_defaults_and_the_section_summary(self):
-        self.assertEqual(self.model.web, {"links": "pane", "search": "", "profile": "main"})
+        self.assertEqual(self.model.web, self.S.WEB_DEFAULTS)
+        self.assertEqual((self.model.web["browser"], self.model.web["home"]), ("auto", "about:blank"))
         self.assertFalse(self.model.dirty)
         self.assertEqual(self.page.section_meta(self.page.sub), ("pane · main", "dim"))
 
@@ -628,17 +631,99 @@ class WebSettingsTest(Env):
         self.assertIsNone(modal.on_ok(""), "empty turns the search off")
         self.assertEqual(self.model.web["search"], "")
 
+    def test_home_page_prompt_takes_an_address_not_a_search(self):
+        modal = self.modal_for("home")
+        for bad in ("", "javascript:alert(1)", "chrome://settings", "two words"):
+            with self.subTest(home=bad):
+                self.assertTrue(modal.on_ok(bad), "an error text")
+        self.assertEqual(self.model.web["home"], "about:blank")
+        self.assertIsNone(modal.on_ok(" duck.example/start "))
+        self.assertEqual(self.model.web["home"], "https://duck.example/start", "stored as the address it stands for")
+        self.assertIsNone(modal.on_ok("http://localhost:3000"))
+        self.assertEqual(self.model.web["home"], "http://localhost:3000")
+
+    def installed(self, found, skipped=()):
+        self.page.browsers = (list(found), list(skipped))
+
+    def choose(self, index):
+        """Opens the browser list and picks entry `index`; returns the list's options."""
+        modal = self.modal_for("browser")
+        self.assertIsInstance(modal, U.ChoiceModal)
+        modal.on_pick(index)
+        return modal.options
+
+    def test_the_browser_list_is_auto_the_detected_browsers_and_a_custom_path(self):
+        self.installed([("Google Chrome", "/opt/google/chrome/chrome"), ("Brave", "/usr/bin/brave-browser")])
+        options = self.choose(2)
+        self.assertEqual(len(options), 4)
+        self.assertTrue(options[0].startswith("Auto"))
+        self.assertIn("/usr/bin/brave-browser", options[2])
+        self.assertTrue(options[3].startswith("Custom"))
+        self.assertEqual(self.model.web["browser"], "/usr/bin/brave-browser")
+        self.assertTrue(self.model.dirty)
+        self.choose(1)
+        self.assertEqual(self.model.web["browser"], "/opt/google/chrome/chrome")
+        self.choose(0)
+        self.assertEqual(self.model.web["browser"], "auto")
+        self.assertFalse(self.model.dirty, "back to auto is no change")
+
+    def test_no_browser_is_listed_that_cannot_work_and_the_panel_says_why(self):
+        self.installed([("Chromium", "/usr/bin/chromium")], [("/snap/bin/brave", "confined")])
+        options = self.choose(0)
+        self.assertEqual(len(options), 3, "auto, chromium, custom: the snap is not offered")
+        text = "\n".join(self.draw(140))
+        self.assertIn("Firefox", text, "the panel says why Firefox is missing")
+        self.assertIn("Snap and Flatpak", text)
+        self.assertIn("brave", text, "and which one was skipped here")
+
+    def test_the_list_opens_on_the_current_choice(self):
+        self.installed([("Google Chrome", "/opt/google/chrome/chrome"), ("Vivaldi", "/usr/bin/vivaldi")])
+        self.model.web["browser"] = "/usr/bin/vivaldi"
+        self.assertEqual(self.modal_for("browser").idx, 2)
+        self.model.web["browser"] = "/home/u/my-chrome"
+        self.assertEqual(self.modal_for("browser").idx, 3, "a custom path sits on Custom")
+        self.model.web["browser"] = "auto"
+        self.assertEqual(self.modal_for("browser").idx, 0)
+
+    def test_custom_path_is_validated_before_it_is_taken(self):
+        import stat
+        self.installed([])
+        self.choose(1)  # auto, custom
+        modal = self.ui.open_modal.call_args[0][0]
+        self.assertIsInstance(modal, U.PromptModal)
+        plain = os.path.join(self.tmp, "plain")
+        with open(plain, "w") as f:
+            f.write("x")
+        for bad in ("", "chromium", os.path.join(self.tmp, "missing"), self.tmp, plain):
+            with self.subTest(path=bad):
+                self.assertTrue(modal.on_ok(bad), "an error text")
+        self.assertEqual(self.model.web["browser"], "auto")
+        good = os.path.join(self.tmp, "my-chrome")
+        with open(good, "w") as f:
+            f.write("#!/bin/sh\necho 'Chromium 120.0'\n")
+        os.chmod(good, os.stat(good).st_mode | stat.S_IXUSR)
+        self.assertIsNone(modal.on_ok(good))
+        self.assertEqual(self.model.web["browser"], good)
+        self.assertEqual(self.page.web_value("browser"), "Custom  " + P.tilde(good))
+
+    def test_reset_of_the_browser_row_goes_back_to_auto(self):
+        self.model.web["browser"] = "/usr/bin/chromium"
+        self.page.cursor[3] = P.WEB_ROWS.index("browser")
+        self.page.key(self.ui, set(), "r")
+        self.assertEqual(self.model.web["browser"], "auto")
+
+
     def test_arrows_move_the_cursor_and_r_resets_a_row(self):
-        self.page.key(self.ui, set(), "DownArrow")
-        self.page.key(self.ui, set(), "DownArrow")
-        self.page.key(self.ui, set(), "DownArrow")
-        self.assertEqual(self.page.cursor[3], len(P.WEB_ROWS) - 1)
+        for _ in P.WEB_ROWS:
+            self.page.key(self.ui, set(), "DownArrow")
+        self.assertEqual(self.page.cursor[3], len(P.WEB_ROWS) - 1, "stops at the last row")
+        self.assertEqual(P.WEB_ROWS[-1], "profile")
         self.model.web["profile"] = "work"
         self.page.key(self.ui, set(), "r")
         self.assertEqual(self.model.web["profile"], "main")
         self.page.key(self.ui, set(), "UpArrow")
-        self.assertEqual(self.page.cursor[3], 1)
-        self.page.wheel(self.ui, -5)
+        self.assertEqual(self.page.cursor[3], len(P.WEB_ROWS) - 2)
+        self.page.wheel(self.ui, -50)
         self.assertEqual(self.page.cursor[3], 0)
 
     def test_save_writes_only_non_default_values_and_keeps_foreign_entries(self):
@@ -650,7 +735,7 @@ class WebSettingsTest(Env):
         self.assertTrue(ok)
         with open(self.path) as f:
             self.assertEqual(json.load(f)["web"], {"future": 1, "links": "system", "profile": "work"})
-        self.assertEqual(self.S.Settings(self.path).web(), {"links": "system", "search": "", "profile": "work"})
+        self.assertEqual(self.S.Settings(self.path).web(), dict(self.S.WEB_DEFAULTS, links="system", profile="work"))
         model.web.update(links="pane", profile="main")
         model.save()
         with open(self.path) as f:
