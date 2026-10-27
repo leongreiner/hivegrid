@@ -13,7 +13,7 @@
 | Grid | `LEADER+e`, `Ctrl+Shift+E` | equalize panes (also the `▦` button of the overview dock) |
 | | `Ctrl+Shift+A` | arrange the panes into the best grid (also the `⊞` button) |
 | | `LEADER+1` / `2` / `3` | new tab with `omp` / 2x2 grid / 3x3 grid (also in the `+` right-click menu, which lists these, the panels and their keys; Enter, a click or the row number opens an entry) |
-| Agents | `Alt+n`, `LEADER+n` | jump to the next pane needing attention |
+| Agents | `Alt+n`, `LEADER+n` | jump to the next agent that needs you (state `needs you`, or a bell), across the tabs of the window; press again for the next one. A toast says when none does |
 | | `LEADER+o` | show or hide the overview dock (right edge) |
 | | `Alt+]`, `Alt+[` | next / previous agent pane |
 | | `LEADER+g` | agent picker (every pane of the window; the most urgent one starts selected) |

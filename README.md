@@ -70,7 +70,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 | `Alt+z` | zoom a pane |
 | `LEADER+e`, `Ctrl+Shift+E` | equalize all dividers |
 | `LEADER+o` | show or hide the overview dock |
-| `Alt+n` | jump to the next pane that needs attention |
+| `Alt+n` | jump to the next agent that needs you (needs-you or bell state), across tabs; a toast says when none does |
 | `LEADER+g` | agent picker |
 | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | `LEADER+w`, then `n` | new web pane |

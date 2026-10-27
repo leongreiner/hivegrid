@@ -274,16 +274,17 @@ T.test('agents are numbered in reading order with the sidebar and overview dock 
   T.eq({ as.agent_number(51), as.agent_number(54), as.agent_number(55), as.agent_number(56) }, { 1, 4, nil, nil })
 end)
 
-T.test('Alt+n jumps to the next pane needing you before an earlier idle one', function(wz)
+T.test('Alt+n skips idle and done agents and goes to the pane that needs you', function(wz)
   local _, config = load()
   local win = grid2x2(wz, {
     omp(wz, 61, 'π > me'), omp(wz, 62, 'π > idle'), omp(wz, 63, 'π ! ask'), omp(wz, 64, 'π ⠋ busy'),
   }, 1)
   wz.stub.perform(binding(config, 'n', 'ALT'), win, wz.mux.get_pane(61))
   T.eq(wz.stub.activations, { 63 })
+  T.eq(#win.toasts, 0)
 end)
 
-T.test('Alt+n takes the first match after the active pane and wraps around', function(wz)
+T.test('Alt+n and LEADER+n cycle through the panes that need you in order, wrapping', function(wz)
   local _, config = load()
   local win = grid2x2(wz, {
     omp(wz, 65, 'π ! first'), omp(wz, 66, 'π ⠋ w'), omp(wz, 67, 'π > me'), omp(wz, 68, 'π ! second'),
@@ -291,39 +292,39 @@ T.test('Alt+n takes the first match after the active pane and wraps around', fun
   local jump = binding(config, 'n', 'ALT')
   wz.stub.perform(jump, win, wz.mux.get_pane(67))
   T.eq(wz.stub.activations, { 68 }, 'the one after the active pane')
-  -- Now 68 is active (and acknowledged by focus): the next one wraps to 65.
   advance(1)
-  wz.stub.perform(jump, win, wz.mux.get_pane(68))
-  T.eq(wz.stub.activations, { 68, 65 })
+  wz.stub.perform(binding(config, 'n', 'LEADER'), win, wz.mux.get_pane(68))
+  T.eq(wz.stub.activations, { 68, 65 }, 'wraps to the first')
+  advance(1)
+  wz.stub.perform(jump, win, wz.mux.get_pane(65))
+  T.eq(wz.stub.activations, { 68, 65, 68 }, 'and back')
 end)
 
-T.test('Alt+n falls back to an idle agent, then to unseen output, else stays', function(wz)
-  local _, config = load()
+T.test('Alt+n also takes a bell, but not done, idle or unseen output', function(wz)
+  local as, config = load()
   local jump = binding(config, 'n', 'ALT')
   local win = grid2x2(wz, {
     omp(wz, 71, 'π ⠋ me'), omp(wz, 72, 'π ⠋ w', { unseen = true }), omp(wz, 73, 'π > idle'),
   }, 1)
   wz.stub.perform(jump, win, wz.mux.get_pane(71))
-  T.eq(wz.stub.activations, { 73 }, 'idle before unseen')
+  T.eq(wz.stub.activations, {}, 'nothing needs you')
+  T.eq(#win.toasts, 1)
+  T.eq(win.toasts[1].title, 'Hivegrid')
+  T.eq(win.toasts[1].msg, 'No agent needs you')
 
-  wz.mux.get_pane(73).o.title = 'π ⠋ w'
-  win:active_tab().rows[1].active, win:active_tab().rows[3].active = true, false
+  as.bell(win, wz.mux.get_pane(73))
   advance(1)
   wz.stub.perform(jump, win, wz.mux.get_pane(71))
-  T.eq(wz.stub.activations, { 73, 72 }, 'unseen output when nothing else')
-
-  wz.mux.get_pane(72).o.unseen = false
-  win:active_tab().rows[1].active, win:active_tab().rows[2].active = true, false
-  advance(1)
-  wz.stub.perform(jump, win, wz.mux.get_pane(71))
-  T.eq(wz.stub.activations, { 73, 72 }, 'nothing to go to')
+  T.eq(wz.stub.activations, { 73 }, 'a bell counts')
+  T.eq(#win.toasts, 1)
 end)
 
 T.test('Alt+n reaches a pane in another tab', function(wz)
   local _, config = load()
   local t1 = wz.fake.tab { panes = { { pane = omp(wz, 75, 'π ⠋ me'), active = true } } }
   local t2 = wz.fake.tab { panes = { { pane = omp(wz, 76, 'π ! there'), active = true } } }
-  local win = wz.fake.window { tabs = { t1, t2 } }
+  local t3 = wz.fake.tab { panes = { { pane = omp(wz, 77, 'π > quiet'), active = true } } }
+  local win = wz.fake.window { tabs = { t1, t2, t3 } }
   wz.stub.perform(binding(config, 'n', 'ALT'), win, wz.mux.get_pane(75))
   T.eq(wz.stub.activations, { 76 })
 end)
