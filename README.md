@@ -40,6 +40,8 @@ Recorded from real omp sessions in an isolated sandbox window with fixture repos
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
+- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale: read an agent's screen, send a prompt, press keys, answer a plan review (token-protected, optional read-only mode).
+- **Session restore**: the layout (windows, tabs, splits and their sizes) and what ran in each pane (omp chats resumed with `--restore`, web pages, shells in their directories) is kept on disk and built again at the next start, after a crash or a power loss.
 - **Polish**: hover feedback, one themed picker for every list, a calm header (project, branch and running agents first, usage and system stats as quiet text), header pills for the active mode, five colour themes (Graphite by default).
 
 [docs/features.md](docs/features.md) describes each in detail.
@@ -123,6 +125,7 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 | [docs/keys.md](docs/keys.md) | every key binding |
 | [docs/accounts-and-quota.md](docs/accounts-and-quota.md) | how usage is read, account precedence, moving a chat between accounts |
 | [docs/features.md](docs/features.md) | every feature in detail |
+| [docs/remote.md](docs/remote.md) | control the agents from a phone over Tailscale: token, `tailscale serve`, systemd unit, API, threat model |
 | [docs/panels.md](docs/panels.md) | settings, usage, agents, monitor and hive panels |
 | [docs/wezterm-build.md](docs/wezterm-build.md) | what the WezTerm fork adds and how it degrades on stock WezTerm |
 | [docs/notes-and-limits.md](docs/notes-and-limits.md) | known limits, how sidebar views pick their directory, clipboard behaviour |
@@ -133,7 +136,7 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 
 `dev/check` runs every check CI runs (Python, Lua, luacheck, bun, shellcheck, actionlint); `dev/check py lua` runs only some steps. CI (`.github/workflows/ci.yml`) runs one job per group of steps on pushes and pull requests to `main`, checks out without submodules and fails on a missing tool.
 
-`dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` (slot 11) opens the bar's views and the overview dock and checks the panes; `dev/qa/web-smoke` (slot 12; needs Chrome and a fork build with the web pane) drives the web pane end to end, and `dev/qa/web-browser-smoke` (slot 13) the bar's browser button and the browser choice of the settings (a wrapper around Chrome records which binary was started). All are local only.
+`dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` (slot 11) opens the bar's views and the overview dock and checks the panes; `dev/qa/web-smoke` (slot 12; needs Chrome and a fork build with the web pane) drives the web pane end to end, and `dev/qa/web-browser-smoke` (slot 13) the bar's browser button and the browser choice of the settings (a wrapper around Chrome records which binary was started). `dev/qa/remote-smoke` (slot 14) runs the phone remote's server against three fake agents (prompts, keys, states, a GUI restart, read-only mode, hostile pane text in a headless browser). All are local only.
 
 `dev/demo/record.py` records the demo video and the stills above: `dev/demo/prepare.sh` sets up QA slot 20 with fixture repositories, fictional accounts and usage and omp profiles of their own, then the script drives the window with synthetic input and records the display with ffmpeg. It runs real omp sessions with a few trivial prompts, so it needs a logged-in omp (`DEMO_OMP_SRC`: `~/.omp`, the default profile, or `~/.omp/profiles/NAME`) and Chrome, and uses a few percent of that account's quota.
 

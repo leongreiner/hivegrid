@@ -893,6 +893,7 @@ class HivePage(U.Page):
     def number(self, agent):
         """The agent's digit as the overview dock and the pane picker show it; prefixed with its
         tab ("2·3") while the agents sit in several tabs."""
+        # Same rule as hivegrid_agents.agent_label (used by hivegrid-remote); kept in step by hand.
         n = str(agent.num or agent.pane)
         return f"{agent.tab_index}·{n}" if len({a.tab for a in self.agents}) > 1 else n
 

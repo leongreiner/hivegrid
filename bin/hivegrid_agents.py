@@ -189,6 +189,14 @@ class Agent:
     usage: "Usage" = None         # tokens and cost omp reported (the state file's `usage`), None when it reported none
 
 
+def agent_label(agent, agents):
+    """What the dock and picker show for an agent: its number, prefixed with its tab ("2·3") while
+    the agents sit in several tabs. HivePage.number (hivegrid_hive.py) applies the same rule; it
+    stays a copy because the page's core is injectable and test fakes do not provide this."""
+    n = str(agent.num or agent.pane)
+    return f"{agent.tab_index}·{n}" if len({a.tab for a in agents}) > 1 else n
+
+
 # ---------------------------------------------------------------- usage (tokens and cost)
 
 COST_KINDS = ("reported", "estimated", "mixed")

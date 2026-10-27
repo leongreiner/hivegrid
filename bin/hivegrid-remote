@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Hivegrid remote: phone control of the agents over Tailscale. See docs/remote.md."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import hivegrid_remote  # noqa: E402
+
+sys.exit(hivegrid_remote.main())

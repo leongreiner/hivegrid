@@ -77,6 +77,12 @@ Every surface with the scenarios that found real bugs before. Run each at 1280x7
 - Smooth image cells and both fallbacks (block characters, and no images).
 - The pane picker, `Alt+n` / LEADER+n, `Alt+]` / `Alt+[` and bell toasts agree with the dock.
 
+## Remote (hivegrid-remote)
+
+- `dev/qa/remote-smoke` passes (slot 14); the token lives in the sandbox HOME, never the real one. Never run `tailscale` in QA.
+- The phone page (390x844) and a desktop window: state colours and words from the palette, 44 px tap targets, no pane ids shown, a read-only chip with `--read-only`, the confirm dialog for Ctrl-C and Quit.
+- Hostile pane text (`<img src=x onerror=...>`) shows as plain text in the list and the tail.
+
 ## Fork (Hivegrid WezTerm build)
 
 - After a fork change: run `cargo test` for the touched crates, rebuild into `/tmp`, restart one sandbox, and repeat the bar, dock, sidebar, zoom and resize scenarios.

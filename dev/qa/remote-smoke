@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""hivegrid-remote smoke test in the QA sandbox (dev/qa/hgq, slot 14; local only: CI has no Xvfb and
+no fork build). Three fake omp agents run in the real GUI; the real `hivegrid-remote` server drives
+them through its HTTP API, and the sandbox HOME keeps the token away from the real one. Checks:
+
+  1 token: `hivegrid-remote token` writes the file under the sandbox HOME, never the real one
+  2 the server finds the GUI socket itself (no WEZTERM_UNIX_SOCKET) and /healthz answers
+  3 auth: no token 401; a Host header of another site 403
+  4 /api/agents lists the 3 agents labelled 1, 2, 3 like the dock (never a pane id)
+  5 prompt, keys and tail reach the agent as bytes; Ctrl-C and Ctrl-D need `confirm`
+  6 a pane that needs you refuses prompts but takes keys; an exited agent refuses everything and
+    nothing is typed into the shell left behind
+  7 a Chromium-family browser (when one is installed) renders hostile pane text as inert text
+  8 the GUI restarts: 503 no_mux while it is down, 200 again without restarting the server
+  9 --read-only: every POST is 403
+
+  dev/qa/remote-smoke [--keep]     --keep leaves slot 14 running for a look (hgq down 14 stops it)
+
+Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst) and a fork build. Never runs
+tailscale, install.sh or sync.sh. Screenshots land in /tmp/hivegrid-qa/s14/shots/remote.
+"""
+import http.client
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+SLOT = 14
+PORT = 18714
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HGQ = os.path.join(ROOT, "dev", "qa", "hgq")
+QA = os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa")
+S = os.path.join(QA, f"s{SLOT}")
+HOME = os.path.join(S, "home")
+WORK = os.path.join(S, "work")
+SHOTS = os.path.join(S, "shots", "remote")
+KEEP = "--keep" in sys.argv
+HOSTILE = "<img src=x onerror=alert(1)>"
+
+for k in ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET"):
+    os.environ.pop(k, None)
+sys.path.insert(0, os.path.join(ROOT, "bin"))
+
+# The fake agent: raw tty, a title like omp's, every byte it reads appended (escaped) to
+# received-<pane>.txt and echoed. w: working, a: needs you, x: hostile text, Ctrl-D: exit.
+FAKE_OMP = r'''#!/usr/bin/env python3
+import os, sys, termios, tty
+pane = os.environ.get("WEZTERM_PANE", "x")
+log = os.path.join(@WORK@, "received-" + pane + ".txt")
+def title(t):
+    sys.stdout.write("\033]0;" + t + "\007"); sys.stdout.flush()
+tty.setraw(0)
+title("\u03c0 > ready")
+while True:
+    data = os.read(0, 1024)
+    if not data:
+        break
+    with open(log, "ab") as f:
+        f.write(data.decode("latin1").encode("unicode_escape"))
+    os.write(1, data)
+    for b in data:
+        if b == 4:
+            sys.exit(0)
+        if b == ord("w"):
+            title("\u03c0 \u280b working")
+        elif b == ord("a"):
+            title("\u03c0 ! need you")
+        elif b == ord("x"):
+            os.write(1, b"\r\n@RAW@\r\n")
+            title("@TITLE@")
+'''.replace("@WORK@", repr(WORK)).replace("@RAW@", HOSTILE).replace("@TITLE@", "\u03c0 > " + HOSTILE + " <script>x</script>")
+
+fails = []
+shots = 0
+server = None
+TOKEN = ""
+
+
+def hgq(*args, check=True, timeout=60):
+    r = subprocess.run([HGQ, *map(str, args)], capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"hgq {' '.join(map(str, args))}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def cli(*args, **kw):
+    return hgq("cli", SLOT, *args, **kw).strip()
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  ({detail})" if detail and not ok else ""))
+    if not ok:
+        fails.append(f"{name} {detail}".strip())
+    return ok
+
+
+def waitfor(fn, timeout=8.0, every=0.2):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            v = fn()
+        except Exception:
+            v = None
+        if v:
+            return v
+        time.sleep(every)
+    return None
+
+
+def req(method, path, body=None, token=None, host=None, headers=None):
+    """(status, json or text) of one request to the server; POST bodies are JSON."""
+    h = dict(headers or {})
+    if token:
+        h["Authorization"] = "Bearer " + token
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+        h["X-Hivegrid-Remote"] = "1"
+    if host:
+        h["Host"] = host
+    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+    try:
+        c.request(method, path, body=data, headers=h)
+        r = c.getresponse()
+        raw = r.read().decode("utf-8", "replace")
+    finally:
+        c.close()
+    try:
+        return r.status, json.loads(raw)
+    except ValueError:
+        return r.status, raw
+
+
+def api(method, path, body=None, **kw):
+    return req(method, path, body, token=TOKEN, **kw)
+
+
+def agents():
+    st, doc = api("GET", "/api/agents")
+    return doc["agents"] if st == 200 else []
+
+
+def by_label(label):
+    return next((a for a in agents() if a["label"] == label), None)
+
+
+def received(agent):
+    try:
+        return open(os.path.join(WORK, f"received-{agent['id']}.txt")).read()
+    except OSError:
+        return ""
+
+
+def start_server(*extra):
+    global server
+    stop_server()
+    log = open(os.path.join(S, "remote-server.log"), "wb")
+    server = subprocess.Popen(
+        [HGQ, "sh", str(SLOT), "env", "-u", "WEZTERM_UNIX_SOCKET", "hivegrid-remote", "serve", "--port", str(PORT), *map(str, extra)],
+        stdout=log, stderr=log)
+    return waitfor(lambda: req("GET", "/healthz")[0] == 200, 10)
+
+
+def stop_server():
+    global server
+    if server and server.poll() is None:
+        server.terminate()
+        try:
+            server.wait(5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    server = None
+
+
+def install_fake_omp():
+    os.makedirs(WORK, exist_ok=True)
+    path = os.path.join(HOME, ".local", "bin", "omp")
+    if os.path.lexists(path):
+        os.remove(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(FAKE_OMP)
+    os.chmod(path, 0o755)
+
+
+def shot(name):
+    global shots
+    shots += 1
+    os.makedirs(SHOTS, exist_ok=True)
+    hgq("shot", SLOT, os.path.join(SHOTS, f"{shots:02d}-{name}.png"))
+
+
+# ---------------------------------------------------------------------------------------------
+
+
+def section_setup():
+    global TOKEN
+    print("-- 1 token and server")
+    tfile = os.path.join(HOME, ".config", "hivegrid", "remote-token")
+    if os.path.lexists(tfile):
+        os.remove(tfile)  # a re-run starts from no token
+    out = hgq("sh", SLOT, "hivegrid-remote", "token")
+    check("the token file is under the sandbox HOME", os.path.isfile(tfile), tfile)
+    if not os.path.isfile(tfile):
+        return False
+    check("the token file is mode 0600", (os.stat(tfile).st_mode & 0o777) == 0o600)
+    TOKEN = open(tfile).read().strip()
+    check("`token` prints the token", TOKEN != "" and TOKEN in out)
+    ok = start_server()
+    check("2 the server finds the GUI itself and /healthz answers", bool(ok))
+    if ok:
+        code, _ = api("GET", "/api/agents")
+        check("2 /api/agents answers 200 with the GUI found by discovery", code == 200, str(code))
+    return bool(ok)
+
+
+def section_auth_and_list():
+    print("-- 3 auth, 4 the agent list")
+    check("3 no token: 401", req("GET", "/api/agents")[0] == 401)
+    check("3 a wrong token: 401", req("GET", "/api/agents", token="x" * 43)[0] == 401)
+    check("3 Host evil.example: 403", api("GET", "/api/agents", host="evil.example")[0] == 403)
+    got = waitfor(lambda: len(agents()) == 3 and agents(), 20)
+    if not check("4 three agents listed", bool(got), json.dumps(agents())[:300]):
+        return False
+    labels = sorted(a["label"] for a in got)
+    check("4 labelled 1, 2, 3 like the dock", labels == ["1", "2", "3"], str(labels))
+    return True
+
+
+def section_actions():
+    print("-- 5 prompt and keys, 6 states")
+    a1, a2, a3 = by_label("1"), by_label("2"), by_label("3")
+    if not (a1 and a2 and a3):
+        check("5 agents 1, 2 and 3 found", False)
+        return
+    st, doc = api("POST", f"/api/agents/{a1['id']}/prompt", {"text": "hello"})
+    check("5 prompt hello: 200", st == 200, f"{st} {doc}")
+    check("5 hello and Enter arrive", waitfor(lambda: "hello\\r" in received(a1), 3), received(a1))
+    tail = waitfor(lambda: (lambda d: d if "hello" in "\n".join(d.get("lines", [])) else None)(api("GET", f"/api/agents/{a1['id']}/tail?lines=40")[1]), 5)
+    check("5 the tail contains hello", bool(tail))
+
+    before = len(received(a1))
+    st, _ = api("POST", f"/api/agents/{a1['id']}/keys", {"keys": ["y", "enter", "up", "esc"]})
+    want = "y\\r\\x1b[A\\x1b"
+    check("5 keys y enter up esc: 200", st == 200, str(st))
+    check("5 the matching bytes arrive", waitfor(lambda: want in received(a1)[before:], 3), received(a1)[before:])
+
+    before = len(received(a1))
+    st, doc = api("POST", f"/api/agents/{a1['id']}/keys", {"keys": ["ctrl-c"]})
+    time.sleep(0.8)
+    check("5 ctrl-c without confirm: 409", st == 409, f"{st} {doc}")
+    check("5 nothing arrives without confirm", len(received(a1)) == before)
+    st, _ = api("POST", f"/api/agents/{a1['id']}/keys", {"keys": ["ctrl-c"], "confirm": True})
+    check("5 ctrl-c with confirm: 200 and \\x03 arrives", st == 200 and bool(waitfor(lambda: "\\x03" in received(a1)[before:], 3)))
+
+    api("POST", f"/api/agents/{a2['id']}/keys", {"keys": ["a"]})
+    got = waitfor(lambda: (by_label("2") or {}).get("state") == "attention", 8)
+    check("6 agent 2 needs you after `a`", bool(got), str(by_label("2")))
+    st, _ = api("POST", f"/api/agents/{a2['id']}/prompt", {"text": "nope"})
+    check("6 a prompt to a pane that needs you: 409", st == 409, str(st))
+    before = len(received(a2))
+    st, _ = api("POST", f"/api/agents/{a2['id']}/keys", {"keys": ["y"]})
+    check("6 keys still work there", st == 200 and bool(waitfor(lambda: "y" in received(a2)[before:], 3)), str(st))
+
+    st, _ = api("POST", f"/api/agents/{a3['id']}/keys", {"keys": ["ctrl-d"], "confirm": True})
+    check("6 ctrl-d with confirm: 200", st == 200, str(st))
+    gone = waitfor(lambda: (by_label("3") or {}).get("state") == "exited", 10)
+    check("6 agent 3 is exited", bool(gone), str(by_label("3")))
+    st, _ = api("POST", f"/api/agents/{a3['id']}/keys", {"keys": ["z", "q", "9"]})
+    check("6 keys to an exited agent: 409", st == 409, str(st))
+    st, _ = api("POST", f"/api/agents/{a3['id']}/prompt", {"text": "zq9"})
+    check("6 a prompt to an exited agent: 409", st == 409, str(st))
+    time.sleep(0.8)
+    text = cli("get-text", "--pane-id", a3["id"], check=False)
+    check("6 nothing was typed into the shell left behind", "zq9" not in text and "z q 9" not in text, text[-200:])
+
+
+def chrome_path():
+    try:
+        import hivegrid_settings_core as core
+        found, _ = core.detect_browsers()
+    except Exception:
+        return None
+    return found[0][1] if found else None
+
+
+def section_browser():
+    print("-- 7 a browser renders hostile pane text as inert text")
+    chrome = chrome_path()
+    if not chrome:
+        print("skip no Chromium-family browser found")
+        return
+    a1 = by_label("1")
+    api("POST", f"/api/agents/{a1['id']}/keys", {"keys": ["x"]})
+    waitfor(lambda: HOSTILE in (by_label("1") or {}).get("title", ""), 8)
+    st, doc = api("GET", f"/api/agents/{a1['id']}/tail?lines=40")
+    check("7 the tail carries the hostile text as data", st == 200 and HOSTILE in "\n".join(doc.get("lines", [])))
+    check("7 no ESC byte in the tail", "\x1b" not in json.dumps(doc))
+    os.makedirs(SHOTS, exist_ok=True)
+    with tempfile.TemporaryDirectory() as prof:
+        base = [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", f"--user-data-dir={prof}",
+                "--virtual-time-budget=5000"]
+        url = f"http://127.0.0.1:{PORT}/#t={TOKEN}"
+        r = subprocess.run([*base, "--dump-dom", url], capture_output=True, text=True, timeout=60)
+        dom = r.stdout
+        check("7 the page rendered the agent rows (labels 1, 2, 3)",
+              all(re.search(r'class="label"[^>]*>' + n + "</span>", dom) for n in "123"), dom[:300])
+        check("7 the hostile title is text (&lt;img src=x)", "&lt;img src=x" in dom)
+        check("7 the hostile <script> title is text", "&lt;script&gt;x&lt;/script&gt;" in dom)
+        check("7 no <img src=x> element exists", re.search(r"<img[^>]*src=\"?x", dom) is None)
+        for size, name in (("390,844", "phone"), ("1280,720", "desktop")):
+            out = os.path.join(SHOTS, f"list-{name}.png")
+            subprocess.run([*base, f"--window-size={size}", f"--screenshot={out}", url],
+                           capture_output=True, text=True, timeout=60)
+            check(f"7 screenshot {name}", os.path.isfile(out) and os.path.getsize(out) > 0, out)
+    print(f"     review the list screenshots against design.md in {SHOTS}")
+
+
+def gui_pid():
+    try:
+        return int(open(os.path.join(S, "wezterm.pid")).read())
+    except (OSError, ValueError):
+        return 0
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:  # a zombie is gone for our purpose
+        return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def section_restart():
+    print("-- 8 the GUI restarts, the server follows")
+    # Only the GUI: `hgq restart` would kill the server too (down kills everything with the sandbox HOME).
+    pid = gui_pid()
+    socks = lambda: [f for f in os.listdir(os.path.join(S, "run", "wezterm")) if f.startswith("gui-sock-")] \
+        if os.path.isdir(os.path.join(S, "run", "wezterm")) else []
+    old = set(socks())
+    if not check("8 the GUI pid is known", pid > 0):
+        return
+    os.kill(pid, 15)
+    gone = waitfor(lambda: not alive(pid), 15)
+    check("8 the GUI exited", bool(gone))
+    saw503 = bool(waitfor(lambda: (lambda r: isinstance(r[1], dict) and r[1].get("error") == "no_mux" and r[0] == 503)(api("GET", "/api/agents")), 15, 0.3))
+    check("8 503 no_mux while the GUI is down", saw503)
+    print(f"     stale gui-sock files left by the old GUI: {sorted(old & set(socks())) or 'none'}")
+    hgq("up", SLOT, 1280, 720, timeout=120)
+    back = waitfor(lambda: api("GET", "/api/agents")[0] == 200, 40, 0.5)
+    check("8 200 again after the restart (the server found the new socket)", bool(back), str(api("GET", "/api/agents")))
+    check("8 the same server process kept running", server is not None and server.poll() is None)
+
+
+def section_readonly():
+    print("-- 9 read-only")
+    if not start_server("--read-only"):
+        check("9 the read-only server starts", False)
+        return
+    posts = [("prompt", {"text": "x"}), ("keys", {"keys": ["enter"]}), ("plan", {"choice": "execute"}), ("ack", {})]
+    for name, body in posts:
+        st, _ = api("POST", f"/api/agents/1/{name}", body)
+        check(f"9 POST {name}: 403", st == 403, str(st))
+    check("9 GET still works", api("GET", "/api/agents")[0] in (200, 503))
+
+
+def main():
+    hgq("down", SLOT, check=False)
+    hgq("up", SLOT, 1280, 720)
+    try:
+        time.sleep(2)
+        install_fake_omp()
+        hgq("sh", SLOT, "omp-grid", 1, 3, "--tab")
+        time.sleep(3)
+        if section_setup() and section_auth_and_list():
+            section_actions()
+            section_browser()
+            shot("after-actions")
+            section_restart()
+            section_readonly()
+    except Exception as e:
+        check("the run finished without an error", False, repr(e))
+    finally:
+        stop_server()
+        if not KEEP:
+            hgq("down", SLOT, check=False)
+    print(f"screenshots: {SHOTS}")
+    if fails:
+        print(f"remote-smoke: {len(fails)} failed")
+        return 1
+    print("remote-smoke passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

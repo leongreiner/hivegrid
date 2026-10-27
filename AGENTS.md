@@ -19,6 +19,7 @@ dev/check                  # everything CI runs; `dev/check py lua luacheck bun 
 dev/qa/hgq help            # isolated Hivegrid on its own Xvfb display: up, x (synthetic input), shot, cli, log, down
 dev/smoke                  # end-to-end smoke test in sandbox slot 11 (needs Xvfb and the fork build)
 dev/qa/web-smoke           # web pane end to end in slot 12 (needs Chrome and a fork build with the web pane)
+dev/qa/remote-smoke        # hivegrid-remote against fake agents in slot 14 (needs a fork build; a Chromium-family browser is optional)
 ```
 
 A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/check` before calling a change done. The QA workflow (scenarios, screenshots, parallel rounds) is in [.claude/skills/hivegrid-qa/SKILL.md](.claude/skills/hivegrid-qa/SKILL.md) with a surface checklist (`checklist.md`) and the design language (`design.md`); a screenshot that breaks `design.md` is a bug.
@@ -35,6 +36,7 @@ A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/c
 | `bin/hivegrid_ui.py` | Terminal UI toolkit (cell canvas, click regions, design components); every TUI uses it. |
 | `bin/hivegrid_panels.py`, `hivegrid_hive.py`, `hivegrid_picker.py`, `hivegrid-bar`, `hivegrid-overview`, `hivegrid-git` | The panels, hive, picker, bar, dock and git view programs. |
 | `bin/hivegrid_agents.py`, `hivegrid_repos.py`, `hivegrid_settings_core.py`, `hivegrid_hex.py` | Logic without UI: agent discovery and states, git scanning and CI, settings and accounts, hex geometry. |
+| `bin/hivegrid-remote`, `hivegrid_remote.py`, `hivegrid_remote_ui.py` | Phone remote over Tailscale: HTTP API and token handling (`hivegrid_remote.py`), the web page as Python string constants (`hivegrid_remote_ui.py`), the entry shim. See `docs/remote.md`. |
 | `bin/claude-quota`, `omp-switch`, `omp-grid` | Usage fetcher and history, chat transfer between omp profiles, grid launcher. |
 | `ext/hivegrid-agent-state.ts` | omp extension that writes exact agent states for the hive and dock. |
 | `tests/` | Python `unittest` in `tests/test_*.py`; Lua in `tests/lua/` (own runner, fake `wezterm` and mux); bun tests in `tests/ext/`. |
