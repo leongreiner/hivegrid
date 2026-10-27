@@ -40,7 +40,7 @@ Recorded from real omp sessions in an isolated sandbox window with fixture repos
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chrome as a pane of the grid, next to the agents (Hivegrid WezTerm build).
-- **Polish**: hover feedback, one themed picker for every list, header pills for the active mode, four colour themes.
+- **Polish**: hover feedback, one themed picker for every list, a calm header (project, branch and running agents first, usage and system stats as quiet text), header pills for the active mode, four colour themes.
 
 [docs/features.md](docs/features.md) describes each in detail.
 

@@ -165,6 +165,7 @@ local BRAND_DRAWN = pcall(function() config.tab_bar_brand = theme.BRAND_MARK end
 local as = require('agentstatus')(config, wezterm)
 local ss = require('sysstats')(config, wezterm)
 local cq = require('claudequota')(config, wezterm)
+local hd = require('header')(config, wezterm, as)
 cq.set_pane_kind(as.pane_kind)
 local sb = require('sidebar')(config, wezterm)
 config.status_update_interval = 1000
@@ -214,16 +215,7 @@ local function tab_layout(parts, tab_index, cap)
   return name, proc, fixed + (utf8.len(name) or #name) + pneed + TAB_PAD_CELLS
 end
 
--- How the right status gives up width: { 'tier', group, tier } takes a group to a
--- narrower tier (a tier that is not narrower than the current one is skipped), { 'drop',
--- group } removes it. The system group keeps its amounts (tier 2) until the quota group
--- is down to its compact tiers, and its last tier, the CPU chip alone, is never dropped.
--- The mode and zoom pills are never dropped; their key hints go before any group would.
-local PLAN = {
-  { 'tier', 'C', 2 }, { 'tier', 'B', 2 }, { 'tier', 'B', 3 }, { 'tier', 'B', 4 },
-  { 'tier', 'C', 3 }, { 'tier', 'C', 4 }, { 'tier', 'B', 5 }, { 'tier', 'C', 5 },
-  { 'tier', 'C', 6 }, { 'drop', 'B' },
-}
+-- How the right status gives up width (PLAN, the tiers of its groups): config/header.lua.
 
 -- The pill shown while a key table is active, so a modal key never acts unseen, with the
 -- table's keys beside it while there is room. One mode colour (amber); broadcast types into
@@ -240,7 +232,7 @@ local MODES = {
 
 -- The web key table exists only on the Hivegrid build (config/web.lua).
 if theme.has_web then
-  MODES.web = { 'WEB', P.cyan, {
+  MODES.web = { 'WEB', P.amber, {
     { 'l', 'location' }, { 'b', 'back' }, { 'f', 'fwd' }, { 'r', 'reload' }, { 'Esc', 'done' },
   } }
 end
@@ -285,8 +277,9 @@ local function lead_pills(window)
   return full, compact
 end
 
--- Right side of the header, in the cells the tabs leave over: [mode] B (Claude quota),
--- C (system stats). Every group has tiers; PLAN says which one narrows first.
+-- Right side of the header, in the cells the tabs leave over: [mode] A (project, branch and
+-- agents), B (Claude quota), C (system stats). Every group has tiers; header.PLAN says which
+-- one narrows first.
 wezterm.on('update-status', function(window)
   local dims = window:get_dimensions()
   local pixel_width = dims.pixel_width
@@ -315,41 +308,18 @@ wezterm.on('update-status', function(window)
   cq.refresh_if_due(window)
   ss.record() -- sample and log the system stats even when the header hides them
 
-  -- Up to three visual groups: brand (left status), then right to left of the tabs
-  --   [mode] [zoom]   B: quota   C: system
-  -- Each group has tiers, richest first; the tiers shrink in PLAN order until the
-  -- groups fit the free cells. Agent states live in the overview dock, not here.
+  -- Up to four visual groups: brand (left status), then right to left of the tabs
+  --   [mode] [zoom]   A: project, branch, agents   B: quota   C: system
+  -- A is the one pill and the strongest text; B and C are muted text that takes a colour
+  -- only past a threshold. Each group has tiers, richest first; the tiers shrink in header.PLAN
+  -- order until the groups fit the free cells.
   local groups = {
+    A = { tiers = hd.tiers(hd.context(window)) },
     B = { tiers = cq.visible() and cq.tiers(cq.active(window)) or {} },
     C = { tiers = ss.visible() and ss.tiers() or {} },
   }
   sb.sync(window)
 
-  local function needed(lead_w)
-    local w = lead_w
-    for _, g in pairs(groups) do
-      local t = g.tiers[g.tier]
-      if t then w = w + t.w + 1 end
-    end
-    return w
-  end
-  -- Runs PLAN from the richest tiers for a lead `lead_w` cells wide; true when it fits
-  -- without dropping a group.
-  local function plan(lead_w)
-    for _, g in pairs(groups) do g.tier = 1 end
-    local dropped = false
-    for _, step in ipairs(PLAN) do
-      if needed(lead_w) <= avail then break end
-      local g = groups[step[2]]
-      if step[1] == 'tier' then
-        local cur, to = g.tiers[g.tier], g.tiers[step[3]]
-        if to and (not cur or to.w < cur.w) then g.tier = step[3] end
-      elseif step[1] == 'drop' then
-        g.tier, dropped = math.huge, true
-      end
-    end
-    return not dropped and needed(lead_w) <= avail
-  end
   local function width_of(list)
     local w = 0
     for _, it in ipairs(list) do w = w + theme.width(it) + 1 end
@@ -357,9 +327,9 @@ wezterm.on('update-status', function(window)
   end
   local full, compact = lead_pills(window)
   local lead = full
-  if not plan(width_of(full)) and #compact > 0 then
+  if not hd.fit(groups, width_of(full), avail) and #compact > 0 then
     lead = compact
-    plan(width_of(compact))
+    hd.fit(groups, width_of(compact), avail)
   end
 
   local items = {}
@@ -367,11 +337,11 @@ wezterm.on('update-status', function(window)
     theme.extend(items, it)
     items[#items + 1] = { Text = ' ' }
   end
-  for _, name in ipairs { 'B', 'C' } do
+  for _, name in ipairs { 'A', 'B', 'C' } do
     local t = groups[name].tiers[groups[name].tier]
     if t then
       theme.extend(items, t.items)
-      items[#items + 1] = { Text = ' ' }
+      items[#items + 1] = { Text = string.rep(' ', hd.GAP) }
     end
   end
   window:set_left_status(BRAND_DRAWN and '' or wezterm.format(theme.brand()))
@@ -403,8 +373,8 @@ local function hive_action() return panel_action('hive') end
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
 -- Left click: start/switch omp (quota pill). Right click on a quota pill or a click on the
--- system group opens the matching panel; the logo (id 'brand') opens the agent hive; the
--- ZOOM pill unzooms.
+-- system group opens the matching panel; a click on the agent counts opens the pane picker; the
+-- logo (id 'brand') opens the agent hive; the ZOOM pill unzooms.
 wezterm.on('status-click', function(window, pane, id, button)
   if button ~= 'Left' and button ~= 'Right' then return end
   local account = id:match('^quota:(.+)$')
@@ -416,6 +386,8 @@ wezterm.on('status-click', function(window, pane, id, button)
     end
   elseif id == 'system' then
     window:perform_action(panel_action('monitor'), pane)
+  elseif id == 'agents' then
+    window:perform_action(as.picker, pane)
   elseif id == 'brand' then
     open_hive(window, pane)
   elseif id == 'zoom' then

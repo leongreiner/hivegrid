@@ -1,8 +1,8 @@
 -- Per-pane agent state for grids of omp panes, in the hive panel's vocabulary
 -- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), done, idle, exited, plus
 -- bell, shell (a shell prompt in a pane where no agent ran) and other (any other program).
--- Shown in the overview dock (overview.lua) and the pane picker (LEADER+g), used by Alt+n (next agent that needs you);
--- the header carries no agent state.
+-- Shown in the overview dock (overview.lua), the pane picker (LEADER+g) and, as a count of the
+-- agents that run or wait for you, in the header (api.running); Alt+n jumps to the next agent that needs you.
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
 -- `as` is { tab_parts, bell, pane_kind, pane_label, agent_number, overview, picker }.
@@ -472,6 +472,40 @@ end
 -- Reading-order number of a pane within its tab (matches the minimap digits).
 function api.agent_number(pane_id)
   return panes[pane_id] and panes[pane_id].num or nil
+end
+
+-- How many panes of the window are in each state that wants a look: { working, busy,
+-- attention }, every tab, in the one state vocabulary (STATES). The header's agent chip.
+function api.running(window)
+  local n = { working = 0, busy = 0, attention = 0 }
+  for _, t in ipairs(scan(window)) do
+    for _, e in ipairs(t.entries) do
+      local k = e.st.kind
+      if n[k] then n[k] = n[k] + 1 end
+    end
+  end
+  return n
+end
+
+-- Full directory of the active grid pane of the window's active tab (the pane that names the
+-- tab), nil for a web pane or when unknown. The header's project and branch.
+function api.focus_dir(window)
+  local active = window:active_tab():tab_id()
+  for _, t in ipairs(scan(window)) do
+    if t.id == active then
+      local pick
+      for _, e in ipairs(t.entries) do
+        if e.info.is_active then pick = e end
+      end
+      pick = pick or t.entries[1]
+      local cwd = pick and pick.st.proc ~= 'web' and pick.st.cwd or ''
+      if cwd == '' then return nil end
+      local home = wezterm.home_dir
+      if cwd:sub(1, 1) == '~' and home and home ~= '' then cwd = home .. cwd:sub(2) end
+      return cwd
+    end
+  end
+  return nil
 end
 
 -- What a row says for state s of pane record st: a program's own name for 'other'.

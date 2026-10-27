@@ -1626,7 +1626,7 @@ def gib_text(g):
 
 
 def load_color(p, pct):
-    """Mirrors config/sysstats.lua color(): the header's colour for a load percentage."""
+    """Mirrors the thresholds of config/sysstats.lua level(): above 85 critical, from 60 a warning."""
     return p["red"] if pct > 85 else (p["amber"] if pct >= 60 else p["green"])
 
 

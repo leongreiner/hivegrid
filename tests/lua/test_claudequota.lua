@@ -199,6 +199,49 @@ T.test('a usage at or above 80% shows the reset countdown', function(wz)
   T.ok(not m:find('↻3d', 1, true), 'no countdown below 80%: ' .. m)
 end)
 
+-- Colour of the first cell of `needle` in a tier's rendered text.
+local function fg_of(items, needle)
+  local cells, chars = require('tests.lua.t').render(items), {}
+  for i, c in ipairs(cells) do chars[i] = c.ch end
+  local text = table.concat(chars)
+  local at = text:find(needle, 1, true)
+  T.ok(at, needle .. ' in ' .. text)
+  -- the text is ASCII up to the needle except for the cap glyph of a highlighted account
+  local bytes = 0
+  for i, c in ipairs(cells) do
+    if bytes >= at - 1 then return c.fg end
+    bytes = bytes + #chars[i]
+  end
+end
+
+T.test('the header colours only past a threshold: muted numbers below 50%, amber from 50, red from 80', function(wz)
+  local cq = setup(wz, { files = {
+    main = ok_entry('main', 20, 55), ['2'] = ok_entry('2', 85, 49), private = ok_entry('private', 0, 0),
+  } })
+  local P = require('theme').P
+  local items = cq.tiers()[2].items -- the richest tier without bars
+  T.eq(fg_of(items, '20%'), P.muted, 'below 50')
+  T.eq(fg_of(items, '55%'), P.amber)
+  T.eq(fg_of(items, '85%'), P.red)
+  T.eq(fg_of(items, '49%'), P.muted)
+  T.eq(fg_of(items, 'main'), P.dim, 'labels are dim')
+  for _, tier in ipairs(cq.tiers()) do
+    for _, it in ipairs(tier.items) do
+      local c = type(it) == 'table' and it.Foreground and it.Foreground.Color
+      T.ok(c ~= P.green, 'green never shows in the header')
+    end
+  end
+end)
+
+T.test('the quota sits on the plain header band: no pill background anywhere', function(wz)
+  local cq = setup(wz, { accounts = { ACCOUNTS[1] }, files = { main = ok_entry('main', 20, 30) } })
+  local P = require('theme').P
+  local items = cq.tiers()[1].items
+  for _, it in ipairs(items) do
+    T.ok(not (type(it) == 'table' and it.Background and it.Background.Color == P.pill), 'no pill background')
+  end
+end)
+
 T.test('updated cache numbers show within the re-read interval, not on every tick', function(wz)
   local cq, _, cache = setup(wz, { accounts = { ACCOUNTS[1] }, files = { main = ok_entry('main', 10, nil) } })
   T.eq(cq.text(), '▮ main 5h 10%')

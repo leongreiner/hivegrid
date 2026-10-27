@@ -274,6 +274,31 @@ T.test('agents are numbered in reading order with the sidebar and overview dock 
   T.eq({ as.agent_number(51), as.agent_number(54), as.agent_number(55), as.agent_number(56) }, { 1, 4, nil, nil })
 end)
 
+T.test('running counts the panes that work, are busy or need you, across tabs; the rest is not counted', function(wz)
+  local as = load()
+  write_ext(wz, 51, { state = 'busy', updated = T0 - 1, since = T0 - 4 })
+  local win = grid2x2(wz, {
+    omp(wz, 50, 'π ⠋ a'), omp(wz, 51, 'π > b'), omp(wz, 52, 'π ! c'), omp(wz, 53, 'π > d'),
+  }, 1, { focused = false })
+  T.eq(as.running(win), { working = 1, busy = 1, attention = 1 })
+  T.eq(as.running(win), as.running(win), 'a second call in the same tick agrees')
+end)
+
+T.test('focus_dir is the full directory of the active grid pane, ~ expanded, nil for a web pane', function(wz)
+  local as = load()
+  local home = wz.home_dir
+  local win = grid2x2(wz, {
+    omp(wz, 60, 'π > a', { cwd = home .. '/work/proj' }), omp(wz, 61, 'π > b', { cwd = '/srv/other' }),
+  }, 1, { focused = false })
+  T.eq(as.focus_dir(win), home .. '/work/proj')
+  advance(1)
+  win:active_tab().rows[1].active, win:active_tab().rows[2].active = false, true
+  T.eq(as.focus_dir(win), '/srv/other')
+  local web = wz.fake.pane { id = 62, user_vars = { hivegrid_web = '1' }, cwd = wz.fake.url('https://example.com/') }
+  local wwin = grid2x2(wz, { web }, 1, { focused = false })
+  T.eq(as.focus_dir(wwin), nil)
+end)
+
 T.test('Alt+n skips idle and done agents and goes to the pane that needs you', function(wz)
   local _, config = load()
   local win = grid2x2(wz, {

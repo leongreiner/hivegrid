@@ -211,20 +211,87 @@ T.test('compact text keeps only CPU and RAM', function(wz)
   T.eq(compact, 'CPU 50%  RAM 50%')
 end)
 
-T.test('the narrowest tier keeps the CPU chip alone, the one before it CPU and RAM; the richest adds the amounts', function(wz)
+-- Colour of the first cell of `needle` in the rendered items (ASCII text only).
+local function fg_at(items, needle)
+  local cells, chars = T.render(items), {}
+  for i, c in ipairs(cells) do chars[i] = c.ch end
+  local at = table.concat(chars):find(needle, 1, true)
+  T.ok(at, 'no ' .. needle .. ' in ' .. table.concat(chars))
+  return cells[at].fg
+end
+
+local function text_of(items)
+  local chars = {}
+  for i, c in ipairs(T.render(items)) do chars[i] = c.ch end
+  return table.concat(chars)
+end
+
+T.test('level: warning from 60 %, critical above 85 %', function(wz)
+  local ss = setup(wz)
+  T.eq({ ss.level(0), ss.level(59.9), ss.level(60), ss.level(85), ss.level(85.1), ss.level(100) },
+    { 'ok', 'ok', 'warn', 'warn', 'crit', 'crit' })
+end)
+
+T.test('a calm machine: one muted chip with CPU, RAM and GPU, no disk, no amounts, no colour', function(wz)
+  local ss, _, proc = setup(wz)
+  local P = require('theme').P
+  ss.text()
+  T.write(proc .. '/stat', stat(1200, 940))
+  T.clock(T0 + 2)
+  ss.text() -- the second to sample the disk too
+  T.clock(T0 + 3)
+  local rich = ss.tiers()[1].items
+  T.eq(text_of(rich), 'CPU  50%  RAM  50%  GPU  37%')
+  for _, c in ipairs(T.render(rich)) do
+    T.ok(c.fg == P.muted or c.fg == P.dim, 'only muted text: ' .. c.ch .. ' ' .. tostring(c.fg))
+    T.ok(c.bg == nil, 'bare text on the header band')
+  end
+  T.eq(fg_at(rich, '50%'), P.muted)
+  T.eq(fg_at(rich, 'CPU'), P.dim)
+end)
+
+T.test('a metric past its threshold takes amber or red and its amount; the rest stays muted', function(wz)
+  local df = 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 1000000000 950000000 50000000 95% /\n'
+  local ss, _, proc = setup(wz, function(argv)
+    if argv[1] == 'df' then return true, df end
+    if argv[1] == 'nvidia-smi' then return true, '70, 12288, 16384\n' end
+    return false, ''
+  end)
+  local P = require('theme').P
+  T.write(proc .. '/meminfo', meminfo(32 * GIB, 3 * GIB))
+  ss.text()
+  T.write(proc .. '/stat', stat(1200, 940))
+  T.clock(T0 + 2)
+  ss.text()
+  T.clock(T0 + 3)
+  local rich = ss.tiers()[1].items
+  local text = text_of(rich)
+  T.eq(fg_at(rich, '50%'), P.muted) -- CPU
+  T.eq(fg_at(rich, '91%'), P.red) -- RAM, above 85
+  T.eq(fg_at(rich, '70%'), P.amber) -- GPU, from 60
+  T.eq(fg_at(rich, '95%'), P.red) -- the disk appears when it runs full
+  T.ok(text:find('29.0G/32G', 1, true), text)
+  T.ok(text:find('12.0/16G', 1, true), text)
+  T.ok(text:find('DSK  95% 48G free', 1, true), text)
+  T.ok(not text:find('CPU  50% %S+G'), 'CPU has no amount')
+end)
+
+T.test('tiers narrow from CPU, RAM and GPU to CPU and RAM to the CPU alone; a hot metric stays', function(wz)
   local ss, _, proc = setup(wz)
   ss.text()
   T.write(proc .. '/stat', stat(1200, 940))
   T.clock(T0 + 2)
   local tiers = ss.tiers()
-  local rich, narrow = wz.format(tiers[1].items), wz.format(tiers[#tiers].items)
-  local pair = wz.format(tiers[#tiers - 1].items)
-  T.ok(rich:find('16.0G/32G', 1, true), 'RAM used/total in GiB: ' .. rich)
-  T.ok(rich:find('715G free', 1, true), 'disk free in GiB: ' .. rich)
-  T.ok(rich:find('4.0/16G', 1, true), 'GPU memory: ' .. rich)
-  T.ok(narrow:find('CPU', 1, true) and not narrow:find('RAM', 1, true), narrow)
-  T.ok(pair:find('CPU', 1, true) and pair:find('RAM', 1, true), pair)
-  T.ok(not pair:find('GPU', 1, true) and not pair:find('DSK', 1, true), pair)
+  T.eq(#tiers, 3)
+  local rich, pair, narrow = text_of(tiers[1].items), text_of(tiers[2].items), text_of(tiers[3].items)
+  T.ok(rich:find('GPU', 1, true) and rich:find('RAM', 1, true), rich)
+  T.ok(pair:find('RAM', 1, true) and not pair:find('GPU', 1, true), pair)
+  T.eq(narrow, 'CPU  50%')
+  T.ok(tiers[1].w > tiers[2].w and tiers[2].w > tiers[3].w, 'each tier is narrower')
+  -- RAM runs hot: it is in the narrowest tier too, a problem is never narrowed away.
+  T.write(proc .. '/meminfo', meminfo(32 * GIB, 2 * GIB))
+  T.clock(T0 + 4)
+  T.ok(text_of(ss.tiers()[3].items):find('RAM  94%', 1, true))
 end)
 
 T.test('Alt+s toggles the stats', function(wz)

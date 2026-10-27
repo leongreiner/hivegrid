@@ -73,6 +73,10 @@ return function(config, wezterm)
     return P.green
   end
 
+  -- The header colours only what needs a look: ok (green) is the plain muted text.
+  local function quiet(c) return c == P.green and P.muted or c end
+  local function tone(pct) return quiet(color(pct)) end
+
   local function remaining(secs)
     if secs <= 0 then return 'now' end
     local m = math.floor(secs / 60)
@@ -157,10 +161,11 @@ return function(config, wezterm)
 
   local function lab(s, n) return n and s.label:sub(1, n) or s.label end
 
-  -- The worst window's number in its colour; the stale mark `~` is amber in every tier.
+  -- The worst window's number: muted, amber or red past its threshold; the stale mark `~` is
+  -- amber in every tier.
   local function worst_items(s)
-    if s.pct < 0 then return { { Foreground = { Color = s.color } }, { Text = s.login and 'login' or '--' } } end
-    local items = { { Foreground = { Color = s.color } }, { Text = string.format('%.0f%%', s.pct) } }
+    if s.pct < 0 then return { { Foreground = { Color = quiet(s.color) } }, { Text = s.login and 'login' or '--' } } end
+    local items = { { Foreground = { Color = tone(s.pct) } }, { Text = string.format('%.0f%%', s.pct) } }
     if s.stale then
       items[#items + 1] = { Foreground = { Color = P.amber } }
       items[#items + 1] = { Text = '~' }
@@ -170,7 +175,7 @@ return function(config, wezterm)
 
   local function label_items(s, crit, n)
     return {
-      { Foreground = { Color = crit and P.bright or P.muted } },
+      { Foreground = { Color = crit and P.bright or P.dim } },
       { Attribute = { Intensity = crit and 'Bold' or 'Normal' } },
       { Text = lab(s, n) .. ' ' },
       { Attribute = { Intensity = 'Normal' } },
@@ -178,27 +183,35 @@ return function(config, wezterm)
   end
 
   -- Richest first. `active` is the label of the account whose omp runs in the focused pane
-  -- (api.active): its label is bold and bright and it sits on a raised block. Every tier is
-  -- one continuous group with a divider between accounts, each account a click target.
-  -- Numbers and bars always sit on the plain pill; an account that needs a login shows
-  -- the amber `login` chip and nothing stale beside it.
+  -- (api.active): its label is bold and bright and it sits on a raised block, the one
+  -- selection in the group. Every other account is plain text on the header band: dim label,
+  -- muted numbers, amber or red only from 50 / 80 %; a gap of two cells between accounts, each
+  -- one a click target. An account that needs a login shows the amber `login` chip and
+  -- nothing stale beside it.
   local function build_tiers(m, now, active)
     local sums = m.sums
     local function click(s, items) return theme.click('quota:' .. s.label, items) end
+
+    -- The raised block of the highlighted account around `items`.
+    local function lit_block(items)
+      local out = {
+        { Foreground = { Color = P.raised } }, { Text = theme.CAP_L },
+        { Background = { Color = P.raised } }, { Text = ' ' },
+      }
+      theme.extend(out, items)
+      theme.extend(out, {
+        { Text = ' ' }, 'ResetAttributes', { Foreground = { Color = P.raised } },
+        { Text = theme.CAP_R }, 'ResetAttributes',
+      })
+      return out
+    end
 
     -- opts: label_n (label cut), bar (cells of the slim line after each window),
     -- worst_only (only the window with the highest usage).
     local function account(s, opts)
       local lit = s.label == active
-      local bg = lit and P.raised or P.pill
+      local bg = lit and P.raised or P.deep
       local items = {}
-      if lit then
-        theme.extend(items, {
-          { Foreground = { Color = P.raised } }, { Background = { Color = P.pill } },
-          { Text = theme.CAP_L },
-        })
-      end
-      items[#items + 1] = { Background = { Color = bg } }
       theme.extend(items, label_items(s, lit, opts.label_n))
       if s.login then
         theme.extend(items, theme.chip('login', P.amber, bg))
@@ -209,13 +222,13 @@ return function(config, wezterm)
         for i, w in ipairs(opts.worst_only and { s.worst } or s.windows) do
           local pct, reset = w[2].pct, w[2].reset_at
           if i > 1 then items[#items + 1] = { Text = ' ' } end
-          items[#items + 1] = { Foreground = { Color = P.muted } }
+          items[#items + 1] = { Foreground = { Color = P.dim } }
           items[#items + 1] = { Text = w[1] .. ' ' }
-          items[#items + 1] = { Foreground = { Color = color(pct) } }
+          items[#items + 1] = { Foreground = { Color = tone(pct) } }
           items[#items + 1] = { Text = string.format('%.0f%%', pct) }
           if opts.bar then
             items[#items + 1] = { Text = ' ' }
-            theme.extend(items, theme.meter(pct, opts.bar, color(pct), bg))
+            theme.extend(items, theme.meter(pct, opts.bar, tone(pct), bg))
           end
           if pct >= 80 and type(reset) == 'number' then
             items[#items + 1] = { Foreground = { Color = P.muted } }
@@ -227,55 +240,59 @@ return function(config, wezterm)
           items[#items + 1] = { Text = opts.bar and ' ~' or '~' } -- never glued to a bar
         end
       end
-      if lit then
-        theme.extend(items, {
-          { Text = ' ' }, { Foreground = { Color = P.raised } },
-          { Background = { Color = P.pill } }, { Text = theme.CAP_R },
-        })
+      return click(s, lit and lit_block(items) or items)
+    end
+
+    local function join(parts)
+      local out = {}
+      for i, part in ipairs(parts) do
+        if i > 1 then out[#out + 1] = { Text = '  ' } end
+        theme.extend(out, part)
       end
-      items[#items + 1] = { Background = { Color = P.pill } }
-      return click(s, items)
+      return out
     end
 
     local function accounts(opts)
       local parts = {}
       for _, s in ipairs(sums) do parts[#parts + 1] = account(s, opts) end
-      return theme.group(parts, P.pill)
+      return join(parts)
     end
 
     local function compact(label_n)
       local parts = {}
       for _, s in ipairs(sums) do
-        local seg = label_items(s, s.label == active, label_n)
+        local lit = s.label == active
+        local seg = label_items(s, lit, label_n)
         if s.login then
-          theme.extend(seg, theme.chip('login', P.amber, P.pill))
+          theme.extend(seg, theme.chip('login', P.amber, lit and P.raised or P.deep))
         else
           theme.extend(seg, worst_items(s))
         end
-        parts[#parts + 1] = click(s, seg)
+        parts[#parts + 1] = click(s, lit and lit_block(seg) or seg)
       end
-      return theme.group(parts, P.pill)
+      return join(parts)
     end
 
     local function dots()
       local body = {}
       for _, s in ipairs(sums) do
-        theme.extend(body, click(s, { { Foreground = { Color = s.color } }, { Text = '● ' } }))
+        theme.extend(body, click(s, { { Foreground = { Color = quiet(s.color) } }, { Text = '● ' } }))
       end
       local c
       for _, s in ipairs(sums) do
         if s.label == active then c = s end
       end
       c = c or most_critical(sums)
-      local seg = label_items(c, c.label == active, nil)
+      local lit = c.label == active
+      local seg = label_items(c, lit, nil)
       if c.pct < 0 or c.login then
-        theme.extend(seg, { { Foreground = { Color = c.color } }, { Text = c.login and 'login' or '--' } })
+        theme.extend(seg, { { Foreground = { Color = quiet(c.color) } }, { Text = c.login and 'login' or '--' } })
       else
-        theme.extend(seg, { { Foreground = { Color = P.muted } }, { Text = c.worst[1] .. ' ' } })
+        theme.extend(seg, { { Foreground = { Color = P.dim } }, { Text = c.worst[1] .. ' ' } })
         theme.extend(seg, worst_items(c))
       end
-      theme.extend(body, click(c, seg))
-      return theme.pill(body, c.label == active and P.raised or P.pill)
+      theme.extend(body, click(c, lit and lit_block(seg) or seg))
+      return body
     end
 
     local out = {}
