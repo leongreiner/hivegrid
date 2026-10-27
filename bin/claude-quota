@@ -205,8 +205,21 @@ def read_token(cred_dir, now):
     return token, None
 
 
-def read_omp_token(profile, now):
-    """Valid access token of the profile's anthropic OAuth login in omp's agent.db, or None."""
+def account_uuid(cred_dir):
+    """accountUuid Claude Code recorded in the config dir's .claude.json (the login's identity), or None."""
+    try:
+        data = json.loads((Path(cred_dir) / ".claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    acct = data.get("oauthAccount") if isinstance(data, dict) else None
+    uuid = acct.get("accountUuid") if isinstance(acct, dict) else None
+    return uuid if isinstance(uuid, str) and uuid else None
+
+
+def read_omp_token(profile, now, uuid=None):
+    """Valid access token of the profile's anthropic OAuth login in omp's agent.db, or None.
+    A profile can hold several logins (`/login` adds one per account): with `uuid` only those of
+    that account count, never another account's."""
     if not profile or "/" in profile or profile.startswith("."):
         return None
     db = OMP_PROFILES / profile / "agent" / "agent.db"
@@ -228,7 +241,9 @@ def read_omp_token(profile, now):
             data = json.loads(raw)
         except (TypeError, ValueError):
             continue
-        tok, exp = data.get("access") if isinstance(data, dict) else None, data.get("expires") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or (uuid and data.get("accountId") not in (uuid, None)):
+            continue
+        tok, exp = data.get("access"), data.get("expires")
         if isinstance(tok, str) and tok and isinstance(exp, (int, float)) and exp > best_exp:
             best, best_exp = tok, exp
     return best
@@ -475,7 +490,7 @@ def refresh_one(cred_dir, label, order, version, now, profile=None):
     prev = read_entry(label)
     if not is_due(prev, now):
         return prev, False
-    token, err = read_omp_token(profile, now), None
+    token, err = read_omp_token(profile, now, account_uuid(cred_dir)), None
     if token is None:
         token, err = read_token(cred_dir, now)
     if err:

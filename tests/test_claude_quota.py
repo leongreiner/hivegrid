@@ -476,6 +476,20 @@ class TokenSources(Env):
             self.assertIsNone(Q.read_omp_token(bad, NOW), bad)
         self.assertEqual(Q.read_omp_token("alpha", NOW), "omp")
 
+    def test_a_profile_with_several_logins_serves_each_account_its_own(self):
+        rows = [("anthropic", "oauth", json.dumps({"access": "other", "expires": FAR + 5, "accountId": "uuid-other"}), None),
+                ("anthropic", "oauth", json.dumps({"access": "mine", "expires": FAR, "accountId": "uuid-mine"}), None)]
+        self.omp_db("alpha", rows)
+        self.assertEqual(Q.read_omp_token("alpha", NOW), "other", "no identity known: the longest-lived login")
+        self.assertEqual(Q.read_omp_token("alpha", NOW, "uuid-mine"), "mine")
+        self.assertIsNone(Q.read_omp_token("alpha", NOW, "uuid-none"))
+        d = self.claude_dir(".claude", token="cred")
+        (d / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "uuid-mine"}}))
+        self.assertEqual(Q.account_uuid(d), "uuid-mine")
+        self.refresh(d, "alpha")
+        self.assertEqual(self.calls, ["mine"])
+        self.assertIsNone(Q.account_uuid(self.home / "nowhere"))
+
     def test_agent_db_is_never_modified(self):
         d = self.claude_dir(".claude", token="cred")
         db = self.omp_db("alpha", [self.row("omp", FAR)])
