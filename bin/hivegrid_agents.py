@@ -11,6 +11,7 @@ config/agentstatus.lua when you look at a done pane), seen.json {pane: {state, s
 title-derived states and for remembering that an agent ran in a pane (a shell there is `exited`).
 """
 import json
+import math
 import mmap
 import os
 import re
