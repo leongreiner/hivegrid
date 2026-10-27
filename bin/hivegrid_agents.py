@@ -10,15 +10,12 @@ Own bookkeeping (survives the short-lived overlay): acks.json {pane: done-since}
 config/agentstatus.lua when you look at a done pane), seen.json {pane: {state, since, agent}} for
 title-derived states and for remembering that an agent ran in a pane (a shell there is `exited`).
 """
-import base64
 import json
-import math
 import mmap
 import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.parse
@@ -26,10 +23,7 @@ from dataclasses import dataclass
 
 STATES = ("working", "busy", "done", "idle", "attention", "exited")
 STALE_SECS = 20.0          # ext heartbeat older than this (pid alive) => trust the title instead
-# Mirrors config/layouts.lua (arrange / ideal_counts) so the hive and the grid auto-arrange agree.
 CELL_ASPECT = 2.1         # cell height / cell width on screen
-MIN_PANE_COLS, MIN_PANE_ROWS = 60, 8
-EQUALIZE_VAR = "hivegrid_hive_equalize"
 PLAN_CHOICES = ("execute", "compact", "keep", "refine", "save")
 SHELLS = {"bash", "zsh", "fish", "sh", "dash"}
 AGENT_PROCS = {"omp", "claude", "codex", "gemini", "aider", "opencode"}
@@ -574,40 +568,6 @@ def _reading_order(panes):
     return sorted(panes, key=lambda p: (yi[_geo(p)[1]], xi[_geo(p)[0]], _geo(p)[1], _geo(p)[0], p["pane_id"]))
 
 
-def _rows_of(panes):
-    yi = _cluster([_geo(p)[1] for p in panes])
-    rows = {}
-    for p in _reading_order(panes):
-        rows.setdefault(yi[_geo(p)[1]], []).append(p)
-    return [rows[k] for k in sorted(rows)]
-
-
-def ideal_counts(n, cols, rows):
-    """Panes per row of the grid that reads best for n panes in cols x rows cells: the row count
-    whose panes come closest to square on screen (cells are ~CELL_ASPECT times taller than wide),
-    few empty slots, no pane narrower than MIN_PANE_COLS where avoidable. Top rows take the extras.
-    Same rule as ideal_counts in config/layouts.lua."""
-    best, best_r = None, 1
-    for r in range(1, n + 1):
-        c = -(-n // r)
-        pc = max((cols - (c - 1)) / c, 1.0)
-        pr = max((rows - (r - 1)) / r, 1.0)
-        if r == 1 or pr >= MIN_PANE_ROWS:
-            score = abs(math.log(pc / (pr * CELL_ASPECT))) + 0.15 * (r * c - n) / n
-            if pc < MIN_PANE_COLS:
-                score += (MIN_PANE_COLS - pc) / MIN_PANE_COLS
-            if best is None or score < best:
-                best, best_r = score, r
-    return [n // best_r + (1 if i < n % best_r else 0) for i in range(best_r)]
-
-
-def _sizes(total, k):
-    """k cell sizes (dividers take one cell each) that fill `total`, equal within one cell."""
-    usable = total - (k - 1)
-    base, extra = divmod(usable, k)
-    return [base + (1 if i < extra else 0) for i in range(k)]
-
-
 def _grid_panes(tab_panes, fg):
     out = []
     for p in tab_panes:
@@ -615,36 +575,6 @@ def _grid_panes(tab_panes, fg):
         if not is_chrome(comm, args):
             out.append(p)
     return out
-
-
-def _is_regular(grid, counts):
-    """The grid panes are in the rows `counts`, equal widths inside a row and equal heights
-    across rows (within one cell)."""
-    rows = _rows_of(grid)
-    if [len(r) for r in rows] != counts:
-        return False
-    heights = [_geo(p)[3] for p in grid]
-    if max(heights) - min(heights) > 1:
-        return False
-    for r in rows:
-        widths = [_geo(p)[2] for p in r]
-        if max(widths) - min(widths) > 1:
-            return False
-    return True
-
-
-def request_equalize(pane, out=None):
-    """Asks WezTerm (user var hivegrid_hive_equalize, handled in config/wezterm.lua) to run the
-    regular equalize on the active tab; `pane` is the pane that keeps the keyboard focus. The
-    escape goes to this program's terminal; WezTerm handles it asynchronously."""
-    out = out if out is not None else sys.stdout
-    value = base64.b64encode(str(pane).encode()).decode()
-    try:
-        out.write(f"\x1b]1337;SetUserVar={EQUALIZE_VAR}={value}\x07")
-        out.flush()
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _unzoom(run, tab_panes):
@@ -686,107 +616,6 @@ def origin(run=wezterm_cli):
     return hit(first["pane_id"])
 
 
-def arrange(tab, run=wezterm_cli, anchor_focus=None, out=None):
-    """Re-tile the grid panes of `tab` (everything but chrome) into a near-square grid with equal
-    cells, keeping every pane's pty and process: panes are moved, never recreated. They keep their
-    reading order. All grid panes but the first go to temporary tabs, so the first one fills the whole
-    grid area; it is cut into rows (split --bottom), each row into columns (split --right), with
-    exact cell counts. Afterwards the keyboard focus returns to `anchor_focus` (default: the pane
-    that was active), the tab is activated and, when every row holds the same number of panes,
-    WezTerm is asked to run its regular equalize (request_equalize). A grid with a partly filled
-    row is not equalized: equalize aligns the dividers of all rows to the widest row and would
-    undo the equal widths of the shorter rows. A tab that already is the ideal regular grid is
-    left alone.
-    Returns (ok, message)."""
-    panes = _list_panes(run)
-    if panes is None:
-        return False, "no mux"
-    in_tab = [p for p in panes if p.get("tab_id") == tab]
-    if not in_tab:
-        return True, "nothing to arrange"  # the tab is gone (its last pane was closed)
-    if _unzoom(run, in_tab):
-        panes = _list_panes(run) or panes
-        in_tab = [p for p in panes if p.get("tab_id") == tab]
-    fg = foreground_by_tty()
-    grid = _grid_panes(in_tab, fg)
-    n = len(grid)
-    if n < 2:
-        return True, "nothing to arrange"
-    ids = {p["pane_id"] for p in grid}
-    focus = anchor_focus
-    if focus not in ids:
-        focus = next((p["pane_id"] for p in in_tab if p.get("is_active") and p["pane_id"] in ids), None)
-    boxes = [_geo(p) for p in grid]
-    cols = max(x + w for x, _y, w, _h in boxes) - min(x for x, _y, _w, _h in boxes)
-    rows = max(y + h for _x, y, _w, h in boxes) - min(y for _x, y, _w, _h in boxes)
-    if _is_regular(grid, ideal_counts(n, cols, rows)):
-        if anchor_focus in ids and not any(p.get("is_active") and p["pane_id"] == anchor_focus for p in in_tab):
-            run("activate-pane", "--pane-id", str(anchor_focus))  # the split moved the focus
-        return True, "grid already regular"
-
-    order = [p["pane_id"] for p in _reading_order(grid)]
-    anchor = order[0]
-    if focus is None:
-        focus = anchor
-    placed, away = {anchor}, []
-
-    def restore(msg):
-        for pid in away:
-            if pid not in placed:
-                run("split-pane", "--pane-id", str(anchor), "--right", "--move-pane-id", str(pid))
-        run("activate-tab", "--tab-id", str(tab))
-        run("activate-pane", "--pane-id", str(focus))
-        return False, msg
-
-    try:
-        for pid in order[1:]:
-            if run("move-pane-to-new-tab", "--pane-id", str(pid)) is None:
-                return restore("could not move a pane out of the grid")
-            away.append(pid)
-        after = _list_panes(run) or []
-        a = next((p for p in after if p["pane_id"] == anchor), None)
-        if a is None:
-            return restore("grid area unknown")
-        _x, _y, w, h = _geo(a)
-        counts = ideal_counts(n, w, h)
-        hs = _sizes(h, len(counts))
-        if min(hs) < 1 or any(min(_sizes(w, c)) < 1 for c in counts):
-            return restore("too small for the grid")
-
-        def put(target, direction, cells, pid):
-            if run("split-pane", "--pane-id", str(target), direction, "--cells", str(cells),
-                   "--move-pane-id", str(pid)) is None:
-                return False
-            placed.add(pid)
-            return True
-
-        start, s = [], 0
-        for c in counts:
-            start.append(s)
-            s += c
-        # a pane keeps its own cells, the pane it is split off gets the rest: what follows plus
-        # one divider cell between the following cells
-        heads, first = len(counts), [anchor]
-        for r in range(1, heads):
-            if not put(first[r - 1], "--bottom", sum(hs[r:]) + (heads - r - 1), order[start[r]]):
-                return restore("could not build the grid rows")
-            first.append(order[start[r]])
-        for r, c in enumerate(counts):
-            ws, prev = _sizes(w, c), first[r]
-            for j in range(1, c):
-                pid = order[start[r] + j]
-                if not put(prev, "--right", sum(ws[j:]) + (c - j - 1), pid):
-                    return restore("could not build the grid columns")
-                prev = pid
-    except Exception as e:  # noqa: BLE001 - never leave panes stranded in temporary tabs
-        return restore(f"arrange failed: {e}")
-    run("activate-tab", "--tab-id", str(tab))
-    run("activate-pane", "--pane-id", str(focus))
-    if len(set(counts)) == 1:
-        request_equalize(focus, out)
-    return True, "grid " + "x".join(str(c) for c in counts)
-
-
 def _agent_command():
     return ["bash", "-ic", f"{os.environ.get('HIVEGRID_AGENT_CMD') or 'omp'}; exec bash"]
 
@@ -802,34 +631,26 @@ def _split_new(run, target_pane, extra):
     return int(m.group(1)) if m else None
 
 
-def _spawn_in_origin(o, extra, run, out):
+def _spawn_in_origin(o, extra, run):
     """Split a new pane off the last grid pane of the origin tab o = (pane, tab, window) with
-    split-pane's `extra` arguments, and re-grid the tab. Returns the new pane id or None."""
+    split-pane's `extra` arguments; the grid is not re-tiled. Returns the new pane id or None."""
     focus, tab, _window = o
-    new = None
-    for attempt in (0, 1):
-        panes = _list_panes(run)
-        in_tab = [p for p in panes or [] if p.get("tab_id") == tab]
-        if not in_tab:
-            return None
-        if _unzoom(run, in_tab):
-            in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab] or in_tab
-        grid = _grid_panes(in_tab, foreground_by_tty()) or [p for p in in_tab if p["pane_id"] == focus] or in_tab
-        new = _split_new(run, _reading_order(grid)[-1], extra)
-        if new is not None or attempt:
-            break
-        arrange(tab, run, focus, out)  # panes too small to split: re-grid, then try once more
-    if new is None:
+    panes = _list_panes(run)
+    in_tab = [p for p in panes or [] if p.get("tab_id") == tab]
+    if not in_tab:
         return None
-    arrange(tab, run, focus, out)
-    return new
+    if _unzoom(run, in_tab):
+        in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab] or in_tab
+    grid = _grid_panes(in_tab, foreground_by_tty()) or [p for p in in_tab if p["pane_id"] == focus] or in_tab
+    return _split_new(run, _reading_order(grid)[-1], extra)
 
 
-def spawn_agent(cwd=None, near=None, run=wezterm_cli, out=None):
+def spawn_agent(cwd=None, near=None, run=wezterm_cli):
     """Start the agent command (HIVEGRID_AGENT_CMD, default omp; run as `bash -ic '<cmd>; exec
     bash'`) in a new pane of the origin tab, always: the pane is split off the last grid pane and
-    the tab is re-gridded (arrange). The directory is `cwd`, else `near`'s, else the one of the pane
-    the hive was opened over, else $HOME. Returns the new pane id or None."""
+    stays where the split puts it (nothing re-tiles the grid). The directory is `cwd`, else
+    `near`'s, else the one of the pane the hive was opened over, else $HOME. Returns the new pane
+    id or None."""
     o = origin(run)
     if o is None:
         return None
@@ -839,23 +660,23 @@ def spawn_agent(cwd=None, near=None, run=wezterm_cli, out=None):
     if not cwd:
         here = next((p for p in _list_panes(run) or [] if p["pane_id"] == focus), None)
         cwd = (_cwd_path(here.get("cwd")) if here and not is_web(here) else "") or os.environ.get("HOME", "/")
-    return _spawn_in_origin(o, ("--cwd", cwd, "--", *_agent_command()), run, out)
+    return _spawn_in_origin(o, ("--cwd", cwd, "--", *_agent_command()), run)
 
 
-def spawn_web(url, profile=None, run=wezterm_cli, out=None):
+def spawn_web(url, profile=None, run=wezterm_cli):
     """Open `url` in a new web pane of the origin tab (`split-pane --url`, the Hivegrid fork's web
-    pane), placed and re-gridded like spawn_agent. `profile` names the browser profile (the fork's
-    default when None). Returns the new pane id or None."""
+    pane), placed like spawn_agent. `profile` names the browser profile (the fork's default when
+    None). Returns the new pane id or None."""
     o = origin(run)
     if o is None:
         return None
     extra = ("--url", url) + (("--profile", profile) if profile else ())
-    return _spawn_in_origin(o, extra, run, out)
+    return _spawn_in_origin(o, extra, run)
 
 
-def gather(origin_tab, run=wezterm_cli, out=None):
-    """Move every agent of the origin tab's window that sits in another tab into the origin tab
-    and re-grid it. Returns (ok, message)."""
+def gather(origin_tab, run=wezterm_cli):
+    """Move every agent of the origin tab's window that sits in another tab into the origin tab,
+    each split off the last grid pane (nothing re-tiles the grid). Returns (ok, message)."""
     panes = _list_panes(run)
     in_tab = [p for p in panes or [] if p.get("tab_id") == origin_tab]
     if not in_tab:
@@ -864,30 +685,24 @@ def gather(origin_tab, run=wezterm_cli, out=None):
     movers = [a for a in collect(run) if a.window == window and a.tab != origin_tab]
     if not movers:
         return True, "no agents in other tabs"
-    focus = next((p["pane_id"] for p in in_tab if p.get("is_active")), in_tab[0]["pane_id"])
     moved = 0
     for a in sorted(movers, key=lambda a: (a.tab, a.pane)):
-        for attempt in (0, 1):
-            panes = _list_panes(run) or []
-            here = [p for p in panes if p.get("tab_id") == origin_tab]
-            if _unzoom(run, here):
-                here = [p for p in _list_panes(run) or [] if p.get("tab_id") == origin_tab] or here
-            grid = _grid_panes(here, foreground_by_tty()) or here
-            if not grid:
-                break
-            target = _reading_order(grid)[-1]
-            _x, _y, w, h = _geo(target)
-            res = run("split-pane", "--pane-id", str(target["pane_id"]), "--right" if w >= h * CELL_ASPECT else "--bottom",
-                      "--move-pane-id", str(a.pane))
-            if res is not None:
-                moved += 1
-                break
-            if attempt == 0:
-                arrange(origin_tab, run, focus, out)  # too small to split: re-grid, retry once
-    ok, msg = arrange(origin_tab, run, focus, out)
+        panes = _list_panes(run) or []
+        here = [p for p in panes if p.get("tab_id") == origin_tab]
+        if _unzoom(run, here):
+            here = [p for p in _list_panes(run) or [] if p.get("tab_id") == origin_tab] or here
+        grid = _grid_panes(here, foreground_by_tty()) or here
+        if not grid:
+            break
+        target = _reading_order(grid)[-1]
+        _x, _y, w, h = _geo(target)
+        res = run("split-pane", "--pane-id", str(target["pane_id"]), "--right" if w >= h * CELL_ASPECT else "--bottom",
+                  "--move-pane-id", str(a.pane))
+        if res is not None:
+            moved += 1
     if moved < len(movers):
         return False, f"moved {moved} of {len(movers)} agents"
-    return ok, f"gathered {moved} agent{'s' if moved != 1 else ''}" if ok else msg
+    return True, f"gathered {moved} agent{'s' if moved != 1 else ''}"
 
 
 def _close(agent, run, sleep, grace):
@@ -918,16 +733,10 @@ def _close(agent, run, sleep, grace):
     return (True, "killed") if present() is None else (False, "pane still present")
 
 
-def delete_agent(agent, run=wezterm_cli, sleep=time.sleep, grace=3.0, out=None):
-    """Close the agent's pane (Ctrl+D, then kill-pane) and re-grid its tab when that is the origin
-    tab. Agents of other tabs are closed without touching any layout. Returns (ok, message)."""
-    o = origin(run)  # before the close: the origin pane may be the one that goes away
-    ok, msg = _close(agent, run, sleep, grace)
-    if ok and o is not None and o[1] == agent.tab:
-        arranged, why = arrange(o[1], run, None, out)
-        if not arranged:
-            msg = f"{msg} (grid: {why})"
-    return ok, msg
+def delete_agent(agent, run=wezterm_cli, sleep=time.sleep, grace=3.0):
+    """Close the agent's pane (Ctrl+D, then kill-pane). The other panes keep their places: nothing
+    re-tiles the grid. Returns (ok, message)."""
+    return _close(agent, run, sleep, grace)
 
 
 def answer_plan_review(agent, choice, feedback=None, role=None):

@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from hivegrid_agents import normalize_url
+
 VERSION = "1.1"
 SCHEMA = 1
 
@@ -127,9 +129,13 @@ FIXED_BINDINGS = [
 
 # settings.json "web": links "pane" (an http(s) link clicked in a terminal opens in a web pane)
 # or "system"; search is the URL template (with %s) a location that is no URL becomes, "" = none;
-# profile names the browser profile (cookies, logins) new web panes use. Mirrors config/settings.lua.
-WEB_DEFAULTS = {"links": "pane", "search": "", "profile": "main"}
+# profile names the browser profile (cookies, logins) new web panes use; home is the page the
+# browser button and "new web pane" open when no address is typed (any location normalize_url
+# accepts, about:blank by default); browser is "auto" (the engine's own search: Google Chrome,
+# then Chromium) or the absolute path of a Chromium-family binary. Mirrors config/settings.lua.
+WEB_DEFAULTS = {"links": "pane", "search": "", "profile": "main", "home": "about:blank", "browser": "auto"}
 WEB_LINKS = ("pane", "system")
+BROWSER_AUTO = "auto"
 
 
 def valid_profile(name):
@@ -150,8 +156,116 @@ def valid_search(template):
     return None
 
 
+def normalize_home(text):
+    """(url, None) for a home page location, else (None, reason). The same rules as typing it in
+    a web pane (hivegrid_agents.normalize_url) without a search engine: a home page is an address."""
+    url, why = normalize_url(text, "")
+    return (url, None) if url else (None, why.replace(", and no search engine is set (Settings, Web)", ""))
+
+
+# A Chromium-family browser is needed (the engine drives it over the DevTools protocol and takes
+# its frames from Page.startScreencast). Firefox has no such API, so it is not offered. Per
+# product: the label and the places to look, an absolute path or a name on PATH, first hit wins.
+BROWSER_FAMILIES = (
+    ("Google Chrome", ("/opt/google/chrome/chrome", "google-chrome-stable", "google-chrome")),
+    ("Chromium", ("chromium", "chromium-browser")),
+    ("Brave", ("brave-browser", "brave-browser-stable", "brave")),
+    ("Microsoft Edge", ("microsoft-edge", "microsoft-edge-stable")),
+    ("Vivaldi", ("vivaldi", "vivaldi-stable")),
+)
+NOT_FIREFOX = "Firefox cannot be used: the page is shown from the browser's screencast, which only Chromium-family browsers have"
+CONFINED_WHY = ("a snap or Flatpak browser runs confined: its sandbox hides the profile directory under "
+                "~/.local/share/hivegrid and its launcher does not reliably pass on the DevTools pipe (file "
+                "descriptors 3 and 4) the engine talks over")
+_CONFINED_SCRIPT = re.compile(rb"/snap/bin/|snap run|snap install|flatpak run|/flatpak/exports/")
+_CONFINED_DIRS = ("/snap/", "/var/lib/flatpak/", "/var/lib/snapd/")
+_CONFINED_LAUNCHERS = ("snap", "flatpak")  # what /snap/bin/<name> and the like resolve to
+
+
+def confined_browser(path):
+    """CONFINED_WHY when `path` is a snap or Flatpak browser (the snap itself, its /snap/bin link, a
+    Flatpak export, or the small launcher script distributions install in its place), else None."""
+    path = str(path)
+    real = os.path.realpath(path)
+    flatpak_home = os.path.join(str(home()), ".local", "share", "flatpak") + "/"
+    for p in (path, real):
+        if p.startswith(_CONFINED_DIRS) or p.startswith(flatpak_home):
+            return CONFINED_WHY
+    if os.path.basename(real) in _CONFINED_LAUNCHERS:
+        return CONFINED_WHY
+    try:
+        with open(real, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return None
+    if head.startswith(b"#!") and len(head) < 65536 and _CONFINED_SCRIPT.search(head):
+        return CONFINED_WHY
+    return None
+
+
+def _runnable(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def detect_browsers(path_var=None):
+    """([(label, path)], [(path, reason)]): the installed Chromium-family browsers, one per product
+    (the first place that has it), and the ones skipped because they run confined (snap, Flatpak)."""
+    dirs = [d for d in (os.environ.get("PATH", "") if path_var is None else path_var).split(os.pathsep) if d]
+    found, skipped = [], []
+    for label, places in BROWSER_FAMILIES:
+        candidates = [p for place in places for p in ([place] if os.path.isabs(place) else [os.path.join(d, place) for d in dirs])]
+        for path in candidates:
+            if not _runnable(path):
+                continue
+            why = confined_browser(path)
+            if why:
+                skipped.append((path, why))
+                continue
+            found.append((label, path))
+            break
+    return found, skipped
+
+
+def check_browser(text, run=subprocess.run):
+    """(error, path, version): `text` as the custom browser of the web pane. The path must be absolute
+    (a leading ~ counts), name an executable file that is no snap or Flatpak and no Firefox, and
+    answer `--version`. `error` is None when it can be used."""
+    text = (text or "").strip()
+    if not text:
+        return "give the path of a Chrome, Chromium, Brave, Edge or Vivaldi binary", None, None
+    path = os.path.expanduser(text)
+    if not os.path.isabs(path):
+        return "give the full path, e.g. /usr/bin/chromium", None, None
+    if not os.path.exists(path):
+        return "no such file", None, None
+    if not os.path.isfile(path):
+        return "not a file", None, None
+    if not os.access(path, os.X_OK):
+        return "not executable", None, None
+    if "firefox" in os.path.basename(os.path.realpath(path)).lower():
+        return NOT_FIREFOX, None, None
+    why = confined_browser(path)
+    if why:
+        return why, None, None
+    try:
+        r = run([path, "--version"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return "`--version` did not answer in 10 seconds", None, None
+    except (OSError, ValueError) as exc:
+        return f"cannot run it: {exc}", None, None
+    version = (r.stdout or "").strip().splitlines()
+    version = version[0].strip() if version else ""
+    if r.returncode != 0 or not version:
+        return f"`--version` failed (exit {r.returncode})", None, None
+    if "firefox" in version.lower():
+        return NOT_FIREFOX, None, None
+    return None, path, version
+
+
 def web_settings(stored):
-    """The effective web settings of the stored `web` value: defaults for anything missing or invalid."""
+    """The effective web settings of the stored `web` value: defaults for anything missing or invalid.
+    The browser path is only checked for being a plain absolute path here (the panel checks it when it
+    is chosen; a binary that went away shows up when a web pane starts)."""
     stored = stored if isinstance(stored, dict) else {}
     out = dict(WEB_DEFAULTS)
     if stored.get("links") in WEB_LINKS:
@@ -160,6 +274,11 @@ def web_settings(stored):
         out["search"] = stored["search"]
     if isinstance(stored.get("profile"), str) and valid_profile(stored["profile"]) is None:
         out["profile"] = stored["profile"]
+    if isinstance(stored.get("home"), str) and normalize_home(stored["home"])[0]:
+        out["home"] = stored["home"].strip()
+    browser = stored.get("browser")
+    if isinstance(browser, str) and os.path.isabs(browser.strip()) and browser.isprintable():
+        out["browser"] = browser.strip()
     return out
 
 

@@ -2,6 +2,9 @@
 --   local web = require('web')(config, wezterm, sb, layouts)
 --   LEADER+w   web key table: l location, n new web pane, b back, f forward, r reload, R hard
 --              reload, s stop, y copy the URL, o open in the system browser, Esc leaves
+--   The browser button of the sidebar bar: focuses the tab's web pane, else asks for a location
+--   (Enter alone opens the home page, settings key web.home) and opens a web pane; the bar shows
+--   it only when a browser is found (sb.set_web_button, see sidebar.lua)
 --   A click on an http(s) link in a terminal pane opens it in the tab's web pane (settings
 --   key web.links = "pane", the default, and only when Chrome or Chromium is found: probed once
 --   per config load; "system" leaves links to the system browser)
@@ -13,7 +16,8 @@
 -- terminal (numbered, split, zoomed, arranged), only broadcast skips it.
 -- Without the fork (theme.has_web false) nothing is registered: no key table, no binding, no
 -- open-uri handler, and the returned api only reports `enabled = false`.
--- api: { enabled, is_web, has_chrome, normalize_url, open, navigate, command, prompt_new, prompt_location }
+-- api: { enabled, is_web, has_chrome, normalize_url, open, navigate, command, prompt_new, prompt_location,
+--        browser_button }
 return function(config, wezterm, sb, layouts)
   local theme = require 'theme'
   local S = require('settings')(config, wezterm)
@@ -72,14 +76,16 @@ return function(config, wezterm, sb, layouts)
     function api.command() return false end
     function api.prompt_new() end
     function api.prompt_location() end
+    function api.browser_button() end
     return api
   end
 
-  -- Chrome or Chromium, probed once per config load with io.open (no child process): the
-  -- binary the fork's own search uses (hivegrid-web browser.rs find_chrome): HIVEGRID_CHROME
-  -- when set (then it alone counts), else /opt/google/chrome/chrome and the usual names on PATH.
+  -- The browser, probed once per config load with io.open (no child process), by the fork's own
+  -- precedence (mux/src/webpane.rs browser_choice, hivegrid-web browser.rs find_chrome):
+  -- HIVEGRID_CHROME when set (then it alone counts), else the browser chosen in the settings
+  -- (web.browser; a missing one does not fall back), else /opt/google/chrome/chrome and the
+  -- usual names on PATH.
   local CHROME_NAMES = { 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser' }
-  local NO_CHROME = 'Chrome or Chromium not found'
 
   local function is_file(path)
     local f = io.open(path, 'rb')
@@ -91,7 +97,8 @@ return function(config, wezterm, sb, layouts)
 
   local function find_chrome()
     local env = os.getenv('HIVEGRID_CHROME')
-    if env and env ~= '' then return is_file(env) end
+    if env and env ~= '' then return is_file(env), 'HIVEGRID_CHROME=' .. env end
+    if S.web.browser ~= 'auto' then return is_file(S.web.browser), 'the browser chosen in Settings, ' .. S.web.browser end
     if is_file('/opt/google/chrome/chrome') then return true end
     for dir in (os.getenv('PATH') or ''):gmatch('[^:]+') do
       for _, name in ipairs(CHROME_NAMES) do
@@ -101,8 +108,10 @@ return function(config, wezterm, sb, layouts)
     return false
   end
 
-  local has_chrome = find_chrome()
+  local has_chrome, chosen = find_chrome()
   api.has_chrome = has_chrome
+  local NO_CHROME = chosen and (chosen .. ' is not a file') or 'Chrome or Chromium not found'
+  if sb and sb.set_web_button then sb.set_web_button(has_chrome) end
 
   local APC = { start = '\27_hgweb;', stop = '\27\\' }
 
@@ -164,9 +173,8 @@ return function(config, wezterm, sb, layouts)
   -- Shows `url` in a web pane. opts: profile (default: settings web.profile), private
   -- (an ephemeral profile), where = 'tab' (a new tab), new (never reuse a pane). Without
   -- those the tab's web pane is navigated, else a web pane is split off the last grid pane
-  -- (right when it is wide, else below: the hive's rule); the grid then re-tiles itself by
-  -- the auto-arrange of layouts.lua when it was a tidy one, and a layout built by hand is
-  -- left alone. Returns true, or false and a reason.
+  -- (right when it is wide, else below: the hive's rule). Nothing re-tiles the grid after the
+  -- split: the new pane stays where the split put it. Returns true, or false and a reason.
   function api.open(window, pane, url, opts)
     opts = opts or {}
     if not has_chrome then return false, NO_CHROME end
@@ -207,12 +215,23 @@ return function(config, wezterm, sb, layouts)
   end
 
   -- Prompts ---------------------------------------------------------------------------------
-  local function prompt(window, pane, description, done)
+  -- The location an empty answer stands for: settings web.home, about:blank when that is no
+  -- usable location.
+  local function home_url()
+    return api.normalize_url(S.web.home) or 'about:blank'
+  end
+
+  -- Esc is nil, an empty line is ignored unless `home`: then it opens the home page.
+  local function prompt(window, pane, description, done, home)
     window:perform_action(act.PromptInputLine {
       description = description,
       -- The callback's own pane is the prompt's overlay: the one it was opened from is kept.
       action = wezterm.action_callback(function(win, _, line)
-        if line == nil or line:match('^%s*$') then return end
+        if line == nil then return end
+        if line:match('^%s*$') then
+          if home then done(win, home_url()) end
+          return
+        end
         local url, why = api.normalize_url(line, S.web.search)
         if not url then
           toast(win, why)
@@ -223,7 +242,8 @@ return function(config, wezterm, sb, layouts)
     }, pane)
   end
 
-  -- Asks for a location and opens it in a new web pane (opts.where = 'tab': a new tab).
+  -- Asks for a location and opens it in a new web pane (opts.where = 'tab': a new tab); Enter on
+  -- an empty line opens the home page.
   function api.prompt_new(window, pane, opts)
     opts = opts or {}
     if not has_chrome then
@@ -231,11 +251,25 @@ return function(config, wezterm, sb, layouts)
       return
     end
     local what = opts.where == 'tab' and 'web tab' or 'web pane'
-    prompt(window, pane, 'New ' .. what .. ': URL or search (Enter opens, Esc cancels)', function(win, url)
+    prompt(window, pane, 'New ' .. what .. ': URL or search (Enter alone opens ' .. home_url() .. ', Esc cancels)', function(win, url)
       local o = { where = opts.where, new = true }
       local ok, err = api.open(win, pane, url, o)
       if not ok then toast(win, 'Could not open the web pane: ' .. tostring(err)) end
-    end)
+    end, true)
+  end
+
+  -- The browser button of the sidebar bar: the tab's web pane takes the focus (the same
+  -- activation as every other focus change: a zoom that hides it ends, the chrome stays), a tab
+  -- without one asks for a location and opens a web pane for it.
+  function api.browser_button(window, pane)
+    local tab = tab_of(window, pane)
+    local existing = tab and web_of(tab)
+    if existing then
+      remember(tab:tab_id(), existing:pane_id())
+      existing:activate()
+      return
+    end
+    api.prompt_new(window, pane)
   end
 
   -- The web pane a command acts on: this pane when it is one, else the tab's.

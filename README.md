@@ -34,19 +34,19 @@ Recorded from real omp sessions in an isolated sandbox window with fixture repos
 
 ## Features
 
-- **Agent grid**: `omp-grid` starts one agent per pane; panes tile themselves, equalize, rotate, swap, zoom, and can all be typed into at once (broadcast).
+- **Agent grid**: `omp-grid` starts one agent per pane; panes stay where you put them and are arranged, equalized, rotated, swapped and zoomed only when you ask, and can all be typed into at once (broadcast).
 - **Overview dock**: every pane with its number, state (working, busy, needs you, done, idle, exited), omp title and time; jump by click or digit, close panes safely.
 - **Accounts and usage**: Claude Code usage (5 h and 7 d) of every account in the header; switch an account from a running chat without losing it.
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
-- **Web pane**: a page of a headless Chrome as a pane of the grid, next to the agents (Hivegrid WezTerm build).
+- **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
 - **Polish**: hover feedback, one themed picker for every list, header pills for the active mode, four colour themes.
 
 [docs/features.md](docs/features.md) describes each in detail.
 
 ## Install
 
-Requires Linux with WezTerm 20240203 or newer, Python 3, curl and unzip. The optional web pane also needs the Hivegrid WezTerm build ([below](#custom-wezterm-build)) and Google Chrome or Chromium.
+Requires Linux with WezTerm 20240203 or newer, Python 3, curl and unzip. The optional web pane also needs the Hivegrid WezTerm build ([below](#custom-wezterm-build)) and a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
 
 ```sh
 git clone --recurse-submodules https://github.com/leongreiner/hivegrid.git
@@ -68,6 +68,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 | `Shift+Arrow` | split the pane in that direction (the new pane stays where the split puts it; nothing re-tiles the grid) |
 | `Alt+Arrow`, `Alt+h/j/k/l` | focus a pane |
 | `Alt+z` | zoom a pane |
+| `Ctrl+Shift+A` | arrange the panes into the grid that reads best (only when you press it, or click `⊞` in the dock) |
 | `LEADER+e`, `Ctrl+Shift+E` | equalize all dividers |
 | `LEADER+o` | show or hide the overview dock |
 | `Alt+n` | jump to the next pane that needs attention |
@@ -132,7 +133,7 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 
 `dev/check` runs every check CI runs (Python, Lua, luacheck, bun, shellcheck, actionlint); `dev/check py lua` runs only some steps. CI (`.github/workflows/ci.yml`) runs one job per group of steps on pushes and pull requests to `main`, checks out without submodules and fails on a missing tool.
 
-`dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` (slot 11) opens the bar's views and the overview dock and checks the panes; `dev/qa/web-smoke` (slot 12; needs Chrome and a fork build with the web pane) drives the web pane end to end. Both are local only.
+`dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` (slot 11) opens the bar's views and the overview dock and checks the panes; `dev/qa/web-smoke` (slot 12; needs Chrome and a fork build with the web pane) drives the web pane end to end, and `dev/qa/web-browser-smoke` (slot 13) the bar's browser button and the browser choice of the settings (a wrapper around Chrome records which binary was started). All are local only.
 
 `dev/demo/record.py` records the demo video and the stills above: `dev/demo/prepare.sh` sets up QA slot 20 with fixture repositories, fictional accounts and usage and omp profiles of their own, then the script drives the window with synthetic input and records the display with ffmpeg. It runs real omp sessions with a few trivial prompts, so it needs a logged-in omp (`DEMO_OMP_SRC`: `~/.omp`, the default profile, or `~/.omp/profiles/NAME`) and Chrome, and uses a few percent of that account's quota.
 

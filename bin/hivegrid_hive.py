@@ -510,10 +510,11 @@ class HivePage(U.Page):
             ui.say("this WezTerm has no web pane (it needs the Hivegrid build with the web feature)", True)
             return
         web = getattr(self.model, "web", None) or {}
-        profile, search = web.get("profile"), web.get("search", "")
+        profile, search, home = web.get("profile"), web.get("search", ""), web.get("home") or "about:blank"
 
         def ok(text):
-            url, why = self.core().normalize_url(text, search)
+            # Enter alone opens the home page (Settings, Web), as in the config's prompt.
+            url, why = self.core().normalize_url(text if text.strip() else home, search)
             if url is None:
                 return why
 
@@ -531,7 +532,7 @@ class HivePage(U.Page):
             ui.say("opening a web pane…")
             self.background(work)
             return None
-        ui.open_modal(U.PromptModal("New web pane", "", ok, "URL or search words; Enter opens"))
+        ui.open_modal(U.PromptModal("New web pane", "", ok, "URL or search words; Enter alone opens the home page"))
 
     def jump(self, ui, agent):
         try:
@@ -566,7 +567,7 @@ class HivePage(U.Page):
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, str(e)
             if ok:  # the core says how ("closed" / "killed"); the user wants to know which agent
-                msg = f"agent {self.number(agent)} closed" + (msg[msg.index(" ("):] if " (" in (msg or "") else "")
+                msg = f"agent {self.number(agent)} closed"
             ui.say(msg or "could not close the pane", not ok)
             self._force = True
         ui.say(f"closing agent {self.number(agent)}…")

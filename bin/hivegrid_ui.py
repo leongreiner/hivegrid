@@ -1083,7 +1083,7 @@ class ChoiceModal(Modal):
 
     def _pick(self, ui, i):
         self.on_pick(i)
-        ui.close_modal()
+        ui.finish(self, True)  # unless the pick opened another dialog (a prompt for a custom value)
 
     def key(self, ui, mods, key):
         if key == "UpArrow":

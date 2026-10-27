@@ -171,6 +171,170 @@ T.test('control characters never reach the control sequence', function(wz)
   T.eq(pane.sent[3], APC .. 'reload\27\\')
 end)
 
+-- Browser button of the sidebar bar ----------------------------------------------------------------
+
+-- The prompt the last action opened, answered with `line` (nil: Esc).
+local function answer(wz, win, line)
+  local prompt = win.actions[#win.actions].action
+  T.eq(prompt.kind, 'PromptInputLine')
+  wz.stub.perform(prompt.args.action, win, wz.fake.pane {}, line)
+  return prompt
+end
+
+T.test('browser button: a tab with a web pane focuses it, asks nothing and opens nothing', function(wz)
+  local page = web_pane(wz, 7, 'https://a.test/')
+  local _, win, tab, web = setup(wz, { { id = 1, width = 100, height = 50, active = true },
+    { pane = page, left = 101, width = 50, height = 50 } })
+  web.browser_button(win, wz.mux.get_pane(1))
+  T.eq(page.activated, 1)
+  T.eq(#win.actions, 0, 'no prompt')
+  T.eq(#wz.mux.get_pane(1).splits + #page.splits, 0)
+  T.eq(sent(page), '', 'and the page is not navigated')
+  T.eq(wz.GLOBAL.web.last[tostring(tab:tab_id())], 7, 'it becomes the tab\'s web pane')
+end)
+
+T.test('browser button: the remembered web pane of the tab is the one focused', function(wz)
+  local a, b = web_pane(wz, 7, 'https://a.test/'), web_pane(wz, 8, 'https://b.test/')
+  local _, win, tab, web = setup(wz, { { id = 1, width = 100, height = 50 }, { pane = a, left = 101, width = 50, height = 50 },
+    { pane = b, left = 152, width = 50, height = 50 } })
+  wz.GLOBAL.web = { last = { [tostring(tab:tab_id())] = 8 } }
+  web.browser_button(win, wz.mux.get_pane(1))
+  T.eq({ a.activated, b.activated }, { 0, 1 })
+end)
+
+T.test('browser button: from the web pane itself it stays on that pane', function(wz)
+  local page = web_pane(wz, 7, 'https://a.test/')
+  local _, win, _, web = setup(wz, { { id = 1, width = 100, height = 50 }, { pane = page, left = 101, width = 50, height = 50 } })
+  web.browser_button(win, page)
+  T.eq(page.activated, 1)
+  T.eq(#win.actions, 0)
+end)
+
+T.test('browser button: without a web pane it asks for a location and opens one for it', function(wz)
+  local _, win, tab, web = setup(wz, { { id = 1, width = 200, height = 50 } })
+  local term = wz.mux.get_pane(1)
+  web.browser_button(win, term)
+  answer(wz, win, 'example.com/docs')
+  T.eq(#term.splits, 1)
+  T.eq(term.splits[1].args, { 'hivegrid:web', 'https://example.com/docs' })
+  T.eq(#tab:panes(), 2)
+  web.browser_button(win, term)
+  T.eq(#win.actions, 1, 'now there is a web pane: focused, no second prompt')
+end)
+
+T.test('browser button: Esc and an address that is refused open nothing', function(wz)
+  local _, win, _, web = setup(wz, { { id = 1, width = 200, height = 50 } })
+  local term = wz.mux.get_pane(1)
+  web.browser_button(win, term)
+  answer(wz, win, nil)
+  T.eq(#term.splits, 0, 'Esc cancels')
+  web.browser_button(win, term)
+  answer(wz, win, 'javascript:alert(1)')
+  T.eq(#term.splits, 0)
+  T.eq(#win.toasts, 1, 'a refused scheme is explained')
+end)
+
+T.test('an empty answer opens the home page: about:blank, or the one in the settings', function(wz)
+  local _, win, _, web = setup(wz, { { id = 1, width = 200, height = 50 } })
+  local term = wz.mux.get_pane(1)
+  web.browser_button(win, term)
+  answer(wz, win, '   ')
+  T.eq(term.splits[1].args, { 'hivegrid:web', 'about:blank' })
+end)
+
+T.test('the home page of the settings is what an empty answer opens, and the prompt says so', function(wz)
+  T.setenv('HIVEGRID_SETTINGS', T.write(T.tmpdir() .. '/s.json', '{"web": {"home": "start.test/home"}}'))
+  local _, win, _, web = setup(wz, { { id = 3, width = 200, height = 50 } })
+  local term = wz.mux.get_pane(3)
+  web.prompt_new(win, term)
+  T.ok(tostring(win.actions[#win.actions].action.args.description):find('https://start.test/home', 1, true), 'the prompt names it')
+  answer(wz, win, '')
+  T.eq(term.splits[1].args, { 'hivegrid:web', 'https://start.test/home' }, 'normalised like a typed location')
+  web.prompt_new(win, term)
+  answer(wz, win, 'localhost:3000')
+  local requests = {}
+  for _, p in ipairs(win:active_tab():panes()) do
+    for _, sp in ipairs(p.splits) do requests[#requests + 1] = sp.args[2] end
+  end
+  T.eq(requests, { 'https://start.test/home', 'http://localhost:3000' }, 'what is typed wins over the home page')
+end)
+
+T.test('the location prompt of a web pane ignores an empty answer: it has no home page to go to', function(wz)
+  local _, win, _, web = setup(wz, { { id = 1, width = 200, height = 50 } })
+  web.prompt_location(win, wz.mux.get_pane(1))
+  answer(wz, win, '')
+  T.eq(#wz.mux.get_pane(1).splits, 0)
+end)
+
+T.test('a home page that is no usable location is about:blank', function(wz)
+  T.setenv('HIVEGRID_SETTINGS', T.write(T.tmpdir() .. '/s.json', '{"web": {"home": "javascript:alert(1)"}}'))
+  local _, win, _, web = setup(wz, { { id = 1, width = 200, height = 50 } })
+  web.prompt_new(win, wz.mux.get_pane(1))
+  answer(wz, win, '')
+  T.eq(wz.mux.get_pane(1).splits[1].args, { 'hivegrid:web', 'about:blank' })
+end)
+
+T.test('the bar is told to show the browser button exactly when a browser is found', function(wz)
+  local sb = require 'sidebar'
+  setup(wz)
+  T.eq(sb.web_button, true)
+  T.fresh()
+  local w = require 'wezterm'
+  hide_system_chrome()
+  T.setenv('PATH', T.tmpdir())
+  w.stub.fork, w.stub.web = true, true
+  require('web')({}, w, require 'sidebar', require('layouts')({}, w))
+  T.eq(require('sidebar').web_button, nil, 'no browser: no button')
+end)
+
+T.test('stock WezTerm: no browser button, the call does nothing', function(wz)
+  local _, win, _, web = setup(wz, { { id = 1, width = 200, height = 50 } }, { stock = true })
+  T.eq(require('sidebar').web_button, nil)
+  web.browser_button(win, wz.mux.get_pane(1))
+  T.eq(#win.actions + #wz.mux.get_pane(1).splits, 0)
+end)
+
+-- The browser chosen in the settings --------------------------------------------------------------
+
+local function bare_setup(wz, settings, env)
+  T.fresh()
+  local w = require 'wezterm'
+  hide_system_chrome()
+  T.setenv('PATH', T.tmpdir())
+  T.setenv('HIVEGRID_CHROME', env)
+  if settings then T.setenv('HIVEGRID_SETTINGS', T.write(T.tmpdir() .. '/s.json', settings)) end
+  w.stub.fork, w.stub.web = true, true
+  local api = require('web')({}, w, require 'sidebar', require('layouts')({}, w))
+  return api, w
+end
+
+T.test('the browser of the settings counts as found, and a missing one does not fall back', function(wz)
+  local chosen = T.write(T.tmpdir() .. '/my-browser', 'x')
+  local api = bare_setup(wz, '{"web": {"browser": "' .. chosen .. '"}}')
+  T.eq(api.has_chrome, true)
+  T.eq(require('sidebar').web_button, true)
+
+  local d = T.tmpdir()
+  T.write(d .. '/chromium', 'x')
+  local gone = bare_setup(wz, '{"web": {"browser": "/nonexistent/browser"}}')
+  T.eq(gone.has_chrome, false, 'a chosen browser that went away is not replaced by another')
+  T.eq(require('sidebar').web_button, nil)
+end)
+
+T.test('HIVEGRID_CHROME decides over the settings, as it does in the fork', function(wz)
+  local chosen = T.write(T.tmpdir() .. '/my-browser', 'x')
+  local env = T.write(T.tmpdir() .. '/env-browser', 'x')
+  T.eq(bare_setup(wz, '{"web": {"browser": "/nonexistent/x"}}', env).has_chrome, true, 'the variable names a file')
+  T.eq(bare_setup(wz, '{"web": {"browser": "' .. chosen .. '"}}', '/nonexistent/y').has_chrome, false, 'the variable names none')
+end)
+
+T.test('the failure toast names where the browser came from', function(wz)
+  local api, w = bare_setup(wz, '{"web": {"browser": "/nonexistent/browser"}}')
+  local win = w.fake.grid { { id = 1, width = 200, height = 50 } }
+  api.prompt_new(win, w.mux.get_pane(1))
+  T.eq(win.toasts[1].msg, 'the browser chosen in Settings, /nonexistent/browser is not a file')
+end)
+
 -- Links -----------------------------------------------------------------------------------------
 
 T.test('open-uri: an http(s) link of a terminal pane opens in a web pane and stops the default', function(wz)
@@ -713,21 +877,30 @@ local function web_settings(wz, doc)
 end
 
 T.test('S.web: defaults, valid values, and invalid ones falling back', function(wz)
-  T.eq(web_settings(wz, {}), { links = 'pane', search = '', profile = 'main' })
+  local defaults = { links = 'pane', search = '', profile = 'main', home = 'about:blank', browser = 'auto' }
+  local function with(over)
+    local out = {}
+    for k, v in pairs(defaults) do out[k] = v end
+    for k, v in pairs(over) do out[k] = v end
+    return out
+  end
+  T.eq(web_settings(wz, {}), defaults)
   T.fresh()
   local w2 = require 'wezterm'
-  T.eq(web_settings(w2, { web = { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2' } }),
-    { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2' })
+  T.eq(web_settings(w2, { web = { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2',
+      home = ' https://start.test/ ', browser = ' /usr/bin/brave-browser ' } }),
+    with { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2', home = 'https://start.test/',
+      browser = '/usr/bin/brave-browser' })
   T.fresh()
   local w3 = require 'wezterm'
-  T.eq(web_settings(w3, { web = { links = 'both', search = 'https://x.test/', profile = '../evil' } }),
-    { links = 'pane', search = '', profile = 'main' })
+  T.eq(web_settings(w3, { web = { links = 'both', search = 'https://x.test/', profile = '../evil', home = '  ',
+      browser = 'chromium' } }), defaults)
   T.fresh()
   local w4 = require 'wezterm'
   T.eq(web_settings(w4, { web = { profile = string.rep('a', 33) } }).profile, 'main', 'at most 32 characters')
   T.fresh()
   local w5 = require 'wezterm'
-  T.eq(web_settings(w5, { web = 'text' }), { links = 'pane', search = '', profile = 'main' })
+  T.eq(web_settings(w5, { web = 'text' }), defaults)
   T.fresh()
   local w6 = require 'wezterm'
   T.eq(web_settings(w6, { web = { search = 'javascript:alert(%s)' } }).search, '', 'a search template must be http(s)')

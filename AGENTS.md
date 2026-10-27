@@ -29,7 +29,7 @@ A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/c
 | --- | --- |
 | `config/wezterm.lua` | Entry point: loads the modules below, header, key bindings, `+` menu. Modules are `return function(config, wezterm, ...)` and register into `config`. |
 | `config/theme.lua` | Palette, drawing helpers, feature detection (`has_click`, `has_web`) shared by every module. |
-| `config/layouts.lua` | Pane layout: equalize, auto-arrange, rotate, swap, broadcast, key tables. |
+| `config/layouts.lua` | Pane layout, only on request: equalize, arrange, rotate, swap, broadcast, key tables. Nothing re-tiles the grid by itself. |
 | `config/overview.lua`, `sidebar.lua`, `picker.lua`, `agentstatus.lua` | Dock, left bar and its views, picker, per-pane agent state. |
 | `config/claudequota.lua`, `sysstats.lua`, `settings.lua`, `web.lua` | Header chips, settings reader, web pane wiring. |
 | `bin/hivegrid_ui.py` | Terminal UI toolkit (cell canvas, click regions, design components); every TUI uses it. |

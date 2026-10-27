@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Hivegrid sidebar bar: the narrow strip at the left of every tab, with four buttons.
+"""Hivegrid sidebar bar: the narrow strip at the left of every tab, with four or five buttons.
 
 Runs in the bar pane that config/sidebar.lua creates. Buttons: file explorer, git view, overview
-dock, settings; each is 3 rows tall (files rows 2-4, git 5-7, overview 8-10, settings the 3 rows
-above the last one). A left click announces the button as the user var `sidebar_click`
-(files, git, overview or settings, plus a salt so repeated clicks are changes). Buttons whose
-view is open are highlighted: the view comes from the state file
-$XDG_RUNTIME_DIR/wezterm-sidebar-$WEZTERM_PANE ("<open|closed> <files|git>", written by the
-config), the dock from "<state file>.ov". The pointer becomes a hand over the buttons (OSC 22) and
+dock, settings and, when the config says so, a browser; each is 3 rows tall (files rows 2-4, git
+5-7, overview 8-10, browser 11-13, settings the 3 rows above the last one). A left click
+announces the button as the user var `sidebar_click` (files, git, overview, browser or settings,
+plus a salt so repeated clicks are changes). Buttons whose view is open are highlighted: the view
+comes from the state file $XDG_RUNTIME_DIR/wezterm-sidebar-$WEZTERM_PANE
+("<open|closed> <files|git> [nudge] [web]", written by the config), the dock from "<state file>.ov".
+The browser button exists only with the word `web` in the state file: the config writes it on the
+Hivegrid build when it found a browser (this process cannot tell which WezTerm it runs in), and the
+bar leaves it out when it would meet the settings button (a bar under 17 rows). The pointer becomes
+a hand over the buttons (OSC 22) and
 the hovered button fades in a rounded chip of a lighter shade (about 150 ms in, 200 ms out); an
 open view's button keeps a raised chip and an accent stripe at the window edge. The Hivegrid build
 tells the bar when the pointer leaves it (DEC private mode 8800, a motion report at column 0,
@@ -53,8 +57,10 @@ try:
 except Exception:  # noqa: BLE001 - without it the bar keeps the colours it was started with
     ThemeWatch = None
 
-BUTTONS = ("files", "git", "overview", "settings")
-GLYPHS = {"files": "\uf07c", "git": "\ue725", "overview": "\uf0ca", "settings": "\uf013"}
+BUTTONS = ("files", "git", "overview", "browser", "settings")
+GLYPHS = {"files": "\uf07c", "git": "\ue725", "overview": "\uf0ca", "browser": "\uf0ac", "settings": "\uf013"}
+BUTTON_ROWS = 3
+BROWSER_TOP = 10  # the row after the overview button's three (7-9)
 FONT_NAME = "SymbolsNerdFontMono-Regular.ttf"
 SS = 4  # supersampling of the button shapes
 IDLE = 0.3  # seconds between looks at the state files while nothing animates
@@ -75,15 +81,28 @@ def find_font():
     return None
 
 
-def tops(rows):
-    """Top row (0-based) of each button for a bar `rows` tall."""
-    return {"files": 1, "git": 4, "overview": 7, "settings": rows - 4}
+def tops(rows, web=False):
+    """Top row (0-based) of each button for a bar `rows` tall. The settings button is pinned to the
+    bottom (rows - 4). The browser button (`web`: the config asked for it) follows the overview
+    button, and is left out when the settings button would overlap it: it needs the settings top
+    at or below its own last row, so a bar of 17 rows or more."""
+    out = {"files": 1, "git": 4, "overview": 7}
+    if web and rows - 4 >= BROWSER_TOP + BUTTON_ROWS:
+        out["browser"] = BROWSER_TOP
+    out["settings"] = rows - 4
+    return out
 
 
-def button_at(y, rows):
+def gear_is_tall(layout, top):
+    """True when the settings button at row `top` has the row above it free for the 5-row gear
+    image: at least a row of air between it and the last button before it (`layout`, from `tops`)."""
+    return top > max(t for n, t in layout.items() if n != "settings") + BUTTON_ROWS + 1
+
+
+def button_at(y, rows, web=False):
     """The button under row y (0-based), or None."""
-    for name, top in tops(rows).items():
-        if top <= y < top + 3:
+    for name, top in tops(rows, web).items():
+        if top <= y < top + BUTTON_ROWS:
             return name
     return None
 
@@ -94,21 +113,24 @@ def state_path():
 
 
 def read_state(path):
-    """(open view or None, dock open, gear nudge) from the state file "<open|closed> <view>
-    [nudge]" and its .ov flag. The nudge (pixels, from the config) is how much farther the
-    window edge is below the last row than above the first: the window padding differs and the
-    rows leave a few pixels over at the bottom."""
-    view, nudge = None, 0
+    """(open view or None, dock open, gear nudge, browser button) from the state file "<open|closed>
+    <view> [nudge] [web]" and its .ov flag. The nudge (pixels, from the config) is how much farther
+    the window edge is below the last row than above the first: the window padding differs and the
+    rows leave a few pixels over at the bottom. `web` asks for the browser button."""
+    view, nudge, web = None, 0, False
     try:
         with open(path, encoding="utf-8") as f:
             parts = f.read().split()
         if len(parts) >= 2 and parts[0] == "open":
             view = parts[1]
-        if len(parts) >= 3 and parts[2].lstrip("-").isdigit():
-            nudge = int(parts[2])
+        for extra in parts[2:]:
+            if extra.lstrip("-").isdigit():
+                nudge = int(extra)
+            elif extra == "web":
+                web = True
     except OSError:
         pass
-    return view, os.path.exists(path + ".ov"), nudge
+    return view, os.path.exists(path + ".ov"), nudge, web
 
 
 def drop_stale(path, now, age=5.0):
@@ -139,6 +161,8 @@ class Bar:
         self.icons = {}
         self.theme = ThemeWatch() if ThemeWatch else None
         self.theme_at = 0.0  # time of the last look at the saved theme
+        self.web = False  # the config asks for the browser button (state file)
+        self.layout = tops(24)  # button tops as painted
         self.geom = None  # (rows, cols, cell width, cell height) as painted
         self.pending = None  # a new geometry waiting to hold for SETTLE
         self.pending_at = 0.0
@@ -224,7 +248,7 @@ class Bar:
         spans 5 rows when the row above it is free, its chip `nudge` pixels lower (gear_png)."""
         e = "\x1b"
         if self.font_path and cols > 1:
-            tall = name == "settings" and top > tops(0)["overview"] + 4
+            tall = name == "settings" and gear_is_tall(self.layout, top)
             first, n = (top - 1, 5) if tall else (top, 3)
             buf = [f"{e}[{first + y + 1};1H{e}[0;{sgr_color(self.c['surface'], True)}m{' ' * cols}" for y in range(n)]
             if tall:
@@ -252,13 +276,16 @@ class Bar:
         return "".join(buf)
 
     def draw(self, rows, cols, state, full, cell=None):
-        """Paints what differs from the screen: every button when `full` (start, resize), else
-        the buttons whose highlight or fade shade changed."""
+        """Paints what differs from the screen: every button when `full` (start, resize, a changed
+        set of buttons), else the buttons whose highlight or fade shade changed."""
         e = "\x1b"
+        layout = tops(rows, state[3] if len(state) > 3 else False)
+        if layout != self.layout:
+            full, self.layout = True, layout
         if full:
             self.drawn.clear()
         nudge = state[2] if len(state) > 2 else 0
-        todo = [(n, t, self.shade(n, state) + ((nudge,) if n == "settings" else ())) for n, t in tops(rows).items()]
+        todo = [(n, t, self.shade(n, state) + ((nudge,) if n == "settings" else ())) for n, t in layout.items()]
         todo = [x for x in todo if self.drawn.get(x[0]) != x[2]]
         if not todo:
             return
@@ -312,7 +339,7 @@ class Bar:
             return
         _, action, button, x, y = ev
         # A report at column 0, row 0 (x, y < 0 here) says the pointer left the bar.
-        name = None if x < 0 or y < 0 else button_at(y, rows)
+        name = None if x < 0 or y < 0 else button_at(y, rows, self.web)
         # Motion without a button is reported like a drag; either way it moves the pointer.
         if action in ("drag", "press", "release"):
             self.set_hover(name)
@@ -378,8 +405,10 @@ class Bar:
                 rows, cols, cw, ch = geom = self.measure()
                 wait = self.wait_for(geom, now, resized)
                 busy = self.advance(now)
+                state = read_state(path)
+                self.web = state[3]
                 if not wait:
-                    self.draw(rows, cols, read_state(path), self.dirty, (cw, ch))
+                    self.draw(rows, cols, state, self.dirty, (cw, ch))
                     self.dirty = False
                 try:
                     ready, _, _ = select.select([self.fd], [], [], wait or (FRAME if busy else IDLE))

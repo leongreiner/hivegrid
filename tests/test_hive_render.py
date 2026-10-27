@@ -1194,6 +1194,17 @@ class WebChip(Base):
         self.type_url("rust ownership")
         self.assertEqual(self.core.actions(), [("web", "https://duck.example/?q=rust%20ownership", "work")])
 
+    def test_enter_alone_opens_the_home_page_of_the_settings(self):
+        self.make()
+        self.page.focus = False
+        self.send(key("w"))
+        self.type_url("")
+        self.assertEqual(self.core.actions(), [("web", "about:blank", None)], "no setting: about:blank")
+        self.page.model.web = {"links": "pane", "profile": "main", "search": "", "home": "start.test/home"}
+        self.send(key("w"))
+        self.type_url("")
+        self.assertEqual(self.core.actions()[-1], ("web", "https://start.test/home", "main"))
+
     def test_a_location_that_is_no_url_stays_in_the_prompt_with_the_reason(self):
         self.make()
         self.page.focus = False

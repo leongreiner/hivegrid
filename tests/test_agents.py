@@ -1,4 +1,3 @@
-import io
 import json
 import os
 import sys
@@ -276,8 +275,8 @@ BAR_ARGS = "python3 /home/u/.local/bin/hivegrid-bar --surface #0b1220 --raised #
 
 
 class Tiler:
-    """Fake `run` that models the pane tree of a WezTerm mux just far enough for arrange/spawn/
-    gather: list, list-clients, move-pane-to-new-tab, split-pane (spawn or --move-pane-id with
+    """Fake `run` that models the pane tree of a WezTerm mux just far enough for spawn/gather:
+    list, list-clients, move-pane-to-new-tab, split-pane (spawn or --move-pane-id with
     --cells, one divider cell), activate-*, zoom-pane, kill-pane. When a tab is left with a single
     non-chrome pane that pane takes the whole grid region (the box the grid filled at start)."""
 
@@ -385,23 +384,15 @@ class Tiler:
         return [c for c in self.calls if c[0] not in ("list", "list-clients")]
 
 
-def grid_rows(t, ids):
-    return [[i for i in row] for row in
-            ([p["pane_id"] for p in r] for r in A._rows_of([t.panes[i] for i in ids]))]
-
-
-def assert_equal_cells(case, t, ids):
-    rows = A._rows_of([t.panes[i] for i in ids])
-    heights = [t.geo(i)[3] for i in ids]
-    case.assertLessEqual(max(heights) - min(heights), 1, heights)
-    for row in rows:
-        widths = [t.geo(p["pane_id"])[2] for p in row]
-        case.assertLessEqual(max(widths) - min(widths), 1, widths)
+def _sizes(total, k):
+    """k cell sizes (dividers take one cell each) that fill `total`, equal within one cell."""
+    usable = total - (k - 1)
+    base, extra = divmod(usable, k)
+    return [base + (1 if i < extra else 0) for i in range(k)]
 
 
 class EnvCase(Base):
-    """Mux tests: no inherited origin hints, a controllable foreground-process table, a captured
-    equalize escape."""
+    """Mux tests: no inherited origin hints and a controllable foreground-process table."""
 
     def setUp(self):
         super().setUp()
@@ -409,7 +400,6 @@ class EnvCase(Base):
         self.fg_orig = A.foreground_by_tty
         self.fg = {}
         A.foreground_by_tty = lambda: self.fg
-        self.out = io.StringIO()
 
     def tearDown(self):
         A.foreground_by_tty = self.fg_orig
@@ -424,7 +414,7 @@ class EnvCase(Base):
         """Chrome bar (id 1) and dock (id 2) around n grid panes (ids 10..) in one row."""
         inner = W - chrome_left - chrome_right - 2
         panes = [gpane(1, 0, 0, chrome_left, H), gpane(2, W - chrome_right, 0, chrome_right, H)]
-        widths = A._sizes(inner, n)
+        widths = _sizes(inner, n)
         x = chrome_left + 1
         for k in range(n):
             panes.append(gpane(10 + k, x, 0, widths[k], H, active=(k == 0)))
@@ -462,38 +452,9 @@ class TestChrome(unittest.TestCase):
             tmp.cleanup()
 
 
-class TestLayoutMath(unittest.TestCase):
-    def test_ideal_counts(self):
-        self.assertEqual(A.ideal_counts(1, 200, 60), [1])
-        self.assertEqual(A.ideal_counts(2, 200, 60), [2])
-        self.assertEqual(A.ideal_counts(4, 200, 60), [2, 2])
-        self.assertEqual(A.ideal_counts(9, 200, 60), [3, 3, 3])
-        self.assertEqual(sum(A.ideal_counts(7, 200, 60)), 7)
-        # a tall, narrow region stacks panes instead of squeezing columns
-        self.assertEqual(A.ideal_counts(3, 90, 70), [1, 1, 1])
-
-    def test_sizes_fill_the_total_with_one_divider_cell_between(self):
-        for total in (50, 69, 100, 209):
-            for k in (1, 2, 3, 5):
-                s = A._sizes(total, k)
-                self.assertEqual(sum(s) + k - 1, total)
-                self.assertLessEqual(max(s) - min(s), 1)
-
     def test_reading_order_tolerates_off_by_one_rows(self):
         panes = [gpane(5, 100, 1, 50, 20), gpane(4, 0, 0, 50, 20), gpane(6, 0, 22, 50, 20)]
         self.assertEqual([p["pane_id"] for p in A._reading_order(panes)], [4, 5, 6])
-
-
-class TestRequestEqualize(unittest.TestCase):
-    def test_escape(self):
-        out = io.StringIO()
-        self.assertTrue(A.request_equalize(12, out))
-        self.assertEqual(out.getvalue(), "\x1b]1337;SetUserVar=hivegrid_hive_equalize=MTI=\x07")
-
-    def test_closed_stream(self):
-        out = io.StringIO()
-        out.close()
-        self.assertFalse(A.request_equalize(1, out))
 
 
 class TestOrigin(EnvCase):
@@ -523,167 +484,62 @@ class TestOrigin(EnvCase):
         self.assertIsNone(A.origin(lambda *a: "[]"))
 
 
-class TestArrange(EnvCase):
-    def test_every_count_becomes_an_equal_grid_in_reading_order(self):
-        for n in (2, 3, 4, 5, 7, 9):
-            with self.subTest(n=n):
-                t = self.strip(n)
-                chrome_before = {i: t.geo(i) for i in (1, 2)}
-                out = io.StringIO()
-                self.assertEqual(A.arrange(0, t, 10, out)[0], True)
-                ids = list(range(10, 10 + n))
-                rows = grid_rows(t, ids)
-                self.assertEqual([len(r) for r in rows], A.ideal_counts(n, 247 - 6 - 30 - 2, 62))
-                self.assertEqual([i for r in rows for i in r], ids)  # reading order stays
-                assert_equal_cells(self, t, ids)
-                self.assertEqual({i: t.geo(i) for i in (1, 2)}, chrome_before)
-                moved = {c[c.index("--pane-id") + 1] for c in t.calls if c[0] == "move-pane-to-new-tab"}
-                self.assertFalse(moved & {"1", "2"})
-                # covers the whole grid area: bounding box equals the original region
-                self.assertEqual(max(t.geo(i)[0] + t.geo(i)[2] for i in ids), 247 - 30 - 1)
-                self.assertEqual(max(t.geo(i)[1] + t.geo(i)[3] for i in ids), 62)
-
-    def test_unequal_strip_is_rebuilt_with_exact_cells(self):
-        t = self.strip(3)
-        A.arrange(0, t, 10, self.out)
-        splits = [c for c in t.calls if c[0] == "split-pane"]
-        self.assertTrue(all("--cells" in c and "--move-pane-id" in c for c in splits))
-
-    def test_idempotent_and_cheap_on_a_regular_grid(self):
-        t = self.strip(4)
-        A.arrange(0, t, 10, self.out)
-        before = {i: t.geo(i) for i in t.panes}
-        t.calls.clear()
-        self.out.truncate(0)
-        self.out.seek(0)
-        self.assertEqual(A.arrange(0, t, 10, self.out), (True, "grid already regular"))
-        self.assertEqual(t.non_list(), [])
-        self.assertEqual(self.out.getvalue(), "")
-        self.assertEqual({i: t.geo(i) for i in t.panes}, before)
-
-    def test_focus_and_tab_restored_and_equalize_requested_for_rectangles(self):
-        t = self.strip(4)
-        A.arrange(0, t, 12, self.out)
-        self.assertEqual(t.non_list()[-2:], [("activate-tab", "--tab-id", "0"), ("activate-pane", "--pane-id", "12")])
-        self.assertEqual(self.out.getvalue(), "\x1b]1337;SetUserVar=hivegrid_hive_equalize=MTI=\x07")
-
-    def test_focus_defaults_to_the_active_pane(self):
-        t = self.strip(4)
-        t.panes[12]["is_active"], t.panes[10]["is_active"] = True, False
-        A.arrange(0, t, None, self.out)
-        self.assertEqual(t.non_list()[-1], ("activate-pane", "--pane-id", "12"))
-
-    def test_partly_filled_grid_is_not_equalized(self):
-        t = self.strip(5)  # [3, 2]: equalize would align the last row's dividers to 3 columns
-        self.assertEqual(A.arrange(0, t, 10, self.out)[1], "grid 3x2")
-        self.assertEqual(self.out.getvalue(), "")
-
-    def test_zoomed_pane_is_unzoomed_first(self):
-        t = self.strip(3)
-        t.panes[11]["is_zoomed"] = True
-        A.arrange(0, t, 10, self.out)
-        self.assertEqual(t.non_list()[0], ("zoom-pane", "--pane-id", "11", "--unzoom"))
-
-    def test_plain_shell_panes_join_the_grid(self):
-        t = self.strip(3)  # ids 10..12 are bare shells (no agent state): still grid panes
-        self.fg.update({"pts/10": (5, "bash", 1, "bash")})
-        A.arrange(0, t, 10, self.out)
-        moved = {c[c.index("--pane-id") + 1] for c in t.calls if c[0] == "move-pane-to-new-tab"}
-        self.assertEqual(moved, {"11", "12"})
-
-    def test_single_grid_pane_and_missing_tab(self):
-        t = self.strip(1)
-        self.assertEqual(A.arrange(0, t, None, self.out), (True, "nothing to arrange"))
-        self.assertEqual(t.non_list(), [])
-        self.assertEqual(A.arrange(7, t, None, self.out), (True, "nothing to arrange"))
-        self.assertEqual(A.arrange(0, lambda *a: None), (False, "no mux"))
-
-    def test_failed_split_puts_every_pane_back(self):
-        t = self.strip(4)
-        t.fail_splits = 1
-        ok, msg = A.arrange(0, t, 10, self.out)
-        self.assertFalse(ok)
-        self.assertEqual({t.panes[i]["tab_id"] for i in (10, 11, 12, 13)}, {0})
-        self.assertEqual(self.out.getvalue(), "")
-        self.assertEqual(t.non_list()[-1], ("activate-pane", "--pane-id", "10"))
-
-    def test_failed_move_out_restores(self):
-        t = self.strip(3)
-        real = t.__call__
-        count = [0]
-
-        def run(*a):
-            if a[0] == "move-pane-to-new-tab":
-                count[0] += 1
-                if count[0] == 2:
-                    return None
-            return real(*a)
-        ok, _ = A.arrange(0, run, 10, self.out)
-        self.assertFalse(ok)
-        self.assertEqual({t.panes[i]["tab_id"] for i in (10, 11, 12)}, {0})
-
-
 class TestSpawn(EnvCase):
-    def test_always_splits_inside_the_origin_tab_and_regrids(self):
+    def test_always_splits_inside_the_origin_tab_and_leaves_everything_else_alone(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
-        t = self.strip(8)
-        A.arrange(0, t, 10, self.out)
-        new = A.spawn_agent("/w", None, run=t, out=self.out)
+        t = self.strip(3)
+        before = {i: t.geo(i) for i in (1, 2, 10, 11)}
+        new = A.spawn_agent("/w", None, run=t)
         self.assertEqual(new, 100)
         self.assertEqual(t.panes[new]["tab_id"], 0)
         self.assertNotIn("spawn", [c[0] for c in t.calls])
-        ids = [i for i in t.ids(0) if i not in (1, 2)]
-        self.assertEqual(len(ids), 9)
-        self.assertEqual(grid_rows(t, ids), [[10, 11, 12], [13, 14, 15], [16, 17, 100]])  # new pane last
-        assert_equal_cells(self, t, ids)
+        self.assertEqual([c[0] for c in t.non_list()], ["split-pane"])  # one split, nothing else
+        split = t.non_list()[0]
+        self.assertEqual(split[split.index("--pane-id") + 1], "12")  # the last grid pane
+        self.assertNotIn("--move-pane-id", split)
+        self.assertEqual({i: t.geo(i) for i in (1, 2, 10, 11)}, before)  # no pane moved or resized
 
     def test_command_cwd_and_default_agent_command(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(1)
-        A.spawn_agent("/w", None, run=t, out=self.out)
+        A.spawn_agent("/w", None, run=t)
         self.assertEqual(t.cmd, ["bash", "-ic", "omp; exec bash"])
         self.assertEqual(t.cwd, "/w")
         os.environ["HIVEGRID_AGENT_CMD"] = "sleep 100000"
-        A.spawn_agent("/w", None, run=t, out=self.out)
+        A.spawn_agent("/w", None, run=t)
         self.assertEqual(t.cmd, ["bash", "-ic", "sleep 100000; exec bash"])
 
     def test_near_only_gives_the_cwd_even_from_another_tab(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
         t.panes[50] = gpane(50, 0, 0, 100, 40, tab=9)
-        new = A.spawn_agent(None, agent(50, tab=9, cwd="/near"), run=t, out=self.out)
+        new = A.spawn_agent(None, agent(50, tab=9, cwd="/near"), run=t)
         self.assertEqual(t.cwd, "/near")
         self.assertEqual(t.panes[new]["tab_id"], 0)
         self.assertEqual(t.panes[50]["tab_id"], 9)
 
-    def test_focus_returns_to_the_origin_pane_even_when_no_rebuild_is_needed(self):
-        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
-        t = self.strip(1)  # one split already gives the regular 2-column grid
-        A.spawn_agent("/w", None, run=t, out=self.out)
-        self.assertEqual(t.non_list()[-1], ("activate-pane", "--pane-id", "10"))
-        self.assertNotIn("move-pane-to-new-tab", [c[0] for c in t.calls])
-
     def test_chrome_is_never_the_split_target(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
-        A.spawn_agent("/w", None, run=t, out=self.out)
+        A.spawn_agent("/w", None, run=t)
         first = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
         self.assertNotIn(first[first.index("--pane-id") + 1], ("1", "2"))
 
-    def test_too_small_to_split_regrids_and_retries(self):
+    def test_too_small_to_split_fails_without_re_tiling_or_retrying(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
+        before = {i: t.geo(i) for i in t.panes}
         t.fail_splits = 1
-        new = A.spawn_agent("/w", None, run=t, out=self.out)
-        self.assertIsNotNone(new)
-        self.assertEqual(t.panes[new]["tab_id"], 0)
+        self.assertIsNone(A.spawn_agent("/w", None, run=t))
+        self.assertEqual({i: t.geo(i) for i in t.panes}, before)
+        self.assertEqual([c[0] for c in t.non_list()], ["split-pane"])
 
     def test_failures(self):
         self.assertIsNone(A.spawn_agent("/w", None, run=lambda *a: None))
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
         t.fail_splits = 5
-        self.assertIsNone(A.spawn_agent("/w", None, run=t, out=self.out))
+        self.assertIsNone(A.spawn_agent("/w", None, run=t))
 
 
 class TestGather(EnvCase):
@@ -698,31 +554,34 @@ class TestGather(EnvCase):
         self.fg["pts/33"] = (33, "bash", 1, "bash")
         self.t.region[0] = (7, 0, 209, 62)
 
-    def test_moves_agents_of_the_windows_other_tabs_and_regrids(self):
-        ok, msg = A.gather(0, self.t, self.out)
+    def test_moves_agents_of_the_windows_other_tabs_without_re_tiling(self):
+        ok, msg = A.gather(0, self.t)
         self.assertEqual((ok, msg), (True, "gathered 3 agents"))
         self.assertEqual({self.t.panes[i]["tab_id"] for i in (30, 31, 32)}, {0})
         self.assertEqual(self.t.panes[33]["tab_id"], 7)   # not an agent
         self.assertEqual(self.t.panes[34]["tab_id"], 7)   # other window
         ids = [i for i in self.t.ids(0) if i not in (1, 2)]
         self.assertEqual(sorted(ids), [10, 11, 30, 31, 32])
-        assert_equal_cells(self, self.t, ids)
         self.assertEqual({i: self.t.geo(i)[2] for i in (1, 2)}, {1: 6, 2: 30})
+        names = {c[0] for c in self.t.non_list()}
+        self.assertEqual(names, {"split-pane"})  # no re-tile: no move-out, no activate
+        self.assertEqual(sum(1 for c in self.t.calls if c[0] == "split-pane"), 3)
 
     def test_nothing_to_gather(self):
         for i in (30, 31, 32, 34):
             self.fg.pop(f"pts/{i}")
-        self.assertEqual(A.gather(0, self.t, self.out), (True, "no agents in other tabs"))
+        self.assertEqual(A.gather(0, self.t), (True, "no agents in other tabs"))
         self.assertEqual(self.t.non_list(), [])
 
     def test_unknown_tab(self):
-        self.assertEqual(A.gather(42, self.t, self.out), (False, "origin tab not found"))
+        self.assertEqual(A.gather(42, self.t), (False, "origin tab not found"))
 
-    def test_partial_failure_is_reported(self):
-        self.t.fail_splits = 2  # the first move and its retry fail
-        ok, msg = A.gather(0, self.t, self.out)
+    def test_partial_failure_is_reported_without_a_retry_or_a_re_tile(self):
+        self.t.fail_splits = 1  # the first move fails
+        ok, msg = A.gather(0, self.t)
         self.assertFalse(ok)
-        self.assertIn("of 3", msg)
+        self.assertEqual(msg, "moved 2 of 3 agents")
+        self.assertNotIn("move-pane-to-new-tab", [c[0] for c in self.t.calls])
 
 
 class TestDelete(EnvCase):
@@ -733,7 +592,7 @@ class TestDelete(EnvCase):
         def sleep(s):
             sleeps.append(s)
             panes.clear()  # pane vanished after Ctrl+D
-        ok, msg = A.delete_agent(agent(3), run=m, sleep=sleep, out=self.out)
+        ok, msg = A.delete_agent(agent(3), run=m, sleep=sleep)
         self.assertEqual((ok, msg), (True, "closed"))
         self.assertIn(("send-text", "--pane-id", "3", "--no-paste", "\x04"), m.calls)
         self.assertNotIn("kill-pane", [c[0] for c in m.calls])
@@ -746,7 +605,7 @@ class TestDelete(EnvCase):
         m = FakeMux(panes, {"kill-pane": kill})
         self.fg = {"pts/3": (1, "omp", 1, "omp")}
         sleeps = []
-        ok, msg = A.delete_agent(agent(3), run=m, sleep=sleeps.append, grace=1.0, out=self.out)
+        ok, msg = A.delete_agent(agent(3), run=m, sleep=sleeps.append, grace=1.0)
         self.assertEqual((ok, msg), (True, "killed"))
         self.assertAlmostEqual(sum(sleeps), 1.0)
         self.assertEqual([c[0] for c in m.calls if c[0] not in ("list", "list-clients")], ["send-text", "kill-pane"])
@@ -757,32 +616,30 @@ class TestDelete(EnvCase):
         m = FakeMux(panes, {"kill-pane": lambda a: panes.clear() or ""})
         self.fg = {"pts/3": (1, "bash", 1, "bash")}
         sleeps = []
-        ok, _ = A.delete_agent(agent(3), run=m, sleep=sleeps.append, grace=3.0, out=self.out)
+        ok, _ = A.delete_agent(agent(3), run=m, sleep=sleeps.append, grace=3.0)
         self.assertTrue(ok)
         self.assertEqual(len(sleeps), 1)
 
     def test_exited_skips_ctrl_d(self):
         panes = [pane(3)]
         m = FakeMux(panes, {"kill-pane": lambda a: panes.clear() or ""})
-        self.assertTrue(A.delete_agent(agent(3, state="exited"), run=m, sleep=lambda s: None, out=self.out)[0])
+        self.assertTrue(A.delete_agent(agent(3, state="exited"), run=m, sleep=lambda s: None)[0])
         self.assertEqual([c[0] for c in m.calls if c[0] not in ("list", "list-clients")], ["kill-pane"])
 
     def test_kill_fails(self):
         m = FakeMux([pane(3)], {"kill-pane": None})
         self.fg = {"pts/3": (1, "omp", 1, "omp")}
-        self.assertFalse(A.delete_agent(agent(3), run=m, sleep=lambda s: None, grace=0.5, out=self.out)[0])
+        self.assertFalse(A.delete_agent(agent(3), run=m, sleep=lambda s: None, grace=0.5)[0])
 
-    def test_regrids_the_origin_tab_after_closing_an_agent(self):
+    def test_closing_an_agent_never_touches_the_layout_of_its_tab(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(4)
-        A.arrange(0, t, 10, self.out)
+        before = {i: t.geo(i) for i in (10, 11, 12)}
         self.fg["pts/13"] = (13, "bash", 1, "bash")  # omp quit: only the keep-alive shell is left
-        ok, msg = A.delete_agent(agent(13, tab=0), run=t, sleep=lambda s: None, out=self.out)
+        ok, msg = A.delete_agent(agent(13, tab=0), run=t, sleep=lambda s: None)
         self.assertEqual((ok, msg), (True, "killed"))
-        ids = [i for i in t.ids(0) if i not in (1, 2)]
-        self.assertEqual(ids, [10, 11, 12])
-        self.assertEqual([len(r) for r in grid_rows(t, ids)], A.ideal_counts(3, 209, 62))
-        assert_equal_cells(self, t, ids)
+        self.assertEqual([c[0] for c in t.non_list()], ["send-text", "kill-pane"])
+        self.assertEqual({i: t.geo(i) for i in (10, 11, 12)}, before)
 
     def test_other_tab_agent_is_closed_without_touching_any_layout(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
@@ -790,7 +647,7 @@ class TestDelete(EnvCase):
         t.panes[40] = gpane(40, 0, 0, 100, 40, tab=7)
         t.panes[41] = gpane(41, 0, 101, 100, 20, tab=7)
         self.fg["pts/40"] = (40, "bash", 1, "bash")
-        ok, _ = A.delete_agent(agent(40, tab=7), run=t, sleep=lambda s: None, out=self.out)
+        ok, _ = A.delete_agent(agent(40, tab=7), run=t, sleep=lambda s: None)
         self.assertTrue(ok)
         self.assertEqual([c[0] for c in t.non_list()], ["send-text", "kill-pane"])
         self.assertNotIn("move-pane-to-new-tab", [c[0] for c in t.calls])

@@ -12,7 +12,7 @@ import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import hivegrid_agents as A  # noqa: E402
-from test_agents import BAR_ARGS, NOW, Base, EnvCase, Tiler, gpane, grid_rows, pane  # noqa: E402
+from test_agents import BAR_ARGS, NOW, Base, EnvCase, Tiler, gpane, pane  # noqa: E402
 
 
 def web(pid, url="https://example.com/a", tab=0, left=0, top=0, cols=40, rows=20, title="Example"):
@@ -83,7 +83,7 @@ class TestSpawnWeb(EnvCase):
     def test_command_line_direction_and_new_pane(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(1)
-        new = A.spawn_web("https://example.com/x", run=t, out=self.out)
+        new = A.spawn_web("https://example.com/x", run=t)
         self.assertEqual(new, 100)
         split = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
         self.assertEqual(split, ("split-pane", "--pane-id", "10", "--right", "--url", "https://example.com/x"))
@@ -94,7 +94,7 @@ class TestSpawnWeb(EnvCase):
     def test_profile_flag_only_when_given(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(1)
-        A.spawn_web("https://example.com", profile="work", run=t, out=self.out)
+        A.spawn_web("https://example.com", profile="work", run=t)
         split = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
         self.assertEqual(split[-4:], ("--url", "https://example.com", "--profile", "work"))
         self.assertEqual(t.profile, "work")
@@ -102,30 +102,31 @@ class TestSpawnWeb(EnvCase):
     def test_a_tall_pane_is_split_below(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = Tiler([gpane(10, 0, 0, 60, 60, active=True)])
-        A.spawn_web("https://example.com", run=t, out=self.out)
+        A.spawn_web("https://example.com", run=t)
         split = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
         self.assertEqual(split[3], "--bottom")
 
-    def test_the_new_page_is_the_last_pane_of_the_regridded_tab_and_chrome_is_untouched(self):
+    def test_the_new_page_splits_the_last_pane_and_nothing_else_moves(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(4)
-        A.arrange(0, t, 10, self.out)
-        new = A.spawn_web("https://example.com", run=t, out=self.out)
+        before = {i: t.geo(i) for i in (1, 2, 10, 11, 12)}
+        new = A.spawn_web("https://example.com", run=t)
         ids = [i for i in t.ids(0) if i not in (1, 2)]
-        self.assertEqual(len(ids), 5)
-        self.assertEqual(grid_rows(t, ids)[-1][-1], new, "last in reading order, like a spawned agent")
-        first = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
-        self.assertNotIn(first[first.index("--pane-id") + 1], ("1", "2"))
+        self.assertEqual(sorted(ids), [10, 11, 12, 13, new])
+        self.assertEqual([c[0] for c in t.non_list()], ["split-pane"], "one split: no re-tile")
+        first = t.non_list()[0]
+        self.assertEqual(first[first.index("--pane-id") + 1], "13", "the last grid pane is split")
+        self.assertEqual({i: t.geo(i) for i in before}, before)
 
-    def test_a_web_pane_is_moved_by_arrange_like_any_pane_and_can_be_split(self):
+    def test_a_web_pane_can_be_the_split_target(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
         t.panes[11] = dict(t.panes[11], tty_name=None, cwd="https://example.com/")  # the second pane is a page
         self.fg = t.fg()
-        new = A.spawn_web("https://other.test", run=t, out=self.out)
+        new = A.spawn_web("https://other.test", run=t)
         self.assertIsNotNone(new)
         self.assertEqual(sorted(i for i in t.ids(0) if i not in (1, 2)), [10, 11, new])
-        self.assertEqual(t.panes[11]["tab_id"], 0, "the page stayed in the tab it was moved around in")
+        self.assertEqual(t.panes[11]["tab_id"], 0)
 
     def test_an_agent_started_over_a_web_pane_does_not_take_its_url_as_directory(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
@@ -133,7 +134,7 @@ class TestSpawnWeb(EnvCase):
         t.panes[10] = dict(t.panes[10], tty_name=None, cwd="https://example.com/a/b")
         self.fg = t.fg()
         with unittest.mock.patch.dict(os.environ, {"HOME": "/home/u"}):
-            A.spawn_agent(None, None, run=t, out=self.out)
+            A.spawn_agent(None, None, run=t)
         self.assertEqual(t.cwd, "/home/u")
 
     def test_failures_return_none(self):
@@ -141,12 +142,12 @@ class TestSpawnWeb(EnvCase):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(2)
         t.fail_splits = 5
-        self.assertIsNone(A.spawn_web("https://example.com", run=t, out=self.out))
+        self.assertIsNone(A.spawn_web("https://example.com", run=t))
 
     def test_spawn_agent_still_sends_its_old_command_line(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
         t = self.strip(1)
-        A.spawn_agent("/w", None, run=t, out=self.out)
+        A.spawn_agent("/w", None, run=t)
         split = next(c for c in t.calls if c[0] == "split-pane" and "--move-pane-id" not in c)
         self.assertEqual(split, ("split-pane", "--pane-id", "10", "--right", "--cwd", "/w", "--",
                                  "bash", "-ic", "omp; exec bash"))

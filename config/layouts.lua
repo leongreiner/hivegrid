@@ -1,8 +1,8 @@
 -- Pane/layout control for grids of agents. Wire: require('layouts')(config, wezterm)
 --   LEADER+r  resize mode      LEADER+p  pane mode
 --   LEADER+e  equalize panes   LEADER+b  broadcast typed input (guarded)
---   CTRL+SHIFT+A  arrange the panes into the grid that reads best (also automatic when a
---   tidy layout gains or loses one pane)
+--   CTRL+SHIFT+A  arrange the panes into the grid that reads best
+--   Nothing here runs by itself: splitting, closing or resizing never moves a pane.
 -- Everything here works on the grid panes only: the sidebar bar and view and the overview
 -- dock (sidebar.is_dock) are never counted, moved or resized.
 return function(config, wezterm)
@@ -328,15 +328,15 @@ return function(config, wezterm)
     return x == p[a.pos] + p[a.len] and t[a.pos] + t[a.len] or t[a.pos] - 1
   end
 
-  -- Panes with a divider off its target by more than `slack` cells.
-  local function misaligned(panes, a, want, slack)
+  -- Panes with a divider off its target.
+  local function misaligned(panes, a, want)
     local ids = {}
     for id, p in pairs(panes) do
       local xs, off = pane_dividers(panes, p, a), {}
       for i, x in ipairs(xs) do
         off[i] = (goal_of(want, p, x, a) or x) - x
       end
-      if math.abs(off[1] or 0) > (slack or 0) or math.abs(off[2] or 0) > (slack or 0) then
+      if (off[1] or 0) ~= 0 or (off[2] or 0) ~= 0 then
         table.insert(ids, id)
       end
     end
@@ -344,13 +344,46 @@ return function(config, wezterm)
     return ids
   end
 
-  local function equalize_axis(cli, snap, a, want, slack)
+  -- The grid's area: first and one-past-last cell along both axes.
+  local function area_of(panes)
+    local x0, x1 = extent(panes, AXES[1])
+    local y0, y1 = extent(panes, AXES[2])
+    return { x0, x1, y0, y1 }
+  end
+
+  local function same_area(a, b, slack)
+    for i = 1, 4 do
+      if math.abs(a[i] - b[i]) > slack then
+        return false
+      end
+    end
+    return true
+  end
+
+  -- The target rectangles are only good for the area they were computed for. A window
+  -- resize (the dock or the sidebar changing the room does the same) while equalize runs,
+  -- and every step of it is a `wezterm cli` process, would leave them pointing past the new
+  -- edge: a divider was pushed to the far end and the panes behind it kept a row or two.
+  -- `plan` is { area, want }; the targets are recomputed when the area is another.
+  local function targets(plan, panes)
+    local area = area_of(panes)
+    if not same_area(plan.area, area, 0) then
+      plan.area, plan.want = area, even_rects(panes)
+    end
+    return plan.want
+  end
+
+  local function equalize_axis(cli, snap, a, plan)
     for _ = 1, MAX_PASSES do
       local panes = snap()
       if not panes then
         return false
       end
-      local todo = misaligned(panes, a, want, slack)
+      local want = targets(plan, panes)
+      if not want then
+        return true
+      end
+      local todo = misaligned(panes, a, want)
       if #todo == 0 then
         return true
       end
@@ -358,6 +391,9 @@ return function(config, wezterm)
         local cur = snap()
         if not cur then
           return false
+        end
+        if not same_area(plan.area, area_of(cur), 0) then
+          break -- the area changed under us: the next pass takes new targets
         end
         local p = cur[id]
         local inner = {}
@@ -374,6 +410,12 @@ return function(config, wezterm)
           local after = snap()
           if not after then
             return false
+          end
+          -- The probe itself moves a divider by a cell, the grid's edge against the sidebar
+          -- or the dock included: only more than that is a resize.
+          if not same_area(plan.area, area_of(after), 1) then
+            moved = nil
+            break
           end
           local q = after[id]
           if q[a.pos] + q[a.len] ~= p[a.pos] + p[a.len] then
@@ -400,10 +442,7 @@ return function(config, wezterm)
     return true
   end
 
-  -- `auto` (the re-even after the grid's area changed) leaves dividers a cell off alone and
-  -- stays quiet: a cell is what rounding costs, and the user did not ask.
-  local equalize = exclusive(function(window, pane, auto)
-    local slack = auto and 1 or 0
+  local equalize = exclusive(function(window, pane)
     local tab = window:active_tab()
     local ids, n = {}, 0
     for _, p in ipairs(tab:panes()) do
@@ -436,13 +475,13 @@ return function(config, wezterm)
         break
       end
     end
-    local want = even_rects(start)
-    if not want then
+    local plan = { area = area_of(start), want = even_rects(start) }
+    if not plan.want then
       toast(window, 'equalize: this layout cannot be read as splits; nothing was moved')
       return
     end
     for _, a in ipairs(AXES) do
-      if not equalize_axis(cli, snap, a, want, slack) then
+      if not equalize_axis(cli, snap, a, plan) then
         toast(window, 'equalize: wezterm cli failed')
         break
       end
@@ -450,7 +489,8 @@ return function(config, wezterm)
     -- equalize_axis activates the panes it resizes; the keyboard goes back where it was.
     cli('activate-pane', '--pane-id', pane:pane_id())
     local final = snap()
-    if final and not auto and (#misaligned(final, AXES[1], want) > 0
+    local want = final and targets(plan, final)
+    if want and (#misaligned(final, AXES[1], want) > 0
         or #misaligned(final, AXES[2], want) > 0) then
       toast(window, 'equalize: could not move every divider; got as close as possible')
     end
@@ -555,68 +595,6 @@ return function(config, wezterm)
       counts[i] = n // best_r + (i <= n % best_r and 1 or 0)
     end
     return counts
-  end
-
-  -- Panes per row of the current layout, nil when the panes are not in aligned rows.
-  local function shape_of(grid)
-    local list = {}
-    for _, p in ipairs(grid) do
-      list[#list + 1] = p
-    end
-    table.sort(list, function(a, b)
-      if a.top ~= b.top then
-        return a.top < b.top
-      end
-      return a.left < b.left
-    end)
-    local rows = {}
-    for _, p in ipairs(list) do
-      local row = rows[#rows]
-      if row and math.abs(p.top - row.top) <= 2 then
-        if math.abs(p.height - row.height) > 2 then
-          return nil
-        end
-        row.n = row.n + 1
-      else
-        if row and p.top < row.top + row.height - 1 then
-          return nil
-        end
-        rows[#rows + 1] = { top = p.top, height = p.height, n = 1 }
-      end
-    end
-    local counts = {}
-    for i, r in ipairs(rows) do
-      counts[i] = r.n
-    end
-    return counts
-  end
-
-  local function same_counts(a, b)
-    if not a or not b or #a ~= #b then
-      return false
-    end
-    for i = 1, #a do
-      if a[i] ~= b[i] then
-        return false
-      end
-    end
-    return true
-  end
-
-  -- A single row or a single column.
-  local function is_strip(counts)
-    if not counts then
-      return false
-    end
-    if #counts == 1 then
-      return true
-    end
-    for _, c in ipairs(counts) do
-      if c ~= 1 then
-        return false
-      end
-    end
-    return true
   end
 
   local function arrange_now(window, pane)
@@ -761,102 +739,6 @@ return function(config, wezterm)
         end, keep_slot and id or pane:pane_id())
       end))
   end
-
-  -- Even grid: every divider where equalize would put it, give or take the cell a window
-  -- resize rounds off.
-  local function is_even(tab, grid)
-    local panes, view, v = {}, view_of(tab), nil
-    for _, i in ipairs(tab:panes_with_info()) do
-      local id = i.pane:pane_id()
-      if id == view then
-        v = rect(id, i.left, i.top, i.width, i.height)
-      end
-    end
-    for _, i in ipairs(grid) do
-      local id = i.pane:pane_id()
-      panes[id] = rect(id, i.left, i.top, i.width, i.height)
-    end
-    fuse(panes, v)
-    local want = even_rects(panes)
-    return want ~= nil and #misaligned(panes, AXES[1], want, 1) == 0
-      and #misaligned(panes, AXES[2], want, 1) == 0
-  end
-
-  -- Auto arrange: when the number of grid panes changes and then holds for two status ticks
-  -- (omp-grid is still splitting before that), a tab whose layout was a tidy one, the
-  -- ideal grid for the old count or a single row or column, is re-tiled for the new count.
-  -- A layout the user built by hand (panes not in aligned rows) is left alone.
-  -- Re-even: when the grid's area changes with the same panes (the sidebar view or the dock
-  -- opened or closed beside it; a window resize on stock WezTerm), WezTerm gives or takes
-  -- the cells at one end of the tree; a grid that was even is evened out again.
-  local seen = {} -- tab id -> { n = settled pane count, shape = its rows, area, even, pend, ticks }
-  wezterm.on('update-status', function(window)
-    -- The sidebar opening, closing or replacing its view is a layout change in progress.
-    if busy or wezterm.GLOBAL.sidebar_busy then
-      return
-    end
-    local tab = window:active_tab()
-    local active = window:active_pane()
-    if not tab or not active then
-      return
-    end
-    local grid, cols, rows = grid_of(tab)
-    local on_tab = false
-    for _, p in ipairs(tab:panes()) do
-      on_tab = on_tab or p:pane_id() == active:pane_id()
-    end
-    if not on_tab then
-      return -- an overlay (panel) is showing
-    end
-    local id, n = tab:tab_id(), #grid
-    local zoomed = false
-    for _, i in ipairs(grid) do
-      zoomed = zoomed or i.is_zoomed
-    end
-    local st = seen[id]
-    local function settle()
-      st.shape, st.area, st.even = shape_of(grid), cols .. 'x' .. rows, is_even(tab, grid)
-    end
-    if not st then
-      st = { n = n }
-      seen[id] = st
-      settle()
-      return
-    end
-    if n == st.n then
-      st.pend = nil
-      if zoomed then
-        return
-      end
-      if n > 1 and st.even and st.area ~= cols .. 'x' .. rows then
-        equalize(window, active, true)
-        grid, cols, rows = grid_of(tab)
-      end
-      settle()
-      return
-    end
-    if st.pend ~= n then
-      st.pend, st.ticks = n, 1
-      return
-    end
-    st.ticks = st.ticks + 1
-    if st.ticks < 3 then
-      return
-    end
-    local prev_n, prev_shape = st.n, st.shape
-    st.n, st.pend = n, nil
-    -- One pane more or fewer is somebody splitting or closing; a jump (omp-grid building its
-    -- layout) is a layout chosen on purpose and stays as it is. A tidy layout is re-tiled
-    -- even when its shape is already right: the new pane must land at its reading-order
-    -- place, and the split left it half as big as the others.
-    local now = shape_of(grid)
-    local tidy = same_counts(prev_shape, ideal_counts(prev_n, cols, rows)) or is_strip(prev_shape)
-    if n >= 2 and not zoomed and tidy and now and math.abs(n - prev_n) == 1 then
-      arrange(window, active)
-      grid, cols, rows = grid_of(tab)
-    end
-    settle()
-  end)
 
   -- Pane mode -----------------------------------------------------------
   local function once(...)

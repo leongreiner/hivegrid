@@ -122,17 +122,6 @@ return function(config, wezterm, as, sb, layouts)
     wezterm.GLOBAL.overview_off = all
   end
 
-  -- Opening or closing a top-level split squeezes the grid columns unevenly (the dock takes
-  -- its columns from the first columns, and gives them all back to the last one). A grid
-  -- whose panes were all about equally wide is equalized again afterwards.
-  local function even(grid)
-    local lo, hi = math.huge, 0
-    for _, i in ipairs(grid) do
-      lo, hi = math.min(lo, i.width), math.max(hi, i.width)
-    end
-    return hi - lo <= 3
-  end
-
   local function total_of(infos)
     local total = 0
     for _, i in ipairs(infos) do total = math.max(total, i.left + i.width) end
@@ -185,17 +174,12 @@ return function(config, wezterm, as, sb, layouts)
   end
 
   local function hide(window, cli, tab_id, rec, infos, from)
-    local was_even = TOP_LEVEL and even(grid_panes(infos))
     cli('kill-pane', '--pane-id', rec.pane)
     local back = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last)
     if back then back:activate() end -- the Lua API: a cli call from here can wait on the GUI
     written[rec.pane] = nil
     drop(tab_id, rec)
     sb.restore(window, window:active_tab())
-    if was_even then
-      local target = from:pane_id() == rec.pane and rec.last and wezterm.mux.get_pane(rec.last) or from
-      layouts.equalize(window, target)
-    end
   end
 
   local function show(window, mtab, infos, cli, from, quiet)
@@ -215,7 +199,6 @@ return function(config, wezterm, as, sb, layouts)
     end
     if TOP_LEVEL then anchor = active or grid[1] end
     local width = target_width(total)
-    local was_even = TOP_LEVEL and even(grid)
     local args = { 'split-pane', '--right', '--cells', width, '--pane-id', anchor.pane:pane_id() }
     if TOP_LEVEL then args[#args + 1] = '--top-level' end
     args[#args + 1] = '--'
@@ -232,7 +215,6 @@ return function(config, wezterm, as, sb, layouts)
     -- The split focuses the new pane; the keyboard stays where it was.
     from:activate()
     sb.restore(window, mtab) -- the top-level split squeezed the bar; no waiting for the tick
-    if was_even then layouts.equalize(window, from) end
   end
 
   -- A tab with two or more grid panes gets the dock by itself, once its layout has held for
@@ -300,21 +282,12 @@ return function(config, wezterm, as, sb, layouts)
           set_off(tab_id, true)
           written[rec.pane] = nil
           drop(tab_id, rec)
-          if rec.even and mtab:tab_id() == window:active_tab():tab_id() then
-            local from = window:active_pane()
-            if from then layouts.equalize(window, from) end
-          end
         elseif #grid_panes(infos) == 0 then
           local dock = wezterm.mux.get_pane(rec.pane)
           if dock then sb.make_cli(dock)('kill-pane', '--pane-id', rec.pane) end
           written[rec.pane] = nil
           drop(tab_id, rec)
         else
-          local ev = TOP_LEVEL and even(grid_panes(infos))
-          if ev ~= rec.even then
-            rec.even = ev
-            save(tab_id, rec)
-          end
           fit_width(mtab, rec, infos)
           publish(window, mtab, rec)
         end

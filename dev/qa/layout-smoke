@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Layout smoke test in the QA sandbox (dev/qa/hgq, slot 13; local only: CI has no Xvfb and no
+fork build). It drives the real GUI (Xvfb, front_end=Software) through the sequences that used
+to break the grid, sampling `wezterm cli list` every ~80 ms, and fails on:
+
+  1 the bar after a view closes: files and git views opened and closed by button, key and the
+    view's own `q`, with one grid pane and with three grid panes plus the overview dock. The
+    bar (5 columns) must never be wider than 5 for even a moment (the mux used to hand the
+    view's columns to the bar until the next status tick narrowed it again), the view is gone
+    and the grid has its columns back
+  2 the overview dock opened and closed 8 times beside a 3-column grid: the columns stay where
+    they were (closing the dock gave all its columns to the last column and opening took them
+    from every column in proportion, so the first columns shrank every cycle)
+  3 the window resized while equalize runs: no row ends up a few lines tall (equalize aimed at
+    the old window height and pushed a divider to the far end)
+  4 the view opened and closed 6 times and the window resized in between: no grid pane below 20
+    columns or 6 rows while the window has room, and no Lua error in the GUI log
+
+  dev/qa/layout-smoke [--keep]     --keep leaves slot 13 running for a look (hgq down 13 stops it)
+
+Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst) and a fork build with the layout fixes
+(HG_WEZTERM_DIR, e.g. OPT=/tmp/hgfix WRAPPER=/tmp/hgfix/hivegrid wezterm/build-hivegrid.sh).
+Screenshots land in /tmp/hivegrid-qa/s13/shots/layout.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+SLOT = 13
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HGQ = os.path.join(ROOT, "dev", "qa", "hgq")
+QA = os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa")
+SHOTS = os.path.join(QA, f"s{SLOT}", "shots", "layout")
+KEEP = "--keep" in sys.argv
+WINDOW = (1600, 1000)
+# The bar's buttons at 1600x1000: files, git, overview (3 rows each).
+BUTTON = {"files": (22, 106), "git": (22, 156), "overview": (22, 206)}
+BAR = 5
+
+for k in ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET"):
+    os.environ.pop(k, None)
+
+fails = []
+shots = 0
+
+
+def hgq(*args, check=True, timeout=60):
+    r = subprocess.run([HGQ, *map(str, args)], capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"hgq {' '.join(map(str, args))}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def cli(*args, **kw):
+    return hgq("cli", SLOT, *args, **kw).strip()
+
+
+def panes():
+    return json.loads(cli("list", "--format", "json"))
+
+
+def key(*chords):
+    hgq("x", SLOT, "key", *chords)
+
+
+def click(name):
+    hgq("x", SLOT, "click", *BUTTON[name])
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  ({detail})" if detail and not ok else ""))
+    if not ok:
+        fails.append(f"{name} {detail}".strip())
+    return ok
+
+
+def shot(name):
+    global shots
+    shots += 1
+    os.makedirs(SHOTS, exist_ok=True)
+    hgq("shot", SLOT, os.path.join(SHOTS, f"{shots:02d}-{name}.png"))
+
+
+def show(rows):
+    return " | ".join(
+        f"p{p['pane_id']}:L{p['left_col']},{p['size']['cols']}x{p['size']['rows']}"
+        for p in sorted(rows, key=lambda p: (p["left_col"], p["top_row"]))
+        if p["tab_id"] == 0
+    )
+
+
+class Layout:
+    """The panes of tab 0 told apart: `grid` are the ids the test made, the bar is at column 0,
+    a view sits between the bar and the grid, the dock right of the grid."""
+
+    def __init__(self, rows, grid_ids):
+        self.rows = [p for p in rows if p["tab_id"] == 0]
+        self.grid = [p for p in self.rows if p["pane_id"] in grid_ids]
+        others = [p for p in self.rows if p["pane_id"] not in grid_ids]
+        left = min((p["left_col"] for p in self.grid), default=10**6)
+        self.bar = next((p for p in others if p["left_col"] == 0), None)
+        self.view = next((p for p in others if 0 < p["left_col"] < left), None)
+        self.dock = next((p for p in others if p["left_col"] > left), None)
+
+    def bar_cols(self):
+        return self.bar["size"]["cols"] if self.bar else None
+
+    def grid_cols(self):
+        return [p["size"]["cols"] for p in sorted(self.grid, key=lambda p: (p["left_col"], p["top_row"]))]
+
+
+def settled(grid_ids, want, timeout=12.0, every=0.1):
+    """Polls until `want(Layout)` holds; returns the Layout or None."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            lay = Layout(panes(), grid_ids)
+        except (RuntimeError, ValueError):
+            lay = None
+        if lay and want(lay):
+            return lay
+        time.sleep(every)
+    return None
+
+
+def sample(grid_ids, seconds, every=0.05):
+    """Layouts over `seconds`."""
+    out, end = [], time.time() + seconds
+    while time.time() < end:
+        try:
+            out.append(Layout(panes(), grid_ids))
+        except (RuntimeError, ValueError):
+            pass
+        time.sleep(every)
+    return out
+
+
+def widest_bar(layouts):
+    return max((lay.bar_cols() or 0 for lay in layouts), default=0)
+
+
+def start():
+    hgq("down", SLOT, check=False)
+    hgq("up", SLOT, *WINDOW)
+    hgq("focus", SLOT)
+    time.sleep(2)
+
+
+def split(pane, direction, percent=None):
+    args = ["split-pane", "--pane-id", pane, direction]
+    if percent:
+        args += ["--percent", percent]
+    return int(cli(*args))
+
+
+def new_grid(n):
+    """n grid panes side by side, even; returns their ids."""
+    ids = [0]
+    for i in range(1, n):
+        ids.append(split(ids[-1], "--right", round(100 * (n - i) / (n - i + 1))))
+    return ids
+
+
+def clear_tab(grid_ids):
+    """Back to one grid pane, no view, whatever the dock does."""
+    for pid in grid_ids[1:]:
+        cli("kill-pane", "--pane-id", pid, check=False)
+    time.sleep(1.5)
+
+
+# ---------------------------------------------------------------------------------------------
+
+
+def section_view_close():
+    print("-- 1 the bar never widens when a view closes")
+    for grid in (1, 3):
+        ids = new_grid(grid)
+        if grid > 1:
+            lay = settled(ids, lambda l: l.dock is not None, timeout=15)
+            check(f"grid {grid}: the overview dock opened by itself", lay is not None)
+        before = settled(ids, lambda l: l.bar_cols() == BAR)
+        if not check(f"grid {grid}: start with a {BAR} column bar", before is not None):
+            return
+        base = before.grid_cols()
+        for view, how in (("git", "button"), ("git", "key"), ("git", "q"), ("files", "button"), ("files", "key")):
+            label = f"grid {grid}: {view} view closed by {how}"
+            if view == "git":
+                click("git") if how != "key" else key("ctrl+g")
+            else:
+                click("files") if how != "key" else key("ctrl+f")
+            opened = settled(ids, lambda l: l.view is not None and l.bar_cols() == BAR)
+            if not check(f"{label}: view open beside a {BAR} column bar", opened is not None, show(panes())):
+                continue
+            if how == "button":
+                click(view)
+            elif how == "key":
+                key("ctrl+g" if view == "git" else "ctrl+f")
+            else:
+                key("q")
+            seen = sample(ids, 2.5)
+            gone = settled(ids, lambda l: l.view is None)
+            wide = widest_bar(seen)
+            check(f"{label}: the bar stays {BAR} columns (widest seen {wide})", wide <= BAR)
+            check(f"{label}: the view is gone", gone is not None)
+            if gone:
+                diff = [abs(a - b) for a, b in zip(gone.grid_cols(), base)]
+                check(f"{label}: the grid has its columns back ({gone.grid_cols()} vs {base})",
+                      len(diff) == len(base) and max(diff) <= 2)
+        shot(f"view-closed-grid{grid}")
+        clear_tab(ids)
+
+
+def section_dock_cycles():
+    print("-- 2 the dock opened and closed again and again keeps the columns")
+    ids = new_grid(3)
+    start_lay = settled(ids, lambda l: l.dock is not None, timeout=15)
+    if not check("grid 3: the overview dock opened by itself", start_lay is not None):
+        return
+    base = start_lay.grid_cols()
+    worst = 0
+    for cycle in range(8):
+        click("overview")
+        closed = settled(ids, lambda l: l.dock is None)
+        click("overview")
+        reopened = settled(ids, lambda l: l.dock is not None)
+        if not (closed and reopened):
+            check(f"cycle {cycle}: the dock closes and opens", False, show(panes()))
+            return
+        now = reopened.grid_cols()
+        worst = max(worst, max(abs(a - b) for a, b in zip(now, base)))
+        if cycle in (0, 7):
+            shot(f"dock-cycle-{cycle}")
+    check(f"8 dock cycles move no column by more than 3 (worst {worst}, {base} -> {now})", worst <= 3)
+    check(f"the first column keeps at least 30 columns (has {now[0]})", now[0] >= 30)
+    clear_tab(ids)
+
+
+def section_equalize_race():
+    print("-- 3 a window resize while equalize runs")
+    ids = [0]
+    bottom = split(0, "--bottom", 30)
+    ids.append(bottom)
+    for top, pct in ((0, 70), (bottom, 30)):
+        right = split(top, "--right", pct)
+        ids += [right, split(right, "--right", 25)]
+    time.sleep(6)
+    key("ctrl+shift+e")
+    time.sleep(0.8)
+    hgq("resize", SLOT, 1000, 600)
+    time.sleep(10)
+    lay = Layout(panes(), ids)
+    rows = sorted(p["size"]["rows"] for p in lay.grid)
+    check(f"no row collapses ({rows})", rows[0] >= 8 and rows[-1] - rows[0] <= 2, show(panes()))
+    shot("equalize-race")
+    hgq("resize", SLOT, *WINDOW)
+    time.sleep(3)
+    clear_tab(ids)
+
+
+def section_open_close_resize():
+    print("-- 4 views and window resizes, no pane collapses")
+    ids = new_grid(3)
+    settled(ids, lambda l: l.dock is not None, timeout=15)
+    sizes = [(1200, 800), (1600, 1000), (1000, 700), (1600, 1000), (1300, 900), (1600, 1000)]
+    for i, (w, h) in enumerate(sizes):
+        click("git" if i % 2 else "files")
+        time.sleep(1.2)
+        hgq("resize", SLOT, w, h)
+        time.sleep(1.2)
+        key("q") if i % 2 else click("files")
+        time.sleep(1.5)
+    time.sleep(3)
+    lay = Layout(panes(), ids)
+    cols = [p["size"]["cols"] for p in lay.grid]
+    rows = [p["size"]["rows"] for p in lay.grid]
+    check(f"no grid pane below 20 columns or 6 rows ({show(panes())})", min(cols) >= 20 and min(rows) >= 6)
+    check(f"the bar is {BAR} columns", lay.bar_cols() == BAR, show(panes()))
+    shot("open-close-resize")
+
+
+def lua_errors():
+    log = os.path.join(QA, f"s{SLOT}", "wezterm.log")
+    try:
+        text = open(log, errors="replace").read()
+    except OSError:
+        return []
+    return re.findall(r"ERROR .*(?:runtime error|syntax error|lua).*", text)
+
+
+def main():
+    start()
+    try:
+        section_view_close()
+        section_dock_cycles()
+        section_equalize_race()
+        section_open_close_resize()
+        errs = lua_errors()
+        check("no Lua errors in the GUI log", not errs, "; ".join(errs[:3]))
+    finally:
+        if not KEEP:
+            hgq("down", SLOT, check=False)
+    print(f"screenshots: {SHOTS}")
+    if fails:
+        print(f"layout-smoke: {len(fails)} failed")
+        return 1
+    print("layout-smoke passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
