@@ -440,7 +440,7 @@ class SettingsPage(U.Page):
         chosen = self.model.theme["preset"]
         lx, cw = x + 2, self.CARD_W
         cv.put(lx, y, "Colour theme", p["bright"], None, BOLD)
-        step = 4 if h >= 23 else 3  # short windows drop the gap between the cards
+        step = 4 if h >= 7 + 4 * len(PRESETS) else 3  # short windows drop the gap between the cards
         for i, pid in enumerate(PRESETS):
             self.draw_preset_card(ui, cv, lx, y + 2 + i * step, cw, i, pid == chosen)
         ay = y + 2 + len(PRESETS) * step

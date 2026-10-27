@@ -140,7 +140,10 @@ return function(_config, wezterm, as)
 
   -- Tiers ---------------------------------------------------------------------------------
 
+  -- Names come from the pane's directory (OSC 7) and the .git/HEAD file: control bytes never
+  -- reach the header string.
   local function cut(s, n)
+    s = s:gsub('%c', '')
     local len = utf8.len(s) or #s
     if len <= n then return s end
     return s:sub(1, (utf8.offset(s, n) or n + 1) - 1) .. '…'

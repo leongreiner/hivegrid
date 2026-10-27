@@ -503,6 +503,12 @@ class SettingsLayoutTest(Env):
         self.assertFalse(self.page.two_pane)
         self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+Web\s+About\s*$")
 
+    def test_theme_page_keeps_the_accent_row_with_every_preset_at_120x30(self):
+        _, rows = self.draw(120, 30, sub=0)
+        text = "\n".join(rows)
+        self.assertIn("Custom", text)
+        self.assertIn("Edit…", text)
+
     def test_wide_content_stays_in_its_column_for_every_section(self):
         for w in (U.WIDE_COLS, 240, 320):
             lx, tw = self.box(w)

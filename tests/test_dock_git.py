@@ -184,6 +184,17 @@ class WhereTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(where(self.repo)["dot"], "green")
 
+    def test_a_failing_status_read_does_not_leave_the_root_busy(self):
+        where = R.Where(background=False, clock=self.clock)
+        real = R.status
+        R.status = lambda repo: (_ for _ in ()).throw(RuntimeError("boom"))
+        self.addCleanup(setattr, R, "status", real)
+        with self.assertRaises(RuntimeError):
+            where(self.repo)
+        R.status = real
+        self.clock.now += 100
+        self.assertEqual(where(self.repo)["dot"], "green")
+
 
 class TagTest(unittest.TestCase):
     PAL = dict(U.DEFAULT_PAL)

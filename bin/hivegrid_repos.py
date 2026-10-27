@@ -275,12 +275,15 @@ class Where:
         return found[0], h[0], h[1], os.path.isfile(os.path.join(found[1], "commondir"))
 
     def refresh(self, root):
-        st = status(Repo(root, ""))
-        key = None if st.get("error") else dot(st)[1]
-        with self.lock:
-            state = self.states.get(root)
-            if state is not None:
-                state.update(at=self.clock(), dot=key, busy=False)
+        key = None
+        try:
+            st = status(Repo(root, ""))
+            key = None if st.get("error") else dot(st)[1]
+        finally:  # a failed read must not leave the root marked busy for the life of the dock
+            with self.lock:
+                state = self.states.get(root)
+                if state is not None:
+                    state.update(at=self.clock(), dot=key, busy=False)
 
 
 def has_ci(path):

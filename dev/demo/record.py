@@ -213,10 +213,10 @@ def scene_settings(d):
     d.click(640, 343)  # Forest
     time.sleep(1.5)
     d.key("s", gap=3.5)
-    d.click(640, 276)  # Slate
+    d.click(640, 411)  # Forest
     time.sleep(1.2)
     d.key("s", gap=3.0)
-    d.click(640, 140)  # Navy
+    d.click(640, 208)  # Navy
     time.sleep(1.2)
     d.key("s", gap=2.5)
     for x, y in ((373, 156), (386, 173), (363, 190)):  # Keys, Accounts, Web

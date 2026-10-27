@@ -5,7 +5,7 @@ Every surface with the scenarios that found real bugs before. Run each at 1280x7
 ## Whole window
 
 - Window resizes in steps from 2560 down to about 800 px wide and back: no overlap, clipping, jitter, or a GUI stuck at 100% CPU.
-- All four theme presets (Navy, Midnight Black, Slate, Forest) plus a custom accent. After a Save, every surface that is already open restyles: header, tabs, bar, dock, explorer, git view, lazygit, panels, hive.
+- All five theme presets (Graphite, Navy, Midnight Black, Slate, Forest) plus a custom accent. After a Save, every surface that is already open restyles: header, tabs, bar, dock, explorer, git view, lazygit, panels, hive.
 - Chrome (bar, dock, sidebar view) runs edge to edge, from under the header to the bottom border, with no strip of window background.
 - `hgq log N` shows no Lua errors after any of the scenarios below.
 

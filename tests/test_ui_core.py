@@ -520,6 +520,17 @@ class StateTableTest(unittest.TestCase):
                     re.findall(r"(\w+) = \{ '([^']+)', '([^']+)', '(\w+)', (\d+) \}", lua))
         self.assertEqual(rows, {k: tuple(s) for k, s in U.STATES.items()})
 
+    def test_default_palette_is_the_same_in_lua_python_and_the_settings_preset(self):
+        import hivegrid_settings_core as S
+
+        with open(os.path.join(BIN, "..", "config", "theme.lua"), encoding="utf-8") as f:
+            lua = f.read()
+        block = re.search(r"M\.P = \{(.*?)\n\}", lua, re.S).group(1)
+        lua_pal = dict(re.findall(r"(\w+) = '(#[0-9a-f]{6})'", block))
+        preset = S.PRESETS[S.DEFAULT_PRESET]["palette"]
+        self.assertEqual(lua_pal, preset)
+        self.assertEqual(U.DEFAULT_PAL, preset)
+
 
 class HoverTest(unittest.TestCase):
     def test_fade_in_out_and_pointer_shape(self):
