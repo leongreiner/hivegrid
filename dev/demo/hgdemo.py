@@ -5,7 +5,9 @@ for `dev/qa/hgq`. Used by dev/demo/record.py.
 import ctypes as C
 import json
 import os
+import shutil
 import subprocess
+import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -240,3 +242,89 @@ class Demo:
             f.write(head)
             for a, b, t in self.captions:
                 f.write(f"Dialogue: 0,{ts(a)},{ts(b)},Cap,,0,0,0,,{t}\n")
+
+
+class Phone:
+    """The phone remote inside the recording: `hivegrid-remote serve` in the sandbox (loopback, own port)
+    and a headed Chrome app window shaped like a phone on the same Xvfb display, beside the Hivegrid
+    window, so the display capture records both. The page is driven with the Demo's XTest input."""
+
+    CHROME = "/opt/google/chrome/chrome"
+
+    def __init__(self, demo, port=18720, tmp=None):
+        self.demo = demo
+        self.port = port
+        self.tmp = tmp or f"/tmp/hivegrid-demo-phone-{demo.slot}"
+        self.server = None
+        self.chrome = None
+        self.win = None
+
+    def _sandbox(self, *cmd):
+        """Popen of `hgq sh SLOT cmd...`: the sandbox's HOME, XDG_RUNTIME_DIR and mux socket."""
+        return subprocess.Popen([HGQ, "sh", str(self.demo.slot), *cmd], env=self.demo.env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def start_server(self):
+        remote = os.path.join(REPO, "bin", "hivegrid-remote")
+        token = self.demo.hgq("sh", str(self.demo.slot), remote, "token", "--show", check=False).strip()
+        if not token:
+            token = self.demo.hgq("sh", str(self.demo.slot), remote, "token").strip().splitlines()[-1].strip()
+        self.token = token
+        self.server = self._sandbox(remote, "serve", "--bind", "127.0.0.1", "--port", str(self.port))
+        for _ in range(60):
+            r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", f"http://127.0.0.1:{self.port}/"],
+                               capture_output=True, text=True)
+            if r.stdout.strip() == "200":
+                return
+            time.sleep(0.5)
+        raise RuntimeError("hivegrid-remote did not come up")
+
+    def open(self, x, y, w, h, scale):
+        """Chrome app window of w x h CSS px at x, y (screen pixels) scaled by `scale`: it takes its position
+        in CSS px too, hence the division."""
+        os.makedirs(self.tmp, exist_ok=True)
+        env = {k: v for k, v in self.demo.env.items() if not k.startswith(("WAYLAND", "WEZTERM", "DBUS"))}
+        env.update(DISPLAY=self.demo.display, XDG_SESSION_TYPE="x11")
+        self.chrome = subprocess.Popen(
+            [self.CHROME, f"--app=http://127.0.0.1:{self.port}/#t={self.token}", f"--user-data-dir={self.tmp}",
+             f"--window-size={w},{h}", f"--window-position={round(x / scale)},{round(y / scale)}", f"--force-device-scale-factor={scale}",
+             "--ozone-platform=x11", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--disable-sync",
+             "--password-store=basic", "--use-mock-keychain", "--disable-features=Translate,InfiniteSessionRestore"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(3.0)
+
+    def agents(self):
+        """The agent list the server sends (the order the page shows it in), each with `label` and `state`."""
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/agents",
+                                     headers={"Authorization": f"Bearer {self.token}"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.load(r)["agents"]
+
+    def agents_by_label(self):
+        return {a["label"]: a for a in self.agents()}
+
+    def focus(self):
+        """No window manager here: give the Chrome window the keyboard focus by hand."""
+        out = subprocess.run(["xwininfo", "-root", "-tree"], env=dict(self.demo.env, DISPLAY=self.demo.display),
+                             capture_output=True, text=True).stdout
+        ids = [ln.split()[0] for ln in out.splitlines() if "Google-chrome" in ln]
+        if ids:
+            subprocess.run([sys.executable, os.path.join(REPO, "dev", "qa", "xin.py"), "focus", ids[0]],
+                           env=dict(self.demo.env, DISPLAY=self.demo.display), capture_output=True)
+
+    def close(self):
+        for p in (self.chrome, self.server):
+            if p and p.poll() is None:
+                try:
+                    os.killpg(p.pid, 15)
+                except ProcessLookupError:
+                    pass
+        for p in (self.chrome, self.server):
+            if p:
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, 9)
+        self.chrome = self.server = None
+        shutil.rmtree(self.tmp, ignore_errors=True)

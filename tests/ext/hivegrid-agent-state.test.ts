@@ -3,14 +3,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import factory, {
+	contextDoc,
 	costKindOf,
+	findModel,
 	type HiveEvent,
 	handleCommand,
 	initialModel,
 	isCmdFile,
+	modelRef,
+	modelsDoc,
 	pricedProvider,
 	profileFromAgentDir,
 	reduce,
+	THINKING_LEVELS,
+	thinkingName,
 	toDoc,
 	usageDoc,
 	withError,
@@ -211,8 +217,14 @@ describe("helpers", () => {
 			2,
 		);
 		expect(Object.keys(doc).sort()).toEqual(
-			["cwd", "error", "pane", "pending", "pid", "profile", "reason", "sessionFile", "sessionId", "since", "state", "title", "updated", "usage", "v"].sort(),
+			[
+				"context", "cwd", "error", "model", "pane", "pending", "pid", "profile", "reason", "sessionFile", "sessionId", "since", "state",
+				"thinking", "title", "updated", "usage", "v",
+			].sort(),
 		);
+		expect(doc.model).toBeNull();
+		expect(doc.thinking).toBeNull();
+		expect(doc.context).toBeNull();
 		expect(doc.sessionFile).toBe("/s.jsonl");
 		expect(doc.v).toBe(1);
 	});
@@ -265,6 +277,67 @@ describe("usage", () => {
 	test("toDoc carries usage, null when absent", () => {
 		expect(toDoc(initialModel(1), meta, 2).usage).toBeNull();
 		expect(toDoc(initialModel(1), { ...meta, usage: usageDoc(stats, ["anthropic"]) }, 2).usage).toMatchObject({ input: 10, cost: 0.5 });
+	});
+});
+
+describe("model, thinking, context", () => {
+	const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Sonnet 5.5", reasoning: true, secret: "x" };
+	const local = { provider: "local", id: "tiny", reasoning: false };
+
+	test("modelRef is provider/id plus a name, nothing else", () => {
+		expect(modelRef(sonnet)).toEqual({ id: "anthropic/claude-sonnet-5-5", name: "Sonnet 5.5", provider: "anthropic" });
+		expect(modelRef(local)).toEqual({ id: "local/tiny", name: "tiny", provider: "local" });
+		expect(modelRef({ id: "x" })).toBeNull();
+		expect(modelRef(null)).toBeNull();
+		expect(modelRef({ provider: "p\x1b[31m", id: "i", name: "a\nb" })).toEqual({ id: "p [31m/i", name: "a b", provider: "p [31m" });
+	});
+
+	test("modelsDoc lists unique models with the reasoning flag and the levels", () => {
+		const doc = modelsDoc([sonnet, local, sonnet, 5, {}]) as { v: number; thinking_levels: string[]; models: Record<string, unknown>[] };
+		expect(doc.v).toBe(1);
+		expect(doc.thinking_levels).toEqual(THINKING_LEVELS);
+		expect(doc.models).toEqual([
+			{ id: "anthropic/claude-sonnet-5-5", name: "Sonnet 5.5", provider: "anthropic", reasoning: true },
+			{ id: "local/tiny", name: "tiny", provider: "local", reasoning: false },
+		]);
+		expect((modelsDoc(undefined) as { models: unknown[] }).models).toEqual([]);
+	});
+
+	test("findModel returns the omp object, not a copy", () => {
+		expect(findModel([local, sonnet], "anthropic/claude-sonnet-5-5")).toBe(sonnet);
+		expect(findModel([local], "anthropic/claude-sonnet-5-5")).toBeUndefined();
+	});
+
+	test("contextDoc needs tokens and a window; percent is computed when omp gives none", () => {
+		expect(contextDoc({ tokens: 50, contextWindow: 200, percent: 25 })).toEqual({ tokens: 50, window: 200, pct: 25 });
+		expect(contextDoc({ tokens: 1, contextWindow: 3, percent: null })).toEqual({ tokens: 1, window: 3, pct: 33.3 });
+		expect(contextDoc({ tokens: null, contextWindow: 200, percent: null })).toBeNull();
+		expect(contextDoc({ tokens: 0, contextWindow: 0 })).toBeNull();
+		expect(contextDoc(undefined)).toBeNull();
+	});
+
+	test("thinkingName passes known levels only", () => {
+		expect(thinkingName("high")).toBe("high");
+		expect(thinkingName("turbo")).toBeNull();
+		expect(thinkingName(3)).toBeNull();
+	});
+
+	test("set_model / set_thinking commands", async () => {
+		const calls: string[] = [];
+		const ctx = {
+			resolvePlanReview: () => true,
+			setModel: (id: string) => (calls.push(`m:${id}`), id === "a/b"),
+			setThinking: (level: string) => void calls.push(`t:${level}`),
+		};
+		expect(await handleCommand({ type: "set_model", model: "a/b" }, ctx)).toBeNull();
+		expect(await handleCommand({ type: "set_model", model: "a/zzz" }, ctx)).toContain("not switched");
+		expect(await handleCommand({ type: "set_model" }, ctx)).toContain("malformed");
+		expect(await handleCommand({ type: "set_thinking", level: "high" }, ctx)).toBeNull();
+		expect(await handleCommand({ type: "set_thinking", level: "turbo" }, ctx)).toContain("malformed");
+		expect(calls).toEqual(["m:a/b", "m:a/zzz", "t:high"]);
+		const bare = { resolvePlanReview: () => true };
+		expect(await handleCommand({ type: "set_model", model: "a/b" }, bare)).toContain("cannot");
+		expect(await handleCommand({ type: "set_thinking", level: "low" }, bare)).toContain("cannot");
 	});
 });
 
@@ -452,6 +525,77 @@ describe("extension wiring (fake pi)", () => {
 			await handlers.turn_end({}, ctx);
 			expect(JSON.parse(fs.readFileSync(path.join(dir, "hivegrid-agents", "4244.json"), "utf8"))).toMatchObject({ state: "idle", usage: null });
 			await handlers.session_shutdown({}, ctx);
+		} finally {
+			process.env.XDG_RUNTIME_DIR = oldEnv.x;
+			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = oldEnv.p;
+			if (oldEnv.x === undefined) delete process.env.XDG_RUNTIME_DIR;
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("extension wiring: models and commands", () => {
+	test("publishes model, thinking, context and the models file; executes set_model and set_thinking", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hg-ext-"));
+		const oldEnv = { x: process.env.XDG_RUNTIME_DIR, p: process.env.WEZTERM_PANE };
+		process.env.XDG_RUNTIME_DIR = dir;
+		process.env.WEZTERM_PANE = "4244";
+		try {
+			const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+			const a = { provider: "anthropic", id: "one", name: "One", reasoning: true };
+			const b = { provider: "openai", id: "two", name: "Two", reasoning: false };
+			let current = a;
+			let level = "medium";
+			let list = [a, b];
+			const pi = {
+				on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h),
+				pi: { getAgentDir: () => "/h/.omp/agent" },
+				setModel: async (m: typeof a) => ((current = m), true),
+				getThinkingLevel: () => level,
+				setThinkingLevel: (l: string) => void (level = l),
+			};
+			let tickFn: (() => void) | null = null;
+			const ctx = {
+				agent: { kind: "main" },
+				cwd: "/work",
+				sessionManager: { getSessionId: () => "sid", getSessionName: () => "T" },
+				models: { list: () => list, current: () => current },
+				getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				getPendingPlanReview: () => undefined,
+				resolvePlanReview: () => true,
+				setInterval: (fn: () => void) => ((tickFn = fn), 1),
+				clearTimer: () => {},
+			};
+			factory(pi);
+			const base = path.join(dir, "hivegrid-agents");
+			const stateFile = path.join(base, "4244.json");
+			const modelsFile = path.join(base, "4244.models.json");
+			await handlers.session_start({}, ctx);
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({
+				model: { id: "anthropic/one", name: "One", provider: "anthropic" }, thinking: "medium", context: { tokens: 10, window: 100, pct: 10 },
+			});
+			expect(fs.statSync(modelsFile).mode & 0o777).toBe(0o600);
+			expect(JSON.parse(fs.readFileSync(modelsFile, "utf8")).models.map((m: { id: string }) => m.id)).toEqual(["anthropic/one", "openai/two"]);
+
+			fs.writeFileSync(path.join(base, "4244.cmd.m1.json"), JSON.stringify({ type: "set_model", model: "openai/two" }));
+			fs.writeFileSync(path.join(base, "4244.cmd.m2.json"), JSON.stringify({ type: "set_thinking", level: "high" }));
+			tickFn!();
+			await new Promise(r => setTimeout(r, 50));
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({ model: { id: "openai/two" }, thinking: "high", error: null });
+
+			fs.writeFileSync(path.join(base, "4244.cmd.m3.json"), JSON.stringify({ type: "set_model", model: "openai/missing" }));
+			tickFn!();
+			await new Promise(r => setTimeout(r, 50));
+			expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).error).toContain("not switched");
+
+			list = [b];
+			tickFn!();
+			expect(JSON.parse(fs.readFileSync(modelsFile, "utf8")).models.map((m: { id: string }) => m.id)).toEqual(["openai/two"]);
+
+			await handlers.session_shutdown({}, ctx);
+			expect(fs.existsSync(modelsFile)).toBe(false);
 		} finally {
 			process.env.XDG_RUNTIME_DIR = oldEnv.x;
 			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;

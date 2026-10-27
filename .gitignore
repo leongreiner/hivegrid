@@ -7,3 +7,14 @@
 /ya
 /lazygit
 __pycache__/
+.env
+.env.*
+*.pem
+*.key
+remote-token
+.claude/settings.local.json
+.omp/
+*.log
+node_modules/
+.venv/
+.pytest_cache/

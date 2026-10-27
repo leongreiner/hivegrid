@@ -6,7 +6,10 @@
  *   <dir>/<pane>.cmd.<unique>.json
  * When the session ends the file says `exited`, so the pane reads as an agent that quit
  * (not as a plain shell) until another agent starts there or the hive drops the file with
- * the pane.
+ * the pane. The file also carries the session's model, thinking level and context fill, and
+ *   <dir>/<pane>.models.json
+ * lists the models and thinking levels the phone remote may switch to (`set_model`,
+ * `set_thinking` command files).
  *
  * The state machine is the pure, exported `reduce`; everything else is thin I/O that
  * never writes to stdout/stderr (omp's TUI owns the terminal) and never throws into omp.
@@ -303,6 +306,76 @@ export interface DocMeta {
 	title: string | null;
 	profile: string | null;
 	usage?: UsageDoc | null;
+	/** the session's current model, thinking level and context fill; absent/null when omp did not say */
+	model?: ModelRef | null;
+	thinking?: string | null;
+	context?: ContextDoc | null;
+}
+
+/** A model as the phone shows it: `id` is `provider/id`, the string `set_model` takes back. */
+export interface ModelRef {
+	id: string;
+	name: string;
+	provider: string;
+}
+
+export interface ContextDoc {
+	tokens: number;
+	window: number;
+	pct: number;
+}
+
+/** omp's thinking levels, lowest first ("off" disables thinking). omp clamps a level the model lacks. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+const MAX_MODELS = 400;
+
+function str(v: unknown, max: number): string | null {
+	return typeof v === "string" && v ? clip(v.replace(/[\u0000-\u001f\u007f]/g, " "), max) : null;
+}
+
+/** `{id: "provider/id", name, provider}` of an omp model object; null when it names no provider or id. */
+export function modelRef(m: unknown): ModelRef | null {
+	const r = asRecord(m);
+	const provider = str(r.provider, 80);
+	const id = str(r.id, 160);
+	if (!provider || !id) return null;
+	return { id: `${provider}/${id}`, name: str(r.name, 120) ?? id, provider };
+}
+
+/** The `<pane>.models.json` document: the models omp can switch to and the thinking levels. */
+export function modelsDoc(models: unknown, levels: string[] = THINKING_LEVELS): Record<string, unknown> {
+	const out: { id: string; name: string; provider: string; reasoning: boolean }[] = [];
+	const seen = new Set<string>();
+	for (const m of Array.isArray(models) ? models : []) {
+		const ref = modelRef(m);
+		if (!ref || seen.has(ref.id)) continue;
+		seen.add(ref.id);
+		out.push({ ...ref, reasoning: !!asRecord(m).reasoning });
+		if (out.length >= MAX_MODELS) break;
+	}
+	return { v: 1, thinking_levels: levels, models: out };
+}
+
+/** The omp model object whose `provider/id` is `id`, or undefined. */
+export function findModel(models: unknown, id: string): unknown {
+	for (const m of Array.isArray(models) ? models : []) if (modelRef(m)?.id === id) return m;
+	return undefined;
+}
+
+/** `ctx.getContextUsage()` as {tokens, window, pct}; null unless omp reported a token count and a window. */
+export function contextDoc(usage: unknown): ContextDoc | null {
+	const u = asRecord(usage);
+	const tokens = amount(u.tokens);
+	const window = amount(u.contextWindow);
+	if (tokens === null || window === null || window <= 0) return null;
+	const pct = amount(u.percent) ?? (tokens / window) * 100;
+	return { tokens, window, pct: Math.round(pct * 10) / 10 };
+}
+
+/** A thinking level omp reported, as a short string, else null. */
+export function thinkingName(level: unknown): string | null {
+	return typeof level === "string" && THINKING_LEVELS.includes(level) ? level : null;
 }
 
 /**
@@ -373,6 +446,9 @@ export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<str
 		title: meta.title,
 		profile: meta.profile,
 		usage: meta.usage ?? null,
+		model: meta.model ?? null,
+		thinking: meta.thinking ?? null,
+		context: meta.context ?? null,
 		state: m.state,
 		reason: m.reason,
 		since: m.since,
@@ -412,6 +488,9 @@ export function isCmdFile(name: string, pane: number): boolean {
 
 export interface CmdCtx {
 	resolvePlanReview(reviewId: string, choice: string, input?: { feedback?: string; role?: string }): boolean | Promise<boolean>;
+	/** switch to the model `provider/id`; false when it is unknown or has no credentials */
+	setModel?(id: string): boolean | Promise<boolean>;
+	setThinking?(level: string): void | Promise<void>;
 }
 
 /**
@@ -420,6 +499,17 @@ export interface CmdCtx {
  */
 export async function handleCommand(cmd: unknown, ctx: CmdCtx): Promise<string | null> {
 	const c = asRecord(cmd);
+	if (c.type === "set_model") {
+		if (typeof c.model !== "string" || !c.model || c.model.length > 300) return "model switch malformed";
+		if (!ctx.setModel) return "this omp cannot switch models";
+		return (await ctx.setModel(c.model)) ? null : `model "${clip(c.model, 80)}" was not switched (unknown or no credentials)`;
+	}
+	if (c.type === "set_thinking") {
+		if (typeof c.level !== "string" || !THINKING_LEVELS.includes(c.level)) return "thinking level malformed";
+		if (!ctx.setThinking) return "this omp cannot change the thinking level";
+		await ctx.setThinking(c.level);
+		return null;
+	}
 	if (c.type !== "plan_review") return null;
 	const reviewId = c.reviewId;
 	const choice = c.choice;
@@ -457,6 +547,17 @@ export default function hivegridAgentState(pi: any): void {
 		let busyCmd = false;
 		let usage: UsageDoc | null = null;
 		let scanned: { cost: unknown; providers: Set<string> } | null = null;
+		const modelsFile = path.join(dir, `${pane}.models.json`);
+		let modelsSig = "";
+
+		const listModels = (ctx: any): unknown[] => {
+			try {
+				const list = ctx?.models?.list?.() ?? ctx?.modelRegistry?.getAvailable?.();
+				return Array.isArray(list) ? list : [];
+			} catch {
+				return [];
+			}
+		};
 
 		const isMain = (ctx: any): boolean => {
 			try {
@@ -485,6 +586,18 @@ export default function hivegridAgentState(pi: any): void {
 			try {
 				title = ctxRef?.sessionManager?.getSessionName?.() ?? pi?.getSessionName?.() ?? null;
 			} catch {}
+			let model: ModelRef | null = null;
+			let thinking: string | null = null;
+			let context: ContextDoc | null = null;
+			try {
+				model = modelRef(ctxRef?.models?.current?.() ?? ctxRef?.model);
+			} catch {}
+			try {
+				thinking = thinkingName(pi?.getThinkingLevel?.());
+			} catch {}
+			try {
+				context = contextDoc(ctxRef?.getContextUsage?.());
+			} catch {}
 			return {
 				pane,
 				pid: process.pid,
@@ -494,7 +607,24 @@ export default function hivegridAgentState(pi: any): void {
 				title: title || null,
 				profile: profileFromAgentDir(agentDir),
 				usage,
+				model,
+				thinking,
+				context,
 			};
+		};
+
+		/** Writes `<pane>.models.json` when the list of switchable models changed (or `force`). */
+		const publishModels = (ctx: any, force = false) => {
+			try {
+				const doc = modelsDoc(listModels(ctx));
+				const sig = JSON.stringify(doc);
+				if (!force && sig === modelsSig) return;
+				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+				const tmp = `${modelsFile}.tmp.${process.pid}`;
+				fs.writeFileSync(tmp, sig, { mode: 0o600 });
+				fs.renameSync(tmp, modelsFile);
+				modelsSig = sig;
+			} catch {}
 		};
 
 		const put = (doc: Record<string, unknown>) => {
@@ -567,7 +697,23 @@ export default function hivegridAgentState(pi: any): void {
 				refreshUsage(ctxRef);
 				put(exitedDoc(model, meta(), nowS()));
 			} catch {}
+			try {
+				fs.rmSync(modelsFile, { force: true });
+			} catch {}
 		};
+
+		const cmdCtx = (ctx: any): CmdCtx => ({
+			resolvePlanReview: (reviewId, choice, input) => ctx.resolvePlanReview(reviewId, choice, input),
+			setModel: async id => {
+				const target = findModel(listModels(ctx), id);
+				if (!target || typeof pi.setModel !== "function") return false;
+				return (await pi.setModel(target)) !== false;
+			},
+			setThinking: async level => {
+				if (typeof pi.setThinkingLevel !== "function") throw new Error("not supported");
+				await pi.setThinkingLevel(level);
+			},
+		});
 
 		const pollCommands = async (ctx: any) => {
 			if (busyCmd) return;
@@ -591,14 +737,12 @@ export default function hivegridAgentState(pi: any): void {
 					if (parsed === null) continue;
 					let err: string | null = null;
 					try {
-						err = await handleCommand(parsed, ctx);
+						err = await handleCommand(parsed, cmdCtx(ctx));
 					} catch (e) {
-						err = `plan review answer failed: ${e instanceof Error ? e.message : String(e)}`;
+						err = `command failed: ${e instanceof Error ? e.message : String(e)}`;
 					}
-					if (err) {
-						model = withError(model, err);
-						write(true);
-					}
+					if (err) model = withError(model, err);
+					write(true);
 				}
 			} finally {
 				busyCmd = false;
@@ -609,6 +753,7 @@ export default function hivegridAgentState(pi: any): void {
 			try {
 				if (dead) return;
 				refreshUsage(ctx);
+				publishModels(ctx);
 				const jobs = jobCount(ctx);
 				apply({ type: "tick", jobs: jobs ?? model.jobs });
 				write(false); // heartbeat
@@ -637,6 +782,7 @@ export default function hivegridAgentState(pi: any): void {
 				usage = null;
 				scanned = null;
 				refreshUsage(ctx);
+				publishModels(ctx, true);
 				write(true);
 				const pr = ctx?.getPendingPlanReview?.();
 				if (pr) apply({ type: "plan_review_requested", review: pr });

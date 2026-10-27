@@ -162,6 +162,8 @@ class TestPostRules(HttpCase):
         self.assertEqual(r.status, 400)
         r, _ = self.req("POST", "/api/agents/3/ack", raw=b"[]")
         self.assertEqual(r.status, 400)
+        r, _ = self.req("POST", "/api/agents/3/ack", raw=b"[" * 15000)
+        self.assertEqual(r.status, 400, "deep nesting is a bad body, not a crash")
         r, _ = self.req("POST", "/api/agents/3/ack", {"surprise": 1})
         self.assertEqual(r.status, 400)
         r, payload = self.req("POST", "/api/agents/3/ack", {"a": "b" * 15000})
@@ -319,6 +321,107 @@ class TestInertData(HttpCase):
         data = self.jreq("GET", "/api/agents/3/tail")[1]
         self.assertIn("<svg onload=1>", data["lines"][0], "markup is data, not removed: the UI sets text only")
         self.assertNotIn("\x1b", json.dumps(data))
+
+
+class TestHeldRequests(HttpCase):
+    """Long polls over real sockets: held requests are cheap and ride the normal connection accounting."""
+
+    def hold(self, path, results, etag=None, sleep=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": f"127.0.0.1:{self.port}", "Authorization": "Bearer " + TOKEN}
+        if etag:
+            h["If-None-Match"] = etag
+        try:
+            c.request("GET", path, headers=h)
+            r = c.getresponse()
+            results.append((r.status, r.read()))
+        finally:
+            c.close()
+
+    def test_a_phone_with_three_held_requests_still_gets_through(self):
+        self.tick = 0
+        gate = threading.Event()
+        app = self.make_app(sleep=lambda s: gate.wait(s))      # the held requests wait on `gate`, not on the fake clock
+        app.clock = time.monotonic                              # so that `wait=` is real time here
+        self.serve(app)
+        paths = ("/api/agents?wait=2", "/api/agents/3/tail?wait=2", "/api/agents/3/tail?wait=2")
+        etags = [self.req("GET", p.split("?")[0])[0].getheader("ETag") for p in paths]
+        before = app.read_bucket.tokens
+        out = []
+        threads = [threading.Thread(target=self.hold, args=(path, out, etag), daemon=True) for path, etag in zip(paths, etags)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        r, _ = self.req("GET", "/api/meta")                     # a fourth request while three are held
+        self.assertEqual(r.status, 200)
+        self.assertEqual(sum(t.is_alive() for t in threads), 3, "still held")
+        spent = before - app.read_bucket.tokens
+        self.assertLess(spent, 5, "each held request paid its one token, not one per look")
+        gate.set()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(len(out), 3)
+
+    def test_a_held_request_ends_when_the_server_closes(self):
+        self.tick = 0
+        app = self.make_app(sleep=None)
+        app.clock = time.monotonic
+        self.serve(app)
+        r, _ = self.req("GET", "/api/agents")
+        out = []
+        t = threading.Thread(target=self.hold, args=("/api/agents?wait=20", out, r.getheader("ETag")), daemon=True)
+        t.start()
+        time.sleep(0.3)
+        self.assertTrue(t.is_alive())
+        app.close()
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(out[0][0], 304)
+
+    def wait_for(self, check, seconds=5):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if check():
+                return True
+            time.sleep(0.01)
+        return check()
+
+    def test_clients_that_leave_free_their_claims_within_a_look(self):
+        self.tick = 0
+        gate = threading.Event()
+        app = self.make_app(sleep=lambda s: gate.wait(s))
+        app.clock = time.monotonic
+        self.serve(app)
+        errors = []
+        self.server.handle_error = lambda request, client_address: errors.append(client_address)
+        r, _ = self.req("GET", "/api/agents")
+        etag = r.getheader("ETag")
+        held = R.PEER_CAP - 1
+        with unittest.mock.patch.object(R, "LIST_POLL", 0.05):
+            socks = []
+            for _ in range(held):
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+                s.sendall((f"GET /api/agents?wait=20 HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nAuthorization: Bearer {TOKEN}\r\n"
+                           f"If-None-Match: {etag}\r\n\r\n").encode())
+                socks.append(s)
+            self.assertTrue(self.wait_for(lambda: sum(self.server._conns.values()) == held), "all held")
+            for s in socks:
+                s.close()
+            self.assertTrue(self.wait_for(lambda: not self.server._conns), "claims are released once the clients are gone")
+        self.assertEqual(self.req("GET", "/api/meta")[0].status, 200, "the page can still get in")
+        self.assertEqual(errors, [], "no traceback for a client that left")
+
+    def test_a_write_to_a_client_that_left_is_quiet(self):
+        for exc in (BrokenPipeError, ConnectionResetError):
+            with self.subTest(exc=exc.__name__):
+                h = object.__new__(R.Handler)
+                h.timeout, h.close_connection, h.command = 1, False, "GET"
+                h.connection = unittest.mock.Mock()
+                h.send_response = lambda *a, **k: None
+                h.send_header = lambda *a, **k: None
+                h.end_headers = lambda: (_ for _ in ()).throw(exc())
+                h._send(R.Response(200, b"x"))
+                self.assertTrue(h.close_connection)
 
 
 class TestConnections(HttpCase):

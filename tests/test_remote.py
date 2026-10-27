@@ -36,6 +36,14 @@ class Clock:
         return self.t
 
 
+class FakeSys:
+    """Stands in for D.SysStats: a fixed snapshot."""
+
+    def snapshot(self):
+        return {"ts": NOW, "cpu": 12.5, "cores": 4, "load": [0.5, 0.7, 0.9], "mem": {"used": 1.0, "total": 4.0, "pct": 25.0},
+                "disk": None, "gpu": None, "uptime": 99.0, "history": []}
+
+
 class TestSanitize(unittest.TestCase):
     def test_display_text_loses_escapes_and_controls(self):
         for raw, want in (
@@ -324,22 +332,32 @@ class TestAgentModel(unittest.TestCase):
         self.assertEqual(j["totals"]["by_state"], {"done": 1, "working": 1, "attention": 1})
         self.assertEqual(j["totals"]["agents"], 3)
         self.assertEqual(j["totals"]["usage"], "10 tok · $0.50")
-        later = R.agents_json([a, b, c], NOW + 1)
-        self.assertEqual(j["rev"], later["rev"], "the same age text does not change the revision")
-        self.assertNotEqual(j["rev"], R.agents_json([a, b, c], NOW + 30)["rev"], "an older age text does")
+        self.assertEqual(j["rev"], R.agents_json([a, b, c], NOW + 1)["rev"])
         self.assertNotEqual(j["rev"], R.agents_json([a, b], NOW)["rev"])
 
-    def test_the_age_text_refreshes_the_revision(self):
-        young = self.ag(since=NOW - 1)
-        revs = [R.agents_json([young], NOW + s)["rev"] for s in (0, 3, 4)]
-        self.assertEqual(revs[0], revs[1], "5 s steps below a minute")
-        self.assertNotEqual(revs[1], revs[2])
-        older = self.ag(since=NOW - 65)
-        revs = [R.agents_json([older], NOW + s)["rev"] for s in (0, 50, 55)]
-        self.assertEqual(revs[0], revs[1], "minutes after that")
-        self.assertNotEqual(revs[1], revs[2])
+    def test_the_revision_has_no_age_in_it(self):
+        young, older = self.ag(since=NOW - 1), self.ag(since=NOW - 65)
+        for agent in (young, older):
+            self.assertEqual({R.agents_json([agent], NOW + s)["rev"] for s in (0, 3, 4, 50, 55, 600)}, {R.agents_json([agent], NOW)["rev"]})
         self.assertEqual(R.agents_json([older], NOW)["agents"][0]["age"], "1m")
+        self.assertEqual(R.agents_json([older], NOW + 600)["agents"][0]["age"], "11m", "the age text still moves")
         self.assertIsNone(R.agents_json([self.ag(since=None)], NOW)["agents"][0]["age"])
+
+    def test_model_thinking_context_session_fields(self):
+        a = self.ag(model={"id": "p/m", "name": "M\x1b[1m", "provider": "p"}, thinking="high",
+                    context={"tokens": 5.0, "window": 10.0, "pct": 50.0})
+        j = R.agent_json(a, [a], NOW, session=True)
+        self.assertEqual((j["model"], j["thinking"], j["context"], j["session"]),
+                         ({"id": "p/m", "name": "M", "provider": "p"}, "high", {"tokens": 5.0, "window": 10.0, "pct": 50.0}, True))
+        self.assertTrue(j["can"]["model"])
+        bare = R.agent_json(self.ag(), [self.ag()], NOW)
+        self.assertEqual((bare["model"], bare["thinking"], bare["context"], bare["session"], bare["can"]["model"]),
+                         (None, None, None, False, False), "an older extension: no model controls")
+        self.assertFalse(R.agent_json(a, [a], NOW, readonly=True)["can"]["model"])
+        self.assertFalse(R.agent_json(self.ag(state="exited", model=a.model), [a], NOW)["can"]["model"])
+        rows = R.agents_json([a], NOW, sessions=lambda x: x is a)["agents"]
+        self.assertTrue(rows[0]["session"])
+        self.assertNotEqual(R.agents_json([a], NOW)["rev"], R.agents_json([a], NOW, sessions=lambda x: True)["rev"])
 
     def test_meta(self):
         m = R.meta_json(False)
@@ -347,6 +365,8 @@ class TestAgentModel(unittest.TestCase):
         self.assertEqual(m["states"]["attention"], {"glyph": "?", "label": "needs you", "color": "violet", "rank": 1})
         self.assertEqual(m["dangerous"], ["ctrl-c", "ctrl-d"])
         self.assertNotEqual(m["meta_rev"], R.meta_json(True)["meta_rev"])
+        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll"])
+        self.assertEqual((m["limits"]["chat_max"], m["limits"]["wait_max"]), (200, 20))
 
 
 class TestTail(unittest.TestCase):
@@ -614,9 +634,33 @@ class AppCase(MuxCase):
         self.settings = os.path.join(self.tmp.name, "settings.json")
         self.tokfile = os.path.join(self.tmp.name, "token")
         R.write_token(self.tokfile, TOKEN)
+        # nothing reads the real home: accounts, quota caches, fonts and the monitor log live in the temp dir
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        env = unittest.mock.patch.dict(os.environ, {"HOME": self.home, "CLAUDE_QUOTA_CACHE_DIR": os.path.join(self.tmp.name, "quota"),
+                                                    "XDG_CACHE_HOME": os.path.join(self.tmp.name, "cache")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.slept = []
+        self.on_sleep = None     # called after each fake sleep with the number of sleeps so far
+        self.sysstats = FakeSys()
+        self.fonts = {"/fonts/mono.ttf": (os.path.join(self.tmp.name, "mono.ttf"),),
+                      "/fonts/mono-bold.ttf": (os.path.join(self.tmp.name, "mono-bold.ttf"),)}
         self.app = self.make_app()
 
+    def sleep(self, seconds):
+        """The held requests' wait: time passes on the fake clock, then the test may change the world."""
+        self.slept.append(seconds)
+        self.clock.t += seconds
+        if self.on_sleep:
+            self.on_sleep(len(self.slept))
+        return False
+
     def make_app(self, **kw):
+        kw.setdefault("sleep", self.sleep)
+        kw.setdefault("home", self.home)
+        kw.setdefault("sysstats", self.sysstats)
+        kw.setdefault("fonts", self.fonts)
         return R.App(self.mux(), R.TokenStore(self.tokfile), clock=self.clock, wall=lambda: NOW, log=self.logs.append,
                      theme_watch=ThemeWatch(self.settings), **kw)
 
@@ -1066,6 +1110,17 @@ class TestCli(unittest.TestCase):
         code, _, err = self.cli("serve", "--token-file", self.file, "--port", "8787", "--bind", "0.0.0.0")
         self.assertEqual(code, 2)
         self.assertIn("--allow-any-bind", err)
+
+    def test_serve_refuses_a_state_directory_others_can_write(self):
+        R.write_token(self.file, TOKEN)
+        run = os.path.join(self.tmp.name, "run")
+        os.makedirs(os.path.join(run, "hivegrid-agents"))
+        os.chmod(os.path.join(run, "hivegrid-agents"), 0o777)
+        with unittest.mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": run}):
+            code, _, err = self.cli("serve", "--token-file", self.file, "--port", "8787")
+        self.assertEqual(code, 1)
+        self.assertIn("state directory is not trusted", err)
+        self.assertIn("written by others", err)
 
 
 class TestHardening(unittest.TestCase):

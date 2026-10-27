@@ -19,18 +19,18 @@ Hivegrid is a workspace for running many [`omp`](https://github.com/can1357/oh-m
 ## Demo
 
 <p align="center">
-  <a href="assets/demo/hivegrid-demo.mp4"><img src="assets/demo/hivegrid-demo.gif" alt="Hivegrid demo: several omp agents working in a pane grid, the overview dock, account switching, usage and compute history, file explorer, git view, web pane and settings" width="900"></a>
+  <a href="assets/demo/hivegrid-demo.mp4"><img src="assets/demo/hivegrid-demo.gif" alt="Hivegrid demo: several omp agents working in a pane grid, the overview dock, account switching, usage and compute history, file explorer, git view, web pane, settings and the phone remote" width="900"></a>
 </p>
 
-<p align="center"><em>Highlights, sped up. <a href="assets/demo/hivegrid-demo.mp4">Watch the full demo (3½ minutes, mp4)</a>.</em></p>
+<p align="center"><em>Highlights, sped up. <a href="assets/demo/hivegrid-demo.mp4">Watch the full demo (4½ minutes, mp4)</a>.</em></p>
 
-Recorded from real omp sessions in an isolated sandbox window with fixture repositories and fictional accounts ([`dev/demo/`](dev/demo)).
+The demo shows the agent grid and the overview dock, switching an account mid-session, the usage, system, agents and hive panels, the file explorer, the git view with GitHub CI and lazygit, the web pane, the settings, and, in its last part, the phone remote: a phone-shaped window beside Hivegrid with the live chat of an agent, a prompt sent from the phone, the model and thinking switch, the usage of every account, the system load and a new session. It is recorded from real omp sessions in an isolated sandbox window with fixture repositories and fictional accounts ([`dev/demo/`](dev/demo)).
 
 | | |
 | --- | --- |
 | ![Four omp agents working in a grid with the overview dock](assets/screenshots/hivegrid-agents.png) | ![Git view listing five repositories with the GitHub CI result](assets/screenshots/hivegrid-git.png) |
 | ![Usage history of an account over seven days](assets/screenshots/hivegrid-usage.png) | ![A web page as a pane of the grid](assets/screenshots/hivegrid-web.png) |
-| ![Settings panel with colour themes and live preview](assets/screenshots/hivegrid-settings.png) | |
+| ![Settings panel with colour themes and live preview](assets/screenshots/hivegrid-settings.png) | ![The phone remote beside Hivegrid: the live chat of an agent, answered from the phone](assets/screenshots/hivegrid-remote.png) |
 
 ## Features
 
@@ -40,7 +40,7 @@ Recorded from real omp sessions in an isolated sandbox window with fixture repos
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
-- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale: read an agent's screen, send a prompt, press keys, answer a plan review (token-protected, optional read-only mode).
+- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes), answer approvals and plan reviews with buttons, change an agent's model and thinking level, start a new session on any of your accounts, and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
 - **Session restore**: the layout (windows, tabs, splits and their sizes) and what ran in each pane (omp chats resumed with `--restore`, web pages, shells in their directories) is kept on disk and built again at the next start, after a crash or a power loss.
 - **Polish**: hover feedback, one themed picker for every list, a calm header (project, branch and running agents first, usage and system stats as quiet text), header pills for the active mode, five colour themes (Graphite by default).
 
@@ -138,7 +138,7 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 
 `dev/qa/hgq` runs an isolated Hivegrid (the fork build and this repo's `config/` and `bin/`) on its own Xvfb display for manual QA, screenshots and synthetic input (`dev/qa/hgq help`). `dev/smoke` (slot 11) opens the bar's views and the overview dock and checks the panes; `dev/qa/web-smoke` (slot 12; needs Chrome and a fork build with the web pane) drives the web pane end to end, and `dev/qa/web-browser-smoke` (slot 13) the bar's browser button and the browser choice of the settings (a wrapper around Chrome records which binary was started). `dev/qa/remote-smoke` (slot 14) runs the phone remote's server against three fake agents (prompts, keys, states, a GUI restart, read-only mode, hostile pane text in a headless browser). All are local only.
 
-`dev/demo/record.py` records the demo video and the stills above: `dev/demo/prepare.sh` sets up QA slot 20 with fixture repositories, fictional accounts and usage and omp profiles of their own, then the script drives the window with synthetic input and records the display with ffmpeg. It runs real omp sessions with a few trivial prompts, so it needs a logged-in omp (`DEMO_OMP_SRC`: `~/.omp`, the default profile, or `~/.omp/profiles/NAME`) and Chrome, and uses a few percent of that account's quota.
+`dev/demo/record.py` records the demo video and the stills above: `dev/demo/prepare.sh` sets up QA slot 20 with fixture repositories, fictional accounts and usage and omp profiles of their own, then the script drives the window with synthetic input and records the display with ffmpeg. The phone remote part starts `hivegrid-remote serve` in the sandbox (loopback, port 18720) and a phone-shaped Chrome window on the same display. It runs real omp sessions with a few trivial prompts, so it needs a logged-in omp (`DEMO_OMP_SRC`: `~/.omp`, the default profile, or `~/.omp/profiles/NAME`) and Chrome, and uses a few percent of that account's quota. The sandbox's omp profiles run this checkout's `ext/hivegrid-agent-state.ts` (so the phone can switch model and thinking); your own extension directory stays untouched.
 
 ## Contributing
 

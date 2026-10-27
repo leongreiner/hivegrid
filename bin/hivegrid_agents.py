@@ -15,7 +15,9 @@ import math
 import mmap
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -110,6 +112,23 @@ def state_dir():
     return d
 
 
+def state_dir_problem(d=None):
+    """Why the state directory cannot be trusted (it holds the files that drive prompts and model
+    switches), else None: it must be a real directory of the current user that others cannot write to."""
+    d = d or state_dir()
+    try:
+        st = os.lstat(d)
+    except OSError as exc:
+        return f"cannot read {d}: {exc.strerror}"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"{d} is not a directory"
+    if st.st_uid != os.getuid():
+        return f"{d} belongs to another user"
+    if st.st_mode & 0o022:
+        return f"{d} can be written by others (chmod 700 it)"
+    return None
+
+
 def _read_json(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -187,6 +206,10 @@ class Agent:
     num: int = 0                  # reading-order number in its tab (the dock's and picker's digits)
     tab_index: int = 1            # position of its tab in the window, from 1 (the picker's "tab N")
     usage: "Usage" = None         # tokens and cost omp reported (the state file's `usage`), None when it reported none
+    session_file: str = None      # the state file's `sessionFile` (unchecked: the reader confines it)
+    model: dict = None            # {"id": "provider/id", "name", "provider"} the extension published, None from an older one
+    thinking: str = None
+    context: dict = None          # {"tokens", "window", "pct"} when omp reported them
 
 
 def agent_label(agent, agents):
@@ -289,6 +312,34 @@ def totals_text(t):
     if t["estimated"] is not None:
         costs.append(format_cost(t["estimated"], "estimated") + (" est" if costs else ""))
     return " · ".join([f"{format_tokens(t['tokens'])} tok"] + ([" + ".join(costs)] if costs else ["—"]))
+
+
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+MODEL_ID = re.compile(r"[^\s/]{1,80}/\S{1,160}")
+
+
+def _short(v, limit):
+    return v[:limit] if isinstance(v, str) and v else None
+
+
+def parse_model(doc):
+    """The state file's `model` -> {"id", "name", "provider"} with bounded strings, else None."""
+    if not isinstance(doc, dict):
+        return None
+    mid, provider = _short(doc.get("id"), 240), _short(doc.get("provider"), 80)
+    if not mid or not provider or not MODEL_ID.fullmatch(mid):
+        return None
+    return {"id": mid, "name": _short(doc.get("name"), 120) or mid.split("/", 1)[1], "provider": provider}
+
+
+def parse_context(doc):
+    """The state file's `context` -> {"tokens", "window", "pct"} of finite non-negative numbers, else None."""
+    if not isinstance(doc, dict):
+        return None
+    tokens, window, pct = _amount(doc.get("tokens")), _amount(doc.get("window")), _amount(doc.get("pct"))
+    if tokens is None or window is None or window <= 0:
+        return None
+    return {"tokens": tokens, "window": window, "pct": pct if pct is not None else round(100 * tokens / window, 1)}
 
 
 def omp_title(title):
@@ -535,6 +586,10 @@ def _collect(run, now, fg):
             agent.pending = sf["pending"] if isinstance(sf.get("pending"), dict) else None
             agent.error = sf["error"] if isinstance(sf.get("error"), str) else None
             agent.usage = parse_usage(sf.get("usage"))
+            agent.session_file = sf["sessionFile"] if isinstance(sf.get("sessionFile"), str) and sf["sessionFile"] else None
+            agent.model = parse_model(sf.get("model"))
+            agent.thinking = sf["thinking"] if sf.get("thinking") in THINKING_LEVELS else None
+            agent.context = parse_context(sf.get("context"))
             if not alive:
                 agent.state = "exited"
                 agent.pending = None
@@ -593,7 +648,7 @@ def _drop_stale_files(d, live_ids):
     except OSError:
         return
     for name in names:
-        m = re.match(r"^(\d+)\.(?:json|cmd\..+\.json)$", name)
+        m = re.match(r"^(\d+)\.(?:json|models\.json|cmd\..+\.json)$", name)
         if m and int(m.group(1)) not in live_ids:
             try:
                 os.unlink(os.path.join(d, name))
@@ -721,8 +776,21 @@ def origin(run=wezterm_cli):
     return hit(first["pane_id"])
 
 
-def _agent_command():
-    return ["bash", "-ic", f"{os.environ.get('HIVEGRID_AGENT_CMD') or 'omp'}; exec bash"]
+PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def _agent_command(profile=None):
+    """The `bash -ic` command line that starts the agent. With a `profile` the command is
+    `omp --profile=<p>`; ValueError for a profile that is not a plain name, or when HIVEGRID_AGENT_CMD
+    names something else than plain omp (the profile flag is omp's, not any other program's)."""
+    cmd = os.environ.get("HIVEGRID_AGENT_CMD") or "omp"
+    if profile:
+        if not PROFILE_NAME.fullmatch(profile):
+            raise ValueError("bad profile name")
+        if cmd.strip() != "omp":
+            raise ValueError("a profile needs the plain omp command (HIVEGRID_AGENT_CMD is set)")
+        cmd = f"omp --profile={shlex.quote(profile)}"
+    return ["bash", "-ic", f"{cmd}; exec bash"]
 
 
 def _split_new(run, target_pane, extra):
@@ -750,12 +818,14 @@ def _spawn_in_origin(o, extra, run):
     return _split_new(run, _reading_order(grid)[-1], extra)
 
 
-def spawn_agent(cwd=None, near=None, run=wezterm_cli):
+def spawn_agent(cwd=None, near=None, run=wezterm_cli, profile=None):
     """Start the agent command (HIVEGRID_AGENT_CMD, default omp; run as `bash -ic '<cmd>; exec
     bash'`) in a new pane of the origin tab, always: the pane is split off the last grid pane and
     stays where the split puts it (nothing re-tiles the grid). The directory is `cwd`, else
     `near`'s, else the one of the pane the hive was opened over, else $HOME. Returns the new pane
-    id or None."""
+    id or None. `profile` starts `omp --profile=<profile>` (ValueError, before any pane exists, when
+    that cannot be done: see `_agent_command`)."""
+    command = _agent_command(profile)
     o = origin(run)
     if o is None:
         return None
@@ -765,7 +835,7 @@ def spawn_agent(cwd=None, near=None, run=wezterm_cli):
     if not cwd:
         here = next((p for p in _list_panes(run) or [] if p["pane_id"] == focus), None)
         cwd = (_cwd_path(here.get("cwd")) if here and not is_web(here) else "") or os.environ.get("HOME", "/")
-    return _spawn_in_origin(o, ("--cwd", cwd, "--", *_agent_command()), run)
+    return _spawn_in_origin(o, ("--cwd", cwd, "--", *command), run)
 
 
 def spawn_web(url, profile=None, run=wezterm_cli):
@@ -844,6 +914,40 @@ def delete_agent(agent, run=wezterm_cli, sleep=time.sleep, grace=3.0):
     return _close(agent, run, sleep, grace)
 
 
+def send_command(agent, msg):
+    """Drop a command file for the extension of `agent`'s pane; True when it was written."""
+    path = os.path.join(state_dir(), f"{agent.pane}.cmd.{time.time_ns()}-{os.getpid()}.json")
+    return _write_json(path, msg)
+
+
+def read_state(pane):
+    """The raw state file of `pane` (a dict) or None."""
+    doc = _read_json(os.path.join(state_dir(), f"{int(pane)}.json"))
+    return doc if isinstance(doc, dict) else None
+
+
+def read_models(pane):
+    """The models the extension of `pane` can switch to: {"levels": [...], "models": [{"id", "name",
+    "provider", "reasoning"}]} from `<pane>.models.json`, validated and bounded; empty lists when
+    the file is missing or garbled."""
+    doc = _read_json(os.path.join(state_dir(), f"{int(pane)}.models.json"))
+    out = {"levels": [], "models": []}
+    if not isinstance(doc, dict):
+        return out
+    levels = doc.get("thinking_levels")
+    out["levels"] = [l for l in levels if l in THINKING_LEVELS] if isinstance(levels, list) else []
+    seen = set()
+    for m in doc.get("models") if isinstance(doc.get("models"), list) else []:
+        ref = parse_model(m)
+        if ref is None or ref["id"] in seen:
+            continue
+        seen.add(ref["id"])
+        out["models"].append({**ref, "reasoning": bool(m.get("reasoning"))})
+        if len(out["models"]) >= 400:
+            break
+    return out
+
+
 def answer_plan_review(agent, choice, feedback=None, role=None):
     """Hand a plan-review decision to the extension via a command file."""
     pend = agent.pending
@@ -858,8 +962,6 @@ def answer_plan_review(agent, choice, feedback=None, role=None):
         msg["feedback"] = feedback
     if role:
         msg["role"] = role
-    d = state_dir()
-    path = os.path.join(d, f"{agent.pane}.cmd.{time.time_ns()}-{os.getpid()}.json")
-    if not _write_json(path, msg):
+    if not send_command(agent, msg):
         return False, "could not write command file"
     return True, "sent"

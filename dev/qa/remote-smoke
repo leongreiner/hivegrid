@@ -302,12 +302,12 @@ def section_browser():
     os.makedirs(SHOTS, exist_ok=True)
     with tempfile.TemporaryDirectory() as prof:
         base = [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", f"--user-data-dir={prof}",
-                "--virtual-time-budget=5000"]
+                "--timeout=4000"]  # no virtual time: the page long-polls, which never settles under it
         url = f"http://127.0.0.1:{PORT}/#t={TOKEN}"
         r = subprocess.run([*base, "--dump-dom", url], capture_output=True, text=True, timeout=60)
         dom = r.stdout
         check("7 the page rendered the agent rows (labels 1, 2, 3)",
-              all(re.search(r'class="label"[^>]*>' + n + "</span>", dom) for n in "123"), dom[:300])
+              all(re.search(r'class="num"[^>]*>' + n + "</span>", dom) for n in "123"), dom[:300])
         check("7 the hostile title is text (&lt;img src=x)", "&lt;img src=x" in dom)
         check("7 the hostile <script> title is text", "&lt;script&gt;x&lt;/script&gt;" in dom)
         check("7 no <img src=x> element exists", re.search(r"<img[^>]*src=\"?x", dom) is None)

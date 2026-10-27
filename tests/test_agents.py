@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import hivegrid_agents as A  # noqa: E402
@@ -75,6 +76,21 @@ class Base(unittest.TestCase):
 class TestCollect(Base):
     def test_state_dir_mode(self):
         self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    def test_state_dir_problem(self):
+        self.assertIsNone(A.state_dir_problem())
+        other = os.path.join(self.tmp.name, "other")
+        os.mkdir(other)
+        os.chmod(other, 0o777)
+        self.assertIn("written by others", A.state_dir_problem(other))
+        os.chmod(other, 0o755)
+        self.assertIsNone(A.state_dir_problem(other), "readable by others is fine, writable is not")
+        link = os.path.join(self.tmp.name, "link")
+        os.symlink(other, link)
+        self.assertIn("not a directory", A.state_dir_problem(link), "a link to a directory is not trusted")
+        self.assertIn("cannot read", A.state_dir_problem(os.path.join(self.tmp.name, "gone")))
+        with unittest.mock.patch.object(A.os, "getuid", return_value=os.getuid() + 1):
+            self.assertIn("another user", A.state_dir_problem())
 
     def test_no_mux(self):
         self.assertEqual(A.collect(lambda *a: None, now=lambda: NOW, fg={}), [])
@@ -683,6 +699,94 @@ class TestPeekAndPlan(Base):
         self.assertFalse(A.answer_plan_review(agent(19), "execute")[0])
         self.assertFalse(A.answer_plan_review(agent(19, pending={"kind": "ask"}), "execute")[0])
         self.assertEqual(os.listdir(self.dir), [])
+
+
+class TestSpawnProfile(EnvCase):
+    def spawn(self, profile, cwd="/w"):
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(1)
+        return t, A.spawn_agent(cwd, None, run=t, profile=profile)
+
+    def test_profile_starts_omp_with_the_flag(self):
+        t, new = self.spawn("beta")
+        self.assertEqual(new, 100)
+        self.assertEqual(t.cmd, ["bash", "-ic", "omp --profile=beta; exec bash"])
+
+    def test_profile_with_the_plain_omp_command_set_is_fine(self):
+        os.environ["HIVEGRID_AGENT_CMD"] = " omp "
+        t, _ = self.spawn("beta")
+        self.assertEqual(t.cmd[2], "omp --profile=beta; exec bash")
+
+    def test_profile_is_refused_before_any_pane_exists(self):
+        os.environ["HIVEGRID_AGENT_CMD"] = "sleep 100000"
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(1)
+        with self.assertRaises(ValueError):
+            A.spawn_agent("/w", None, run=t, profile="beta")
+        self.assertEqual(t.non_list(), [])
+        os.environ.pop("HIVEGRID_AGENT_CMD")
+        for bad in ("a b", "a;rm", "-x", "$(id)", "a/b", "x" * 80):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                A.spawn_agent("/w", None, run=t, profile=bad)
+        self.assertEqual(t.non_list(), [])
+
+    def test_no_profile_keeps_the_command_line(self):
+        t, _ = self.spawn(None)
+        self.assertEqual(t.cmd, ["bash", "-ic", "omp; exec bash"])
+
+
+class TestModelFiles(Base):
+    def test_state_file_model_thinking_context_and_session(self):
+        self.write_state(3, model={"id": "anthropic/claude-x", "name": "X", "provider": "anthropic"}, thinking="high",
+                         context={"tokens": 50, "window": 200, "pct": 25}, sessionFile="/h/.omp/agent/sessions/a.jsonl")
+        a = self.collect([pane(3, "π > t")])[3]
+        self.assertEqual(a.model, {"id": "anthropic/claude-x", "name": "X", "provider": "anthropic"})
+        self.assertEqual((a.thinking, a.context, a.session_file),
+                         ("high", {"tokens": 50.0, "window": 200.0, "pct": 25.0}, "/h/.omp/agent/sessions/a.jsonl"))
+
+    def test_an_older_extension_or_junk_leaves_them_unset(self):
+        self.write_state(3)
+        a = self.collect([pane(3, "π > t")])[3]
+        self.assertEqual((a.model, a.thinking, a.context, a.session_file), (None, None, None, None))
+        self.write_state(3, model={"id": "noslash", "provider": "p"}, thinking="turbo", context={"tokens": -1, "window": 5},
+                         sessionFile=7)
+        a = self.collect([pane(3, "π > t")])[3]
+        self.assertEqual((a.model, a.thinking, a.context, a.session_file), (None, None, None, None))
+        self.write_state(3, context={"tokens": 1, "window": 4})
+        self.assertEqual(self.collect([pane(3, "π > t")])[3].context["pct"], 25.0, "computed when omp gave none")
+
+    def test_read_models_validates_and_bounds(self):
+        put(os.path.join(self.dir, "3.models.json"), json.dumps({
+            "v": 1, "thinking_levels": ["off", "high", "bogus", 5],
+            "models": [{"id": "a/b", "name": "B", "provider": "a", "reasoning": True}, {"id": "a/b", "provider": "a"},
+                       {"id": "nope", "provider": "a"}, "junk", {"id": "c/d", "provider": "c"}]}))
+        got = A.read_models(3)
+        self.assertEqual(got["levels"], ["off", "high"])
+        self.assertEqual(got["models"], [{"id": "a/b", "name": "B", "provider": "a", "reasoning": True},
+                                         {"id": "c/d", "name": "d", "provider": "c", "reasoning": False}])
+        put(os.path.join(self.dir, "4.models.json"), "{not json")
+        self.assertEqual(A.read_models(4), {"levels": [], "models": []})
+        self.assertEqual(A.read_models(5), {"levels": [], "models": []})
+
+    def test_send_command_writes_a_command_file_that_is_not_a_state_file(self):
+        a = agent(19)
+        self.assertTrue(A.send_command(a, {"type": "set_model", "model": "a/b"}))
+        (name,) = os.listdir(self.dir)
+        self.assertRegex(name, r"^19\.cmd\..+\.json$")
+        self.assertEqual(get(os.path.join(self.dir, name)), {"type": "set_model", "model": "a/b"})
+
+    def test_stale_models_files_go_with_their_pane(self):
+        self.write_state(3)
+        put(os.path.join(self.dir, "3.models.json"), "{}")
+        put(os.path.join(self.dir, "9.models.json"), "{}")
+        self.collect([pane(3, "π > t")])
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "3.models.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "9.models.json")))
+
+    def test_read_state(self):
+        self.write_state(3, state="idle")
+        self.assertEqual(A.read_state(3)["state"], "idle")
+        self.assertIsNone(A.read_state(4))
 
 
 if __name__ == "__main__":
