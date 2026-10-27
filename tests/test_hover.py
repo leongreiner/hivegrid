@@ -35,7 +35,7 @@ def tearDownModule():
     os.close(NULL_FD)
 
 
-COLORS = {"surface": "#111b30", "raised": "#1d3a70", "dim": "#7487ad", "bright": "#eaf1ff", "accent": "#4f9dff"}
+COLORS = {"surface": "#111722", "raised": "#222f45", "dim": "#7a879d", "bright": "#f5f8fc", "accent": "#78a9ff"}
 NOW = 1_700_000_000.0
 
 
@@ -123,7 +123,7 @@ class BarTest(unittest.TestCase):
         self.bar.set_hover("git")
         self.bar.level["git"] = 1.0
         self.bar.draw(24, 5, (None, False), True)
-        r, g, b = (round(a + (c - a) * B.HOVER_BLEND) for a, c in zip((17, 27, 48), (29, 58, 112)))
+        r, g, b = (round(a + (c - a) * B.HOVER_BLEND) for a, c in zip((17, 23, 34), (34, 47, 69)))
         self.assertIn(f"\x1b[5;1H\x1b[0;48;2;{r};{g};{b};", self.bar.out.take())
 
     def test_open_view_keeps_its_highlight(self):
@@ -135,7 +135,7 @@ class BarTest(unittest.TestCase):
         self.bar.hover = "files"
         self.bar.draw(24, 5, ("files", False), True)
         out = self.bar.out.take()
-        self.assertIn("\x1b[2;1H\x1b[0;48;2;29;58;112;38;2;79;157;255m▎", out)  # raised + accent marker
+        self.assertIn("\x1b[2;1H\x1b[0;48;2;34;47;69;38;2;120;169;255m▎", out)  # raised + accent marker
 
     @unittest.skipUnless(B.find_font() and B.Image, "needs PIL and the icon font")
     def test_button_image_chip_and_stripe(self):
@@ -145,12 +145,12 @@ class BarTest(unittest.TestCase):
         rest = self.bar.button_png("git", False, 0, 8, 17, 5)
         self.assertEqual(self.pixel(rest, 5, 25)[3], 0)  # no chip at rest: the surface shows
         hover = self.bar.button_png("git", False, B.STEPS, 8, 17, 5)
-        r, g, b = (round(a + (c - a) * B.HOVER_BLEND) for a, c in zip((17, 27, 48), (29, 58, 112)))
+        r, g, b = (round(a + (c - a) * B.HOVER_BLEND) for a, c in zip((17, 23, 34), (34, 47, 69)))
         self.assertNear(self.pixel(hover, 5, 25), (r, g, b, 255))
         self.assertEqual(self.pixel(hover, 0, 25)[3], 0)  # the stripe marks only an open view
         hot = self.bar.button_png("files", True, B.STEPS, 8, 17, 5)
-        self.assertNear(self.pixel(hot, 5, 25), (29, 58, 112, 255))  # raised
-        self.assertNear(self.pixel(hot, 0, 25), (79, 157, 255, 255))  # accent stripe
+        self.assertNear(self.pixel(hot, 5, 25), (34, 47, 69, 255))  # raised
+        self.assertNear(self.pixel(hot, 0, 25), (120, 169, 255, 255))  # accent stripe
 
     def assertNear(self, got, want):
         """Colours equal up to the rounding of the supersampled shapes' downscale."""
@@ -292,9 +292,9 @@ class DockTest(unittest.TestCase):
         # The inactive row tints from surface towards raised; the active row is raised already.
         cv = self.render({6: 1.0})
         row = cv.cells[5]
-        self.assertEqual(row[0][2], D.mix("#111b30", "#1d3a70", D.HOVER_BLEND))
-        self.assertEqual(cv.cells[2][0][2], "#1d3a70")
-        self.assertEqual(self.render({"arrange": 1.0}).cells[5][0][2], "#111b30")
+        self.assertEqual(row[0][2], D.mix("#111722", "#222f45", D.HOVER_BLEND))
+        self.assertEqual(cv.cells[2][0][2], "#222f45")
+        self.assertEqual(self.render({"arrange": 1.0}).cells[5][0][2], "#111722")
 
     def test_regions_have_keys(self):
         cv = self.render()
@@ -348,7 +348,7 @@ class DockTest(unittest.TestCase):
 class DockNumbersTest(unittest.TestCase):
     """Past pane 9 the numbers take two columns and a typed digit may start a longer number."""
 
-    DOC = {"panes": [{"id": 100 + n, "num": n, "kind": "shell", "glyph": "›", "color": "#7487ad", "name": f"p{n}",
+    DOC = {"panes": [{"id": 100 + n, "num": n, "kind": "shell", "glyph": "›", "color": "#7a879d", "name": f"p{n}",
                       "proc": "bash", "since": NOW - 5, "text": "shell", "title": "u@h: ~/work/deep/dir"}
                      for n in range(1, 13)]}
 

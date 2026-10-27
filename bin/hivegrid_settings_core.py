@@ -30,7 +30,18 @@ def _preset(name, palette, terminal, ansi, brights):
 
 
 PRESETS = {
-    # The palette of theme.lua and the colours wezterm.lua used before settings existed.
+    # The default: neutral graphite and one blue accent; the meaning colours keep their hues.
+    "hivegrid-graphite": _preset(
+        "Hivegrid Graphite",
+        dict(deep="#070a10", base="#0b0f16", surface="#111722", pill="#162030", raised="#222f45", track="#1c2535",
+             border="#293345", edge_hi="#4a5d7d", edge_lo="#0a0e15", text="#e2e8f2", bright="#f5f8fc",
+             muted="#8d9ab0", dim="#7a879d", accent="#78a9ff", cyan="#5cc8f0", green="#4ade80", amber="#f5a524",
+             red="#f87171", violet="#a78bfa", grey="#8590a5"),
+        dict(selection_bg="#26395c", split="#1c2433", scrollbar_thumb="#263143", button_hover="#1c2638",
+             tab_hover="#172030", tab_edge="#05070b"),
+        ["#243044", "#f87171", "#4ade80", "#f5a524", "#78a9ff", "#c4a1f7", "#5cc8f0", "#e2e8f2"],
+        ["#5b677d", "#fca5a5", "#86efac", "#fcd34d", "#a5c6ff", "#dac4fa", "#8fdcf5", "#f5f8fc"]),
+    # The former default.
     "hivegrid-navy": _preset(
         "Hivegrid Navy",
         dict(deep="#070d19", base="#0b1220", surface="#111b30", pill="#15244a", raised="#1d3a70", track="#1f2d4d",
@@ -69,7 +80,7 @@ PRESETS = {
         ["#1f3328", "#f87171", "#4ade80", "#fbbf24", "#5aa9e6", "#c084fc", "#4fc9a4", "#cfe3d6"],
         ["#52705f", "#fca5a5", "#86efac", "#fcd34d", "#8cc4f0", "#d8b4fe", "#7fe0c2", "#eefaf2"]),
 }
-DEFAULT_PRESET = "hivegrid-navy"
+DEFAULT_PRESET = "hivegrid-graphite"
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 

@@ -605,12 +605,12 @@ STATES = {
 }
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # drawn instead of ↻ while something runs, at 8 frames a second
 
-# The Navy palette (config/theme.lua M.P): what a program draws with before it knows the theme.
+# The Graphite palette (config/theme.lua M.P): what a program draws with before it knows the theme.
 DEFAULT_PAL = {
-    "deep": "#070d19", "base": "#0b1220", "surface": "#111b30", "pill": "#15244a", "raised": "#1d3a70",
-    "track": "#1f2d4d", "border": "#1e2a45", "edge_hi": "#4a6fb0", "edge_lo": "#0c1630", "text": "#c9d6ee",
-    "bright": "#eaf1ff", "muted": "#8a9cc2", "dim": "#7487ad", "accent": "#4f9dff", "cyan": "#38bdf8",
-    "green": "#34d399", "amber": "#fbbf24", "red": "#f87171", "violet": "#a78bfa", "grey": "#8190ad",
+    "deep": "#070a10", "base": "#0b0f16", "surface": "#111722", "pill": "#162030", "raised": "#222f45",
+    "track": "#1c2535", "border": "#293345", "edge_hi": "#4a5d7d", "edge_lo": "#0a0e15", "text": "#e2e8f2",
+    "bright": "#f5f8fc", "muted": "#8d9ab0", "dim": "#7a879d", "accent": "#78a9ff", "cyan": "#5cc8f0",
+    "green": "#4ade80", "amber": "#f5a524", "red": "#f87171", "violet": "#a78bfa", "grey": "#8590a5",
 }
 
 # Hover: what the pointer is over fades HOVER_BLEND of the way toward `raised` in FADE_IN seconds

@@ -1,42 +1,42 @@
 -- Hivegrid palette and small drawing helpers shared by every module.
--- Dark navy base; green/amber/red stay semantic for state, blue is the accent.
+-- Dark graphite base; green/amber/red stay semantic for state, blue is the accent.
 local wezterm = require 'wezterm'
 
 local M = {}
 
 M.P = {
-  deep = '#070d19', -- header band, darker than the terminal so the bar reads as a recessed frame
-  base = '#0b1220', -- terminal background
-  surface = '#111b30', -- chips, inactive tabs
-  pill = '#15244a', -- body of a status pill, lighter than the header so pills read as raised
-  raised = '#1d3a70', -- active tab, the pill that needs the eye
-  track = '#1f2d4d', -- empty part of a gauge
-  border = '#1e2a45',
-  edge_hi = '#4a6fb0', -- lit edge of a raised shape
-  edge_lo = '#0c1630', -- shaded edge
-  text = '#c9d6ee',
-  bright = '#eaf1ff',
-  muted = '#8a9cc2',
-  dim = '#7487ad', -- the dimmest text allowed on a pill
-  accent = '#4f9dff',
-  cyan = '#38bdf8',
-  green = '#34d399',
-  amber = '#fbbf24',
+  deep = '#070a10', -- header band, darker than the terminal so the bar reads as a recessed frame
+  base = '#0b0f16', -- terminal background
+  surface = '#111722', -- chips, inactive tabs
+  pill = '#162030', -- body of a status pill, lighter than the header so pills read as raised
+  raised = '#222f45', -- active tab, the pill that needs the eye
+  track = '#1c2535', -- empty part of a gauge
+  border = '#293345',
+  edge_hi = '#4a5d7d', -- lit edge of a raised shape
+  edge_lo = '#0a0e15', -- shaded edge
+  text = '#e2e8f2',
+  bright = '#f5f8fc',
+  muted = '#8d9ab0',
+  dim = '#7a879d', -- the dimmest text allowed on a pill
+  accent = '#78a9ff',
+  cyan = '#5cc8f0',
+  green = '#4ade80',
+  amber = '#f5a524',
   red = '#f87171',
   violet = '#a78bfa',
-  grey = '#8190ad',
+  grey = '#8590a5',
 }
 
 -- Terminal and tab bar colours that are not part of the palette proper.
 M.T = {
-  selection_bg = '#1f3f73',
-  split = '#1a2b4d',
-  scrollbar_thumb = '#22324f',
-  button_hover = '#1b2f55', -- window button and "+" button hover
-  tab_hover = '#18274a',
-  tab_edge = '#04080f',
-  ansi = { '#243252', '#f87171', '#34d399', '#fbbf24', '#4f9dff', '#c084fc', '#38bdf8', '#c9d6ee' },
-  brights = { '#5b6b8f', '#fca5a5', '#6ee7b7', '#fcd34d', '#7dbaff', '#d8b4fe', '#7dd3fc', '#eaf1ff' },
+  selection_bg = '#26395c',
+  split = '#1c2433',
+  scrollbar_thumb = '#263143',
+  button_hover = '#1c2638', -- window button and "+" button hover
+  tab_hover = '#172030',
+  tab_edge = '#05070b',
+  ansi = { '#243044', '#f87171', '#4ade80', '#f5a524', '#78a9ff', '#c4a1f7', '#5cc8f0', '#e2e8f2' },
+  brights = { '#5b677d', '#fca5a5', '#86efac', '#fcd34d', '#a5c6ff', '#dac4fa', '#8fdcf5', '#f5f8fc' },
 }
 
 -- The colour theme chosen in `hivegrid-panel settings` replaces these defaults, key by key.

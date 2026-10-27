@@ -411,8 +411,8 @@ def parse_color(text):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    for name, default in (("surface", "#111b30"), ("raised", "#1d3a70"), ("dim", "#7487ad"),
-                          ("bright", "#eaf1ff"), ("accent", "#4f9dff")):
+    for name, default in (("surface", "#111722"), ("raised", "#222f45"), ("dim", "#7a879d"),
+                          ("bright", "#f5f8fc"), ("accent", "#78a9ff")):
         ap.add_argument(f"--{name}", type=parse_color, default=default)
     args = ap.parse_args()
     if not (sys.stdin.isatty() and sys.stdout.isatty()):

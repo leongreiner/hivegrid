@@ -73,7 +73,7 @@ T.test('theme palette is applied to theme.P key by key, unknown names ignored', 
   T.eq(theme.P.accent, '#010203')
   T.eq(theme.P.no_such_token, nil)
   T.eq(theme.T.split, '#0a0b0c')
-  T.eq(theme.P.base, '#0b1220', 'untouched keys keep their default')
+  T.eq(theme.P.base, '#0b0f16', 'untouched keys keep their default')
 end)
 
 T.test('an ansi list with one bad colour in the middle is dropped, not holed', function(wz)

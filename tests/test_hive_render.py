@@ -113,7 +113,7 @@ class FakeModel:
     dirty = False
 
     def current_theme(self):
-        return theme_for("hivegrid-navy")
+        return theme_for("hivegrid-graphite")
 
 
 class FakeUI(U.UI):
