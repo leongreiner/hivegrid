@@ -1376,7 +1376,7 @@ def build_parser():
     s.add_argument("--read-only", action="store_true", default=_env_flag("HIVEGRID_REMOTE_READ_ONLY"))
     s.add_argument("--allow-host", action="append", default=[], metavar="HOST")
     s.add_argument("--socket", default=os.environ.get("HIVEGRID_REMOTE_SOCKET"))
-    s.add_argument("--wezterm", default=os.environ.get("WEZTERM_EXECUTABLE"))
+    s.add_argument("--wezterm", default=os.environ.get("HIVEGRID_REMOTE_WEZTERM"))
     s.add_argument("--allow-any-bind", action="store_true")
     t = sub.add_parser("token", help="create, show or rotate the access token")
     t.add_argument("--token-file")
@@ -1423,16 +1423,26 @@ def exe_for_socket(sock, proc_exe=_proc_exe, which=shutil.which):
     return which("wezterm")
 
 
+def cli_exe(path):
+    """`path` as the binary that has the `cli` subcommand: a wezterm-gui is swapped for its sibling
+    `wezterm` (a Hivegrid pane exports WEZTERM_EXECUTABLE=.../wezterm-gui, which has no `cli`)."""
+    if path and os.path.basename(path) == "wezterm-gui":
+        sibling = os.path.join(os.path.dirname(path), "wezterm")
+        if os.path.exists(sibling):
+            return sibling
+    return path
+
+
 def _locator(args, discover=discover_gui_socket, exe_for=exe_for_socket):
     if not (args.socket or args.wezterm):
         return discover
 
     def locate():
         if args.socket:
-            exe = args.wezterm or exe_for(args.socket)
+            exe = cli_exe(args.wezterm) or exe_for(args.socket)
             return (args.socket, exe) if exe else None
         found = discover()
-        return (found[0], args.wezterm) if found else None
+        return (found[0], cli_exe(args.wezterm)) if found else None
     return locate
 
 

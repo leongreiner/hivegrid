@@ -87,7 +87,7 @@ The unit has no `ProtectHome` or `ProtectSystem` on purpose: the server writes `
 | `--read-only` | `HIVEGRID_REMOTE_READ_ONLY=1` | off |
 | `--allow-host NAME` (repeatable) | `HIVEGRID_REMOTE_ALLOW_HOSTS` (comma separated) | loopback, `*.ts.net` and the bound address |
 | `--socket PATH` | `HIVEGRID_REMOTE_SOCKET` | found from the running Hivegrid window |
-| `--wezterm PATH` | `WEZTERM_EXECUTABLE` | the `wezterm` next to that window's `wezterm-gui` |
+| `--wezterm PATH` | `HIVEGRID_REMOTE_WEZTERM` | the `wezterm` next to that window's `wezterm-gui` (a `wezterm-gui` path is swapped for its sibling `wezterm`) |
 | `--allow-any-bind` | | off |
 
 `--bind` accepts only loopback, a Tailscale address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) or, with `--allow-any-bind`, anything else (`0.0.0.0`, a LAN address). The settings file has no keys for it, and the Lua config never reads this.

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import socket
 import subprocess
@@ -1228,6 +1229,21 @@ class TestCliHelpers(unittest.TestCase):
         self.assertIsNone(R._locator(self.ns(socket="/r/s"), exe_for=lambda s: None)())
         self.assertEqual(R._locator(self.ns(wezterm="/w/wezterm"), discover=discover)(), ("/s/gui-sock-5", "/w/wezterm"))
         self.assertIsNone(R._locator(self.ns(wezterm="/w/wezterm"), discover=lambda: None)())
+
+    def test_wezterm_gui_path_becomes_its_sibling_cli(self):
+        # a Hivegrid pane exports WEZTERM_EXECUTABLE=.../wezterm-gui, which has no `cli` subcommand
+        d = self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        for n in ("wezterm", "wezterm-gui"):
+            open(os.path.join(d, n), "w").close()
+        gui, cli = os.path.join(d, "wezterm-gui"), os.path.join(d, "wezterm")
+        self.assertEqual(R.cli_exe(gui), cli)
+        self.assertEqual(R.cli_exe(cli), cli)
+        self.assertEqual(R.cli_exe("/nowhere/wezterm-gui"), "/nowhere/wezterm-gui")
+        self.assertIsNone(R.cli_exe(None))
+        self.assertEqual(R._locator(self.ns(socket="/r/s", wezterm=gui))(), ("/r/s", cli))
+        self.assertEqual(R._locator(self.ns(wezterm=gui), discover=lambda: ("/s/gui-sock-5", "/g/wezterm"))(),
+                         ("/s/gui-sock-5", cli))
 
 
 if __name__ == "__main__":
