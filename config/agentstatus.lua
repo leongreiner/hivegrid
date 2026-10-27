@@ -1,7 +1,7 @@
 -- Per-pane agent state for grids of omp panes, in the hive panel's vocabulary
 -- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), done, idle, exited, plus
 -- bell, shell (a shell prompt in a pane where no agent ran) and other (any other program).
--- Shown in the overview dock (overview.lua) and the pane picker (LEADER+g), used by Alt+n;
+-- Shown in the overview dock (overview.lua) and the pane picker (LEADER+g), used by Alt+n (next agent that needs you);
 -- the header carries no agent state.
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
@@ -560,8 +560,9 @@ local function pick(window, pane)
 end
 api.picker = wezterm.action_callback(pick)
 
--- Next pane (after the active one, wrapping across tabs) needing attention:
--- needs you / bell / done first, then idle agents, else any unseen output.
+-- Next pane that needs you (`needs you`, or a bell), after the active one in tab and reading
+-- order, wrapping across the tabs of the window; repeated presses cycle through them.
+-- Pane:activate() also brings its tab to the front. No such pane: a toast, nothing else.
 local function jump_next(window, pane)
   local list = scan(window, true)
   local flat, start = {}, 1
@@ -572,20 +573,14 @@ local function jump_next(window, pane)
       if e.pane:pane_id() == cur then start = #flat end
     end
   end
-  local function pickfirst(match)
-    for i = 1, #flat do
-      local e = flat[(start + i - 1) % #flat + 1]
-      if e.pane:pane_id() ~= cur and match(e.st) then return e.pane end
+  for i = 1, #flat do
+    local e = flat[(start + i - 1) % #flat + 1]
+    if e.pane:pane_id() ~= cur and (e.st.state == 'attention' or e.st.state == 'bell') then
+      e.pane:activate()
+      return
     end
   end
-  local target = pickfirst(function(st)
-    return st.state == 'attention' or st.state == 'bell' or st.state == 'done'
-  end) or pickfirst(function(st)
-    return st.state == 'idle'
-  end) or pickfirst(function(st)
-    return st.unseen
-  end)
-  if target then target:activate() end
+  window:toast_notification('Hivegrid', 'No agent needs you', nil, 3000)
 end
 
 -- Next / previous grid pane of the tab in reading order (the dock's digits).

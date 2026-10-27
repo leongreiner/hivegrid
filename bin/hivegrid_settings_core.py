@@ -127,10 +127,10 @@ FIXED_BINDINGS = [
     ("CTRL+DownArrow", "split down"), ("CTRL+UpArrow", "split up"),
     ("ALT+RightArrow", "focus right"), ("ALT+LeftArrow", "focus left"),
     ("ALT+DownArrow", "focus down"), ("ALT+UpArrow", "focus up"),
-    ("ALT+n", "next agent"), ("ALT+]", "next pane group"), ("ALT+[", "previous pane group"),
+    ("ALT+n", "next agent needing you"), ("ALT+]", "next pane group"), ("ALT+[", "previous pane group"),
     ("ALT+s", "system stats on/off"),
     ("LEADER+1", "omp menu 1"), ("LEADER+2", "omp menu 2"), ("LEADER+3", "omp menu 3"),
-    ("LEADER+n", "next agent"), ("LEADER+g", "agent picker"), ("LEADER+r", "resize mode"),
+    ("LEADER+n", "next agent needing you"), ("LEADER+g", "agent picker"), ("LEADER+r", "resize mode"),
     ("LEADER+e", "equalize panes"), ("LEADER+p", "pane mode"), ("LEADER+b", "broadcast"),
 ]
 
