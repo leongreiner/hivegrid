@@ -57,7 +57,6 @@ RestartPreventExitStatus=1 2
 RestartSec=3
 UMask=0077
 NoNewPrivileges=yes
-PrivateTmp=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
@@ -71,7 +70,7 @@ systemctl --user enable --now hivegrid-remote
 journalctl --user -u hivegrid-remote -f
 ```
 
-The unit has no `ProtectHome` or `ProtectSystem` on purpose: the server writes `acks.json` and `seen.json` below `$XDG_RUNTIME_DIR/hivegrid-agents`, and `wezterm cli` writes logs of its own.
+The unit has no `ProtectHome` or `ProtectSystem` on purpose: the server writes `acks.json` and `seen.json` below `$XDG_RUNTIME_DIR/hivegrid-agents`, and `wezterm cli` writes logs of its own. It has no `PrivateTmp` either: in a user service that runs the server in a user namespace, where it can no longer read `/proc/<pid>/exe` of the Hivegrid window, so it finds no window and answers `503 no_mux`.
 
 ## Read-only mode
 
