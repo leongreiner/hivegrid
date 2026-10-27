@@ -42,6 +42,15 @@ It lists agents only (the panes the dock calls working, busy, needs you, done, i
 
 An alternative without `tailscale serve` is `hivegrid-remote serve --bind $(tailscale ip -4)`: plain HTTP inside the WireGuard tunnel. It works, but the browser calls it an insecure context and the server needs tailscaled up first. The bound address is allowed as a `Host` automatically, so the phone URL may use that IP or the machine's MagicDNS name; any other name needs `--allow-host`.
 
+**Tailscale ACL.** A tailnet with a custom policy can drop the phone's traffic even though ping works (`tailscale ping` is ICMP; the page is TCP 443). If the phone is a tagged device, or your policy has no rule from it to this machine, add a grant that allows only this machine's HTTPS port, for example:
+
+```json
+"hosts":  { "my-workstation": "100.x.y.z" },
+"grants": [ { "src": ["tag:trusted"], "dst": ["my-workstation"], "ip": ["tcp:443"] } ]
+```
+
+(`src` is your phone's tag or user; `100.x.y.z` is `tailscale ip -4` on the workstation.) This is the only network barrier besides the token, so keep it narrow.
+
 ## Run it as a user service
 
 A systemd user unit keeps the server running after a login. Run `hivegrid-remote token` once first: without a token file the server exits with status 1, and `RestartPreventExitStatus=1 2` (1: no or unsafe token file, bad setup; 2: bad arguments) stops systemd from restarting it in a loop. Save it as `~/.config/systemd/user/hivegrid-remote.service` (Hivegrid does not install it):
@@ -71,6 +80,17 @@ journalctl --user -u hivegrid-remote -f
 ```
 
 The unit has no `ProtectHome` or `ProtectSystem` on purpose: the server writes `acks.json` and `seen.json` below `$XDG_RUNTIME_DIR/hivegrid-agents`, and `wezterm cli` writes logs of its own. It has no `PrivateTmp` either: in a user service that runs the server in a user namespace, where it can no longer read `/proc/<pid>/exe` of the Hivegrid window, so it finds no window and answers `503 no_mux`.
+
+Use the path of the program in `ExecStart`: `%h/.local/bin/hivegrid-remote` after `install.sh`, or the repo's `bin/hivegrid-remote` when you run it from a checkout. The server finds the Hivegrid window by itself, so it needs no environment from a Hivegrid pane.
+
+## If the page does not work
+
+| Symptom | Cause and fix |
+| --- | --- |
+| The phone times out, while `curl https://<machine>.<tailnet>.ts.net/healthz` on the workstation prints `ok` | The Tailscale ACL blocks TCP 443 from the phone (see above), or the phone cannot resolve the name (Android Private DNS). |
+| `502` from the tailnet URL | `hivegrid-remote` is not running: `systemctl --user status hivegrid-remote`. |
+| The page loads but says "no Hivegrid window" (`503 no_mux`) | No Hivegrid window is open, a stock WezTerm was picked instead (pass `--socket`), or the unit has `PrivateTmp` (remove it). |
+| The token field appears again | The token was rotated or the site data cleared: open the `#t=` link once more (`hivegrid-remote token --show`). |
 
 ## Read-only mode
 
