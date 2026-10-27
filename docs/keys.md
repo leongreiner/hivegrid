@@ -29,6 +29,7 @@
 | | drag a column border in the explorer | resize the parent / current / preview columns (the pointer turns into a resize cursor over a border; Hivegrid build only). Until a border is dragged the columns follow the sidebar width: below 32 columns only the file list, below 64 file list and preview, then the parent column too |
 | Web | `LEADER+w`, then `l` | location: type a URL or search words in the header of the tab's web pane (Enter opens, Esc cancels; with no web pane, asks and opens one) |
 | | `LEADER+w`, then `h` | show / hide the header row of the web pane (back, forward, reload, address field, collapse) |
+| | `LEADER+w`, then `g` | sign in to Google (or another site that refuses the pane) in a plain Chrome window on the pane's profile; see Notes and limits |
 | | `LEADER+w`, then `n` | new web pane beside the last grid pane (asks for the URL; Enter alone opens the home page) |
 | | browser button of the left bar | focus the tab's web pane; without one, open a web pane on the home page (no question; type the location in its header) |
 | | `LEADER+w`, then `b` / `f` | back / forward |

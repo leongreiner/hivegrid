@@ -1,7 +1,7 @@
 -- Web pane: a browser in a pane of the grid (Hivegrid WezTerm fork only). Wire (parent):
 --   local web = require('web')(config, wezterm, sb, layouts)
 --   LEADER+w   web key table: l type a location in the pane's header (asks and opens a pane when
---              there is none), h show/hide the header, n new web pane, b back, f forward, r reload,
+--              there is none), h show/hide the header, g sign in to Google in a plain Chrome window, n new web pane, b back, f forward, r reload,
 --              R hard reload, s stop, y copy the URL, o open in the system browser, Esc leaves
 --   The browser button of the sidebar bar: focuses the tab's web pane, else opens a web pane on
 --   the home page (settings key web.home, about:blank by default) without asking; the bar shows
@@ -341,6 +341,19 @@ return function(config, wezterm, sb, layouts)
       end)),
     },
     { key = 'h', action = once(send 'header;toggle') },
+    {
+      -- Google refuses to sign in to a browser that software controls (the pane's is): a plain
+      -- Chrome window on the pane's profile does the sign-in (bin/hivegrid-web-signin). The tab
+      -- stays open when it fails, so its reason can be read.
+      key = 'g',
+      action = once(wezterm.action_callback(function(window, pane)
+        local bin = wezterm.home_dir .. '/.local/bin/hivegrid-web-signin'
+        local ok, err = pcall(window.perform_action, window, act.SpawnCommandInNewTab {
+          args = { 'bash', '-c', bin .. ' || { printf "\\nPress Enter to close "; read -r _; }' },
+        }, pane)
+        if not ok then toast(window, 'Could not start the sign-in: ' .. tostring(err)) end
+      end)),
+    },
     { key = 'n', action = once(wezterm.action_callback(function(window, pane) api.prompt_new(window, pane) end)) },
     { key = 'b', action = once(send 'back') },
     { key = 'f', action = once(send 'forward') },

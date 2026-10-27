@@ -942,3 +942,12 @@ T.test('S.web: defaults, valid values, and invalid ones falling back', function(
   T.fresh()
   T.eq(web_settings(require 'wezterm', { web = { search = '' } }).search, '', 'an explicit empty string is no search')
 end)
+
+T.test('g opens the sign-in helper in a new tab', function(wz)
+  local config, win = setup(wz, { { id = 1, width = 100, height = 50 } })
+  wz.stub.perform(wz.stub.key(config.key_tables.web, 'g'), win, wz.mux.get_pane(1))
+  local a = win.actions[#win.actions].action
+  T.eq(a.kind, 'SpawnCommandInNewTab')
+  T.eq(a.args.args[1], 'bash')
+  T.ok(a.args.args[3]:find('/.local/bin/hivegrid-web-signin', 1, true), 'runs the helper')
+end)
