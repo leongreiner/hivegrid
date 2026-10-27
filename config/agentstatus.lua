@@ -285,6 +285,23 @@ local function refresh_slow(pane, st, now)
   st.label = basename(st.cwd) .. (st.proc ~= '' and (':' .. st.proc) or '')
 end
 
+-- A web pane (the Hivegrid fork's browser pane) has no process, screen text or title protocol
+-- to read: it is a state of its own, never working, done or bell. Its row names the page's
+-- host and carries the page title.
+local function scan_web(pane, st, now)
+  local okc, cwd = pcall(pane.get_current_working_dir, pane)
+  local url = okc and theme.web_url(cwd, true) or nil
+  local okt, title = pcall(pane.get_title, pane)
+  st.proc = 'web'
+  st.cwd = url and theme.web_label(url) or ''
+  st.label = st.cwd .. ':web'
+  st.heading = okt and type(title) == 'string' and title or ''
+  st.kind, st.state, st.unseen, st.reason = 'web', nil, false, nil
+  if st.kind ~= st.last_kind then
+    st.last_kind, st.since = st.kind, now
+  end
+end
+
 -- Refresh state for every pane in the window; returns the ordered tab list
 -- ({ tab, id, entries = {{ pane, info, st, num }} }).
 local function scan(window, force)
@@ -316,6 +333,11 @@ local function scan(window, force)
         panes[id] = st
       end
       st.wid, st.num = wid, numbers[i]
+      if theme.is_web(pane) then
+        scan_web(pane, st, now)
+        entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
+        goto next_pane
+      end
 
       local ok, text = pcall(pane.get_lines_as_text, pane, LINES)
       text = ok and text or ''
@@ -380,6 +402,7 @@ local function scan(window, force)
       st.state = (not focused) and st.kind or nil
 
       entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
+      ::next_pane::
     end
     local lead
     for _, e in ipairs(entries) do

@@ -47,6 +47,18 @@ def mix(a, b, t):
     return "#%02x%02x%02x" % (round(ra + (rb - ra) * t), round(ga + (gb - ga) * t), round(ba + (bb - ba) * t))
 
 
+# Never drawn: control characters (category Cc: ESC, BEL, C1 ...), the line/paragraph separators and
+# the bidi controls. Page titles and URLs reach the panels from the outside; a drawn ESC would
+# become an escape sequence in the panel's pty (OSC 52 clipboard writes, OSC 1337 user vars).
+_UNSAFE = {c: None for c in (*range(0x20), *range(0x7F, 0xA0), 0x61C, 0x200E, 0x200F, 0x2028, 0x2029,
+                             *range(0x202A, 0x202F), *range(0x2066, 0x206A))}
+
+
+def printable_text(text):
+    """`text` without the characters the canvas never draws (see _UNSAFE)."""
+    return text.translate(_UNSAFE)
+
+
 def char_width(ch):
     """Terminal cells of `ch`: 0 for combining marks, joiners and variation selectors, 2 for East
     Asian wide/fullwidth, else 1. Mirrors WezTerm's default layout (unicode_version 9, where
@@ -54,7 +66,7 @@ def char_width(ch):
     carry emoji."""
     o = ord(ch)
     if o < 0x300:
-        return 1
+        return 0 if o < 0x20 or 0x7F <= o < 0xA0 else 1  # control characters are never drawn
     if unicodedata.combining(ch) or o in (0x200B, 0x200C, 0x200D, 0xFE0E, 0xFE0F) or unicodedata.category(ch) == "Mn":
         return 0
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
@@ -110,7 +122,7 @@ class Canvas:
             return 0
         row = self.cells[y]
         n, base = 0, None  # base: cell of the last char written, for zero-width chars to join
-        for ch in text:
+        for ch in printable_text(text):
             cw = char_width(ch)
             if cw == 0:
                 if base is not None:
@@ -177,7 +189,7 @@ class Canvas:
                 style = (fg, bg, attrs)
                 if style != last:
                     if run:
-                        out.append("".join(run))
+                        out.append(printable_text("".join(run)))
                         run = []
                     codes = ["0"]
                     if attrs & BOLD:
@@ -193,7 +205,7 @@ class Canvas:
                     out.append("\x1b[" + ";".join(codes) + "m")
                     last = style
                 run.append(ch)
-            out.append("".join(run))
+            out.append(printable_text("".join(run)))
         out.append("\x1b[0m")
         return "".join(out)
 
@@ -587,8 +599,9 @@ STATES = {
     "working": State("↻", "working", "accent", 5),
     "idle": State("·", "idle", "grey", 6),
     "exited": State("○", "exited", "muted", 7),
-    "other": State("›", "running", "dim", 8),
-    "shell": State("›", "shell", "dim", 9),
+    "web": State("◍", "web", "cyan", 8),
+    "other": State("›", "running", "dim", 9),
+    "shell": State("›", "shell", "dim", 10),
 }
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # drawn instead of ↻ while something runs, at 8 frames a second
 
@@ -1023,7 +1036,10 @@ class PromptModal(Modal):
 
     def key(self, ui, mods, key):
         if key == "Enter":
-            err = self.on_ok(self.text)
+            try:
+                err = self.on_ok(self.text)
+            except Exception as exc:  # noqa: BLE001 - a callback bug must not take the panel down
+                err = f"error: {exc}"
             if err:
                 self.error = err
                 return False

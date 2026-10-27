@@ -77,6 +77,18 @@ install_nerd_font() {
 }
 install_nerd_font || echo "warning: could not install DejaVuSansM Nerd Font Mono; see README (Install)" >&2
 
+# Web panes (the Hivegrid WezTerm build) drive Chrome or Chromium headless; nothing is installed for them.
+have_chrome() {
+  local c
+  [ -n "${HIVEGRID_CHROME:-}" ] && [ -x "$HIVEGRID_CHROME" ] && return 0
+  [ -x /opt/google/chrome/chrome ] && return 0
+  for c in google-chrome-stable google-chrome chromium chromium-browser; do
+    command -v "$c" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+have_chrome || echo "warning: web panes need Google Chrome or Chromium (set HIVEGRID_CHROME to its path); the rest of Hivegrid works without it" >&2
+
 rendered=$(mktemp)
 trap 'rm -f "$rendered"' EXIT
 sed -e "s|@HOME@|$HOME|g" -e "s|@WEZTERM@|$launcher_bin|g" "$repo/desktop/hivegrid.desktop.in" >"$rendered"

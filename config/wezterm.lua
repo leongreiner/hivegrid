@@ -236,6 +236,13 @@ local MODES = {
   omp_account = { 'ACCOUNT', P.amber, { { '1-9', 'start omp' }, { 'Esc', 'cancel' } } },
 }
 
+-- The web key table exists only on the Hivegrid build (config/web.lua).
+if theme.has_web then
+  MODES.web = { 'WEB', P.cyan, {
+    { 'l', 'location' }, { 'b', 'back' }, { 'f', 'fwd' }, { 'r', 'reload' }, { 'Esc', 'done' },
+  } }
+end
+
 -- Footer-style key hints on the header band: key in text, what it does in muted.
 local function hint_items(pairs_)
   local items = {}
@@ -434,6 +441,8 @@ for i, entry in ipairs(new_tabs) do
   })
 end
 
+local web -- set at the end, once the layouts exist (config/web.lua)
+
 -- How a binding reads in a menu: "LEADER+,", "CTRL+SHIFT+E".
 local function key_hint(name, default)
   local k = S.key(name, default)
@@ -448,6 +457,10 @@ local function plus_menu(window, pane)
     rows[#rows + 1] = { entry.label, 'LEADER+' .. i, function(w, p)
       w:perform_action(act.SpawnCommandInNewTab { args = entry.args }, p)
     end }
+  end
+  if web and web.enabled then
+    rows[#rows + 1] = { 'New web tab…', '', function(w, p) web.prompt_new(w, p, { where = 'tab' }) end }
+    rows[#rows + 1] = { 'Web pane here…', key_hint('web_leader', 'LEADER+w') .. ' n', function(w, p) web.prompt_new(w, p) end }
   end
   for _, entry in ipairs {
     { 'Agent hive', 'hive', 'hive_panel', 'LEADER+a' },
@@ -572,5 +585,8 @@ table.insert(config.keys, bound('hive_panel', 'LEADER+a', hive_action()))
 
 -- Overview dock: LEADER+o by default (settings key overview_toggle).
 overview = require('overview')(config, wezterm, as, sb, layouts)
+
+-- Web pane: LEADER+w table, links into a web pane, "+" menu rows (Hivegrid build only).
+web = require('web')(config, wezterm, sb, layouts)
 
 return config

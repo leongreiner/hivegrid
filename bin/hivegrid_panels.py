@@ -11,11 +11,11 @@ from collections import deque
 from pathlib import Path
 
 import hivegrid_ui as U
-from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome, state_dir
+from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome, is_web, state_dir, web_build_cached, web_label
 from hivegrid_settings_core import (
-    BINDINGS, PRESETS, VERSION, about_info, find_wezterm, cache_dir, check_binding, discover_accounts, effective_keys, format_combo,
-    merge_accounts, normalize, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
-    valid_label, wezterm_defaults,
+    BINDINGS, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding, discover_accounts, effective_keys,
+    format_combo, merge_accounts, normalize, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
+    valid_label, valid_profile, valid_search, wezterm_defaults,
 )
 
 ACCENTS = ["#4f9dff", "#38bdf8", "#34d399", "#fbbf24", "#a78bfa", "#f87171", "#f472b6", "#e5e7eb"]
@@ -92,14 +92,18 @@ class CaptureModal(U.Modal):
         return True
 
 
+WEB_ROWS = ("links", "search", "profile")
+WEB_LABELS = {"links": "Open links in", "search": "Search engine", "profile": "Default profile"}
+
+
 class SettingsPage(U.Page):
     title = "Settings"
-    SUBS = ["Theme", "Keys", "Accounts", "About"]
+    SUBS = ["Theme", "Keys", "Accounts", "Web", "About"]
 
     def __init__(self, model):
         self.model = model
         self.sub = 0
-        self.cursor = [list(PRESETS).index(model.theme["preset"]), 0, 0]
+        self.cursor = [list(PRESETS).index(model.theme["preset"]), 0, 0, 0]
         self.profiles = omp_profiles()
         self.wez_defaults = None
         self.about = None
@@ -108,6 +112,7 @@ class SettingsPage(U.Page):
         model.baseline = model.snapshot()
         self.found = []
         self.two_pane = False  # set by render: the wide layout (section list, list + detail)
+        self.web_built = None  # does this WezTerm have the web pane? (looked up when the Web section draws)
         self.rescan(None, quiet=True)
 
     # data ---------------------------------------------------------------------
@@ -153,7 +158,8 @@ class SettingsPage(U.Page):
             0: "↑↓ choose  Enter use  [/] accent  a custom accent  s save  ←→ section  q close",
             1: "↑↓ choose  Enter change  r reset  R reset all  s save  ←→ section  q close",
             2: "↑↓ choose  Space show/hide  e rename  p profile  d remove  a add  c rescan  s save  ←→ section  q close",
-            3: "↑↓/←→ section  F1-F5 panels  q close",
+            3: "↑↓ choose  Enter change  r reset  s save  ←→ section  q close",
+            4: "↑↓/←→ section  F1-F5 panels  q close",
         }[self.sub]
 
     def changed(self, ui, text):
@@ -205,13 +211,15 @@ class SettingsPage(U.Page):
                 self.reset_all(ui)
         elif self.sub == 2:
             self.accounts_key(ui, key)
+        elif self.sub == 3:
+            self.web_key(ui, key)
         elif key in ("UpArrow", "DownArrow"):
             # About has no list of its own: ↑↓ walk the sections, so the keyboard never dead-ends.
             self.sub = max(0, min(len(self.SUBS) - 1, self.sub + (1 if key == "DownArrow" else -1)))
 
     def wheel(self, ui, dy):
-        if self.sub in (0, 1, 2):
-            limit = {0: len(PRESETS), 1: len(BINDINGS), 2: len(self.model.accounts)}[self.sub] - 1
+        if self.sub in (0, 1, 2, 3):
+            limit = {0: len(PRESETS), 1: len(BINDINGS), 2: len(self.model.accounts), 3: len(WEB_ROWS)}[self.sub] - 1
             self.cursor[self.sub] = max(0, min(max(limit, 0), self.cursor[self.sub] + dy))
 
     # actions ------------------------------------------------------------------
@@ -407,6 +415,8 @@ class SettingsPage(U.Page):
         elif name == "Accounts":
             text = str(len(self.model.accounts)) + (f" · {len(self.found)} new" if self.found else "")
             dirty = self.model.accounts != saved[2]
+        elif name == "Web":
+            text, dirty = f"{self.model.web['links']} · {self.model.web['profile']}", self.model.web != saved[3]
         else:
             text, dirty = f"v{VERSION}", False
         return ("● " + text, "amber") if dirty else (text, "dim")
@@ -724,6 +734,78 @@ class SettingsPage(U.Page):
         text = "Space shows or hides it in the header; e renames, p picks the omp profile, d removes it."
         for k, line in enumerate(textwrap.wrap(text, max(w, 20))):
             cv.put(x, ry + 3 + k, line, p["muted"])
+
+    def web_key(self, ui, key):
+        c = self.cursor[3]
+        if key == "UpArrow":
+            self.cursor[3] = max(0, c - 1)
+        elif key == "DownArrow":
+            self.cursor[3] = min(len(WEB_ROWS) - 1, c + 1)
+        elif key in ("Enter", "Space"):
+            self.edit_web(ui, WEB_ROWS[c])
+        elif key == "r":
+            self.reset_web(ui, WEB_ROWS[c])
+
+    def set_web(self, ui, name, value):
+        self.model.web[name] = value
+        self.changed(ui, f"web {WEB_LABELS[name].lower()}: {value or '(none)'}")
+
+    def reset_web(self, ui, name):
+        self.set_web(ui, name, WEB_DEFAULTS[name])
+
+    def edit_web(self, ui, name):
+        if name == "links":  # two choices: a click switches
+            self.set_web(ui, name, "system" if self.model.web["links"] == "pane" else "pane")
+            return
+
+        def ok(text):
+            text = text.strip()
+            err = valid_profile(text) if name == "profile" else valid_search(text)
+            if err:
+                return err
+            self.set_web(ui, name, text)
+            return None
+        hint = "e.g. work, private-research" if name == "profile" else "e.g. https://duckduckgo.com/?q=%s ; empty = no search"
+        ui.open_modal(U.PromptModal(f"Web: {WEB_LABELS[name].lower()}", self.model.web[name], ok, hint))
+
+    def web_value(self, name):
+        value = self.model.web[name]
+        if name == "links":
+            return "a web pane beside the terminal" if value == "pane" else "the system browser"
+        return value or "(none: a location that is no URL is refused)"
+
+    WEB_TW = 74  # label 34, value 38, plus the marker columns
+
+    def draw_web(self, ui, cv, x, y, w, h):
+        p = ui.pal
+        cur = self.cursor[3] = max(0, min(self.cursor[3], len(WEB_ROWS) - 1))
+        tw = self.WEB_TW
+        self.table_head(ui, cv, x, y, tw, ((2, "Setting"), (36, "Value")))
+        for i, name in enumerate(WEB_ROWS):
+            row = y + 2 + i
+            sel = i == cur
+            changed = self.model.web[name] != WEB_DEFAULTS[name]
+            r = U.list_row(cv, p, row, x=x, w=tw, selected=sel, bg=p["base"], name=WEB_LABELS[name],
+                           hit=lambda b, i=i: self.cursor.__setitem__(3, i))
+            cv.put(x + 36, row, fit(self.web_value(name), tw - 38), p["amber"] if changed else (p["bright"] if sel else p["text"]), r.bg,
+                   BOLD if changed else 0)
+            cv.hit(x + 36, row, tw - 38, 1, lambda b, n=name, i=i: (self.cursor.__setitem__(3, i), self.edit_web(ui, n)))
+            bx = x + tw + 2
+            bx += ui.button(cv, bx, row, "Switch" if name == "links" else "Edit…", lambda b, n=name: self.edit_web(ui, n),
+                            accent=sel) + 1
+            if changed:
+                ui.button(cv, bx, row, "Reset", lambda b, n=name: self.reset_web(ui, n))
+        note = ("Web panes need Google Chrome or Chromium (HIVEGRID_CHROME names another). Cookies and logins of a "
+                "profile live in ~/.local/share/hivegrid/web/profile-<name>. Save writes settings.json and WezTerm reloads it.")
+        lines = textwrap.wrap(note, max(tw - 2, 20))
+        for k, line in enumerate(lines):
+            cv.put(x + 2, y + 3 + len(WEB_ROWS) + k, line, p["muted"])
+        if self.web_built is None:
+            self.web_built = web_build_cached()  # None while a thread scans the binaries: no hint yet
+        if self.web_built is False:
+            cv.put(x + 2, y + 4 + len(WEB_ROWS) + len(lines),
+                   fit("This WezTerm has no web pane (the Hivegrid build with the web feature adds it): these settings "
+                       "apply once it does.", max(w - 4, 20)), p["amber"])
 
     def draw_about(self, ui, cv, x, y, w, h):
         p = ui.pal
@@ -1134,7 +1216,16 @@ def parse_panes(text, fg, home=None):
         win = pane.get("window_id", 0)
         windows.setdefault(win, len(windows) + 1)
         tabs.setdefault(win, {}).setdefault(pane.get("tab_id"), len(tabs[win]) + 1)
-        tty = str(pane.get("tty_name", "")).replace("/dev/", "")
+        if is_web(pane):  # the fork's web pane: no terminal, its page URL as the directory
+            rows.append({
+                "pane": pane.get("pane_id"), "tab": tabs[win][pane.get("tab_id")], "window": windows[win],
+                "proc": "web", "profile": "", "profile_set": False,
+                "cwd": U.printable_text(web_label(pane.get("cwd"))),
+                "title": U.printable_text(str(pane.get("title", ""))), "age": 0, "active": bool(pane.get("is_active")),
+                "agent": False, "idle": False,
+            })
+            continue
+        tty = str(pane.get("tty_name") or "").replace("/dev/", "")
         pid, comm, etimes, args = fg.get(tty, (None, "", 0, ""))
         if is_chrome(comm, args):
             continue

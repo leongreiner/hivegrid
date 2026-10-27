@@ -20,6 +20,9 @@ local stub = {
   panes = {}, tabs = {}, windows = {}, -- mux registry (filled by the fake builders)
   fork = false,      -- true: format accepts the Hivegrid fork's Click/ClickEnd items
   activations = {},  -- pane ids in activation order (pane:activate())
+  opened = {},       -- urls handed to wezterm.open_with
+  probes = 0,        -- web-pane capability probes run (see run_child_process)
+  web = false,       -- true: the wezterm cli has the web pane (`split-pane --url`)
 }
 wezterm.stub = stub
 
@@ -30,6 +33,28 @@ local function copy(t)
   local out = {}
   for k, v in pairs(t) do out[k] = v end
   return out
+end
+
+-- The probe theme.has_web runs (`<exe> cli split-pane --help`) goes through io.popen, because a
+-- module body cannot call the yielding run_child_process. It is answered here without a child
+-- process: counted in stub.probes and answered by stub.web (true: the help lists --url, as the
+-- Hivegrid fork with the web pane does). Other popen commands run for real.
+T._probe_stub = stub
+if not T._popen_wrapped then
+  T._popen_wrapped = true
+  local real_popen = io.popen
+  io.popen = function(cmd, mode)
+    if type(cmd) == 'string' and cmd:find(' cli split-pane --help', 1, true) then
+      local st = T._probe_stub
+      st.probes = st.probes + 1
+      local text = st.web and 'OPTIONS: --url <URL>\n' or 'OPTIONS: --cwd <CWD>\n'
+      return {
+        read = function() return text end,
+        close = function() return true end,
+      }
+    end
+    return real_popen(cmd, mode)
+  end
 end
 
 function wezterm.run_child_process(argv)
@@ -298,6 +323,7 @@ wezterm.target_triple = 'x86_64-unknown-linux-gnu'
 function wezterm.hostname() return 'testhost' end
 function wezterm.add_to_config_reload_watch_list(p) stub.watch[#stub.watch + 1] = p end
 function wezterm.reload_configuration() stub.reloads = stub.reloads + 1 end
+function wezterm.open_with(url) stub.opened[#stub.opened + 1] = url end
 function wezterm.config_builder() return {} end
 function wezterm.font(...) return { font = { ... } } end
 function wezterm.font_with_fallback(...) return { font_with_fallback = { ... } } end
@@ -445,7 +471,10 @@ end
 
 -- Fake objects ----------------------------------------------------------------------
 -- fake.pane{ id, title, text, cwd, process_name, process_info, unseen, user_vars, dims }
---   records: p.sent (send_text), p.activated (count), p.moved_to_new_tab
+--   cwd: a path string (becomes a file: Url object) or a table / userdata a test wants
+--   returned as is, e.g. wz.fake.url('https://example.com/')
+--   records: p.sent (send_text), p.activated (count), p.moved_to_new_tab, p.splits (pane:split
+--   requests; the new pane of a `hivegrid:web <url>` request is a web pane)
 -- fake.tab{ id, title, panes = { { pane = p | id = n, left, top, width, height,
 --   active, zoomed }, ... } }  -> tab.rows is the mutable layout; tab:set_rows(rows)
 -- fake.window{ id, tabs = { tab, ... }, active = index, focused, dims, key_table }
@@ -455,9 +484,22 @@ local fake = {}
 wezterm.fake = fake
 local next_id = 1000
 
+-- A page URL as WezTerm's Url object has it: scheme, host (without the port), port and path
+-- fields, tostring giving the whole URL, and no href field.
+function fake.url(href)
+  local scheme, authority, path = href:match('^(%a[%w+.-]*)://([^/?#]*)([^?#]*)')
+  local u = { scheme = scheme or href:match('^(%a[%w+.-]*):'), path = path }
+  if authority then
+    u.host, u.port = authority:match('^(.-):(%d+)$')
+    u.host = u.host or authority
+    u.port = tonumber(u.port)
+  end
+  return setmetatable(u, { __tostring = function() return href end })
+end
+
 function fake.pane(o)
   o = o or {}
-  local p = { sent = {}, activated = 0, moved_to_new_tab = 0, o = o }
+  local p = { sent = {}, activated = 0, moved_to_new_tab = 0, splits = {}, o = o }
   if not o.id then
     next_id = next_id + 1
     o.id = next_id
@@ -469,7 +511,8 @@ function fake.pane(o)
   function p:get_text_from_region() return o.text or '' end
   function p:get_current_working_dir()
     if type(o.cwd) == 'string' then
-      return { file_path = o.cwd, path = o.cwd, scheme = 'file', href = 'file://' .. o.cwd }
+      return setmetatable({ file_path = o.cwd, path = o.cwd, scheme = 'file' },
+        { __tostring = function() return 'file://' .. o.cwd end })
     end
     return o.cwd
   end
@@ -493,6 +536,40 @@ function fake.pane(o)
     end
   end
   function p:move_to_new_tab() self.moved_to_new_tab = self.moved_to_new_tab + 1 end
+  -- Records the request and adds the new pane to the tab, taking the second half of this
+  -- pane's area (right of it, or below it).
+  function p:split(opts)
+    self.splits[#self.splits + 1] = opts
+    next_id = next_id + 1
+    local po = { id = next_id }
+    local url = opts.args and opts.args[1] == 'hivegrid:web' and opts.args[2]
+    if url then
+      po.user_vars = { hivegrid_web = '1' }
+      po.cwd = fake.url(url)
+    end
+    local new = fake.pane(po)
+    local tab = self._tab
+    if tab then
+      for _, r in ipairs(tab.rows) do
+        if r.pane == self then
+          local row = { pane = new, left = r.left, top = r.top, width = r.width, height = r.height, active = false, zoomed = false }
+          if opts.direction == 'Right' then
+            row.width = r.width // 2
+            r.width = r.width - row.width - 1
+            row.left = r.left + r.width + 1
+          else
+            row.height = r.height // 2
+            r.height = r.height - row.height - 1
+            row.top = r.top + r.height + 1
+          end
+          new._tab = tab
+          tab.rows[#tab.rows + 1] = row
+          break
+        end
+      end
+    end
+    return new
+  end
   function p:tab() return self._tab end
   function p:window() return self._tab and self._tab._window and self._tab._window:mux_window() end
   stub.panes[o.id] = p

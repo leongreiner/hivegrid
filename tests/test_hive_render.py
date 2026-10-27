@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 # The block-character cells unless a test asks for image cells (images=True): the result must
 # not depend on the terminal the tests run in.
 os.environ["HIVEGRID_NO_IMAGES"] = "1"
+import hivegrid_agents as A  # noqa: E402
 import hivegrid_hex as X  # noqa: E402
 import hivegrid_hive as HV  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
@@ -49,6 +50,7 @@ class FakeCore:
         self.calls = []
         self.screen = {}
         self.spawn_result = 99
+        self.web_result = 98
         self.origin_result = (10, 0, 0)
         self.gather_result = (True, "gathered 3 agents")
         self.send_result = (True, "sent")
@@ -90,6 +92,18 @@ class FakeCore:
     def answer_plan_review(self, agent, choice, feedback=None, role=None):
         self.calls.append(("answer", agent.pane, choice, feedback))
         return True, "sent"
+
+    def normalize_url(self, text, search=""):
+        return A.normalize_url(text, search)
+
+    web_supported = True
+
+    def web_build(self):
+        return self.web_supported
+
+    def spawn_web(self, url, profile=None):
+        self.calls.append(("web", url, profile))
+        return self.web_result
 
     def actions(self):
         return [c for c in self.calls if c[0] != "peek"]
@@ -1152,6 +1166,91 @@ class ImageCells(Base):
         self.ui.draw()
         self.assertIsNone(page.art_form())
         self.assertEqual(self.ui.cv.images, [])
+
+
+class WebChip(Base):
+    """`+ web` (and `w`): a URL prompt, then a web pane in the tab the hive was opened over."""
+
+    def type_url(self, text):
+        for ch in text:
+            self.send(key("Space") if ch == " " else key(ch))
+        self.send(key("Enter"))
+
+    def test_w_asks_for_a_location_and_opens_it(self):
+        self.make()
+        self.page.focus = False
+        self.send(key("w"))
+        self.assertIsInstance(self.ui.modal, U.PromptModal)
+        self.type_url("example.com")
+        self.assertIsNone(self.ui.modal)
+        self.assertEqual(self.core.actions(), [("web", "https://example.com", None)])
+        self.assertFalse(self.ui.message_error)
+
+    def test_settings_give_the_profile_and_the_search_engine(self):
+        self.make()
+        self.page.model.web = {"links": "pane", "profile": "work", "search": "https://duck.example/?q=%s"}
+        self.page.focus = False
+        self.send(key("w"))
+        self.type_url("rust ownership")
+        self.assertEqual(self.core.actions(), [("web", "https://duck.example/?q=rust%20ownership", "work")])
+
+    def test_a_location_that_is_no_url_stays_in_the_prompt_with_the_reason(self):
+        self.make()
+        self.page.focus = False
+        self.send(key("w"))
+        self.type_url("javascript:alert(1)")
+        self.assertIsInstance(self.ui.modal, U.PromptModal, "the prompt stays open")
+        self.assertIn("javascript", self.ui.modal.error)
+        self.assertEqual(self.core.actions(), [])
+
+    def test_a_failed_open_reports(self):
+        self.make()
+        self.core.web_result = None
+        self.page.focus = False
+        self.send(key("w"))
+        self.type_url("example.com")
+        self.assertTrue(self.ui.message_error)
+        self.assertIn("web pane", self.ui.message)
+
+    def test_the_chip_is_in_the_legend_and_clicks_open_the_prompt(self):
+        self.make(size=(100, 30))
+        legend = self.draw()[2]
+        self.assertIn("+ web", legend)
+        self.assertIn("7 agents", legend, "the counts stay")
+        x = legend.index("+ web") + 2
+        self.ui.handle(click(x, 2))
+        self.assertIsInstance(self.ui.modal, U.PromptModal)
+
+    def test_a_wezterm_without_the_web_pane_has_no_chip_and_w_says_why(self):
+        self.make(size=(100, 30))
+        self.core.web_supported = False
+        self.page._web = None
+        self.assertNotIn("+ web", self.draw()[2])
+        self.assertIn("7 agents", self.draw()[2])
+        self.page.focus = False
+        self.send(key("w"))
+        self.assertIsNone(self.ui.modal)
+        self.assertTrue(self.ui.message_error)
+        self.assertEqual(self.core.actions(), [])
+
+    def test_an_error_in_the_prompt_callback_keeps_the_panel_alive(self):
+        self.make()
+        self.page.focus = False
+        self.core.normalize_url = lambda text, search="": 1 / 0
+        self.send(key("w"))
+        self.type_url("example.com")
+        self.assertIsInstance(self.ui.modal, U.PromptModal)
+        self.assertTrue(self.ui.modal.error)
+
+    def test_the_chip_gives_way_when_the_legend_is_full(self):
+        self.make(size=(60, 24))
+        legend = self.draw()[2]
+        self.assertIn("+ web", legend, "the compact counts leave room for it")
+        self.assertIn("↻2", legend)
+        self.make(size=(34, 24))
+        legend = self.draw()[2]
+        self.assertNotIn("+ web", legend)
+        self.assertIn("7 agents", legend, "the chip never pushes the counts out")
 
 
 if __name__ == "__main__":

@@ -104,6 +104,7 @@ BINDINGS = {
     "settings": ("Settings panel", "LEADER+,", "leader"),
     "usage_panel": ("Usage history panel", "LEADER+h", "leader"),
     "hive_panel": ("Agent hive panel", "LEADER+a", "leader"),
+    "web_leader": ("Web pane: commands", "LEADER+w", "leader"),
 }
 
 # Bindings of the Hivegrid config that this panel does not change.
@@ -121,6 +122,46 @@ FIXED_BINDINGS = [
     ("LEADER+n", "next agent"), ("LEADER+g", "agent picker"), ("LEADER+r", "resize mode"),
     ("LEADER+e", "equalize panes"), ("LEADER+p", "pane mode"), ("LEADER+b", "broadcast"),
 ]
+
+# ---- web pane ----------------------------------------------------------------------
+
+# settings.json "web": links "pane" (an http(s) link clicked in a terminal opens in a web pane)
+# or "system"; search is the URL template (with %s) a location that is no URL becomes, "" = none;
+# profile names the browser profile (cookies, logins) new web panes use. Mirrors config/settings.lua.
+WEB_DEFAULTS = {"links": "pane", "search": "", "profile": "main"}
+WEB_LINKS = ("pane", "system")
+
+
+def valid_profile(name):
+    """None when `name` can name a browser profile (it becomes a directory name), else the reason."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", name or ""):
+        return "letters, digits, . _ - only, starting with a letter or digit, at most 32"
+    return None
+
+
+def valid_search(template):
+    """None when `template` is empty or a search URL template, else the reason."""
+    if not template:
+        return None
+    if "%s" not in template:
+        return "must contain %s, where the search words go"
+    if not re.match(r"https?://", template):
+        return "must start with http:// or https://"
+    return None
+
+
+def web_settings(stored):
+    """The effective web settings of the stored `web` value: defaults for anything missing or invalid."""
+    stored = stored if isinstance(stored, dict) else {}
+    out = dict(WEB_DEFAULTS)
+    if stored.get("links") in WEB_LINKS:
+        out["links"] = stored["links"]
+    if isinstance(stored.get("search"), str) and valid_search(stored["search"]) is None:
+        out["search"] = stored["search"]
+    if isinstance(stored.get("profile"), str) and valid_profile(stored["profile"]) is None:
+        out["profile"] = stored["profile"]
+    return out
+
 
 MOD_ORDER = ["CTRL", "ALT", "SHIFT", "SUPER", "LEADER"]
 MOD_ALIASES = {"CTRL": "CTRL", "CONTROL": "CTRL", "ALT": "ALT", "OPT": "ALT", "META": "ALT",
@@ -431,15 +472,30 @@ class Settings:
     def accounts(self):
         return merge_accounts(self.stored_accounts(), discover_accounts())
 
-    def effective(self):
-        return {"version": SCHEMA, "theme": self.theme(), "keys": self.keys(), "accounts": self.accounts()}
+    def web(self):
+        return web_settings(self.data.get("web"))
 
-    def write(self, theme, keys, accounts):
+    def effective(self):
+        return {"version": SCHEMA, "theme": self.theme(), "keys": self.keys(), "accounts": self.accounts(),
+                "web": self.web()}
+
+    def write(self, theme, keys, accounts, web):
         data = dict(self.data)
         data["version"] = SCHEMA
         data["theme"] = theme
         data["keys"] = {n: v for n, v in keys.items() if v != normalize(BINDINGS[n][1])}
         data["accounts"] = accounts
+        # Only non-default web values are written (like keys); entries this version does not know stay.
+        web_data = dict(data["web"]) if isinstance(data.get("web"), dict) else {}
+        for k, v in web.items():
+            if v == WEB_DEFAULTS[k]:
+                web_data.pop(k, None)
+            else:
+                web_data[k] = v
+        if web_data:
+            data["web"] = web_data
+        else:
+            data.pop("web", None)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".settings.", suffix=".tmp")
         try:
@@ -522,10 +578,11 @@ class Model:
         self.theme = {"preset": t["preset"], "accent": t["accent"]}
         self.keys = settings.keys()
         self.accounts = settings.accounts()
+        self.web = settings.web()
         self.baseline = self.snapshot()
 
     def snapshot(self):
-        return json.dumps([self.theme, self.keys, self.accounts], sort_keys=True)
+        return json.dumps([self.theme, self.keys, self.accounts, self.web], sort_keys=True)
 
     @property
     def dirty(self):
@@ -539,7 +596,7 @@ class Model:
         if self.settings.newer:
             return False, "settings.json was written by a newer version; not overwriting it"
         try:
-            self.settings.write(self.current_theme(), self.keys, self.accounts)
+            self.settings.write(self.current_theme(), self.keys, self.accounts, self.web)
         except OSError as exc:
             return False, f"save failed: {exc.strerror or exc}"
         self.baseline = self.snapshot()

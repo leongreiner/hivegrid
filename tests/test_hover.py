@@ -473,9 +473,9 @@ class DockCloseTest(unittest.TestCase):
         dock.draw(self.SIZE)
 
     def test_close_rule(self):
-        safe = [k for k in ("shell", "exited", "done", "idle", "working", "busy", "attention", "bell", "other", None)
+        safe = [k for k in ("shell", "exited", "done", "idle", "web", "working", "busy", "attention", "bell", "other", None)
                 if not D.close_need({"kind": k})]
-        self.assertEqual(safe, ["shell", "exited", "done", "idle"])
+        self.assertEqual(safe, ["shell", "exited", "done", "idle", "web"])
 
     def test_questions(self):
         def texts(pane_id=None, panes=self.DOC["panes"]):

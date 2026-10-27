@@ -361,9 +361,15 @@ class Tiler:
         else:
             new = self.next_id
             self.next_id += 1
-            self.panes[new] = gpane(new, 0, 0, 1, 1, tab=tab)
-            self.cmd = list(a[a.index("--") + 1:])
-            self.cwd = a[a.index("--cwd") + 1]
+            if "--url" in a:  # a web pane: no tty, the page URL as its directory
+                self.panes[new] = dict(gpane(new, 0, 0, 1, 1, tab=tab, title="Page"), tty_name=None,
+                                       cwd=a[a.index("--url") + 1])
+                self.url = a[a.index("--url") + 1]
+                self.profile = a[a.index("--profile") + 1] if "--profile" in a else None
+            else:
+                self.panes[new] = gpane(new, 0, 0, 1, 1, tab=tab)
+                self.cmd = list(a[a.index("--") + 1:])
+                self.cwd = a[a.index("--cwd") + 1]
             for i in self.ids(tab):  # a split focuses the new pane
                 self.panes[i]["is_active"] = False
             self.panes[new]["is_active"] = True

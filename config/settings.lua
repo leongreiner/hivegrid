@@ -4,6 +4,8 @@
 --   S.theme_terminal()  -> overrides for theme.T (colours, ansi, brights)
 --   S.key(name, default) -> { key = 'f', mods = 'CTRL' } from "CTRL+f" style strings (mods nil
 --                           when the binding has none); `default` is used when the file has no entry
+--   S.web               -> { links = 'pane' | 'system', search = URL template with %s or '',
+--                          profile = browser profile name } (see below)
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
 --                          list plus any ~/.claude[-X] directory holding a .credentials.json that
 --                          the list does not mention (main first, then by label). An account pairs
@@ -86,6 +88,19 @@ local function build(wezterm)
     local keys = type(data.keys) == 'table' and data.keys or {}
     return parse_combo(keys[name]) or parse_combo(default)
   end
+
+  -- Web pane settings (key "web" of the file): links = 'pane' opens http(s) links clicked in a
+  -- terminal inside a web pane, 'system' leaves them to the system browser; search is the
+  -- http(s) URL template (with %s) a location that is no URL becomes, empty = no search; profile
+  -- names the browser profile (cookies and logins) new web panes use.
+  local web = type(data.web) == 'table' and data.web or {}
+  S.web = {
+    links = web.links == 'system' and 'system' or 'pane',
+    search = (type(web.search) == 'string' and web.search:find('%s', 1, true) and web.search:match('^https?://'))
+      and web.search or '',
+    profile = (type(web.profile) == 'string' and web.profile:match('^%w[%w._-]*$') and #web.profile <= 32)
+      and web.profile or 'main',
+  }
 
   -- Accounts ------------------------------------------------------------------
 

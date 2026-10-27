@@ -62,8 +62,9 @@ for kind, s in pairs {
   working = { '↻', 'working', 'accent', 5 },
   idle = { '·', 'idle', 'grey', 6 },
   exited = { '○', 'exited', 'muted', 7 },
-  other = { '›', 'running', 'dim', 8 },
-  shell = { '›', 'shell', 'dim', 9 },
+  web = { '◍', 'web', 'cyan', 8 },
+  other = { '›', 'running', 'dim', 9 },
+  shell = { '›', 'shell', 'dim', 10 },
 } do
   M.STATES[kind] = { glyph = s[1], text = s[2], key = s[3], color = M.P[s[3]], rank = s[4] }
 end
@@ -174,6 +175,136 @@ end
 -- True when this WezTerm knows the Hivegrid fork's `Click` format item; stock WezTerm
 -- rejects it as an unknown FormatItem, so older binaries get plain, unclickable text.
 M.has_click = pcall(wezterm.format, { { Click = 'probe' } })
+
+-- True when this WezTerm has the web pane (the `hivegrid:web` spawn sentinel, `wezterm cli
+-- split-pane --url`, the `hgweb` control sequences): the Hivegrid fork with its web feature,
+-- not merely the fork. Stock WezTerm fails the Click probe above; a fork built before the web
+-- pane has the Click item but its `wezterm cli split-pane --help` lacks `--url`, which is what
+-- the second probe asks. `wezterm cli` loads this config too, so the answer is cached in
+-- $XDG_CACHE_HOME/hivegrid/web-probe (read with io.open: no child process while it is valid),
+-- keyed by the executables' paths and sizes and the version string (Lua cannot stat a file
+-- without a child process; the web feature changes the binary size). Every web entry point
+-- (config/web.lua, the "+" menu rows) is gated on this.
+local function file_size(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local size = f:seek('end')
+  f:close()
+  return size
+end
+
+local function probe_cache_path()
+  local base = os.getenv('XDG_CACHE_HOME')
+  if not base or base == '' then
+    local home = os.getenv('HOME')
+    if not home or home == '' then return nil end
+    base = home .. '/.cache'
+  end
+  return base .. '/hivegrid/web-probe'
+end
+
+local function cli_has_url_flag()
+  local dir = wezterm.executable_dir
+  local exe = dir .. '/wezterm'
+  local size = file_size(exe)
+  local key
+  if size then
+    key = table.concat({ exe, size, file_size(dir .. '/wezterm-gui') or '-', tostring(wezterm.version) }, '|')
+  else
+    exe = 'wezterm'
+  end
+  local path = key and probe_cache_path()
+  if path then
+    local f = io.open(path, 'rb')
+    if f then
+      local k, v = f:read('l'), f:read('l')
+      f:close()
+      if k == key and (v == '1' or v == '0') then return v == '1' end
+    end
+  end
+  -- io.popen, not wezterm.run_child_process: that yields, which a module body (running inside
+  -- require, a C call) cannot do.
+  local ok, out, success = pcall(function()
+    local h = io.popen("'" .. exe:gsub("'", "'\\''") .. "' cli split-pane --help 2>&1", 'r')
+    if not h then error('popen failed') end
+    local text = h:read('a')
+    local closed = h:close()
+    return text, closed == true
+  end)
+  local has = ok and success and (out or ''):find('--url', 1, true) ~= nil
+  -- Only an answer is kept; a probe that could not run (no GUI, broken binary) is asked again.
+  if path and ok and success then
+    local f = io.open(path, 'wb')
+    if not f then
+      os.execute("mkdir -p '" .. path:gsub('/[^/]*$', ''):gsub("'", "'\\''") .. "' 2>/dev/null")
+      f = io.open(path, 'wb')
+    end
+    if f then
+      f:write(key, '\n', has and '1' or '0', '\n')
+      f:close()
+    end
+  end
+  return has
+end
+M.has_web = M.has_click and cli_has_url_flag()
+
+-- The page a web pane shows, from the working directory the pane reports (the fork reports
+-- the page URL there; a terminal pane reports a file: URL, or nothing). A Url object is
+-- read through tostring (it has host, port and path fields but no href). Returns { href,
+-- scheme, host, path } for a non-file URL, nil for a file: URL (unless `allow_file`: a web
+-- pane may show a local page), a bare path or no value; `host` keeps a port
+-- ("localhost:3000") and user info is dropped.
+function M.web_url(cwd, allow_file)
+  if cwd == nil then return nil end
+  local ok, href = pcall(tostring, cwd)
+  if not ok or type(href) ~= 'string' then return nil end
+  local scheme, host, path = href:match('^(%a[%w+.-]*)://([^/?#]*)([^?#]*)')
+  scheme = scheme or href:match('^(%a[%w+.-]*):')
+  if not scheme or scheme == 'table' or (scheme == 'file' and not allow_file) then return nil end
+  return { href = href, scheme = scheme, host = (host or ''):gsub('^.*@', ''), path = path or '' }
+end
+
+-- What a pane list shows for a page: its host with the port (and path unless that is just
+-- "/"); a URL without a host (data:, about:) shows as itself, cut to 40 characters.
+function M.web_label(url, with_path)
+  if url.host ~= '' then
+    return url.host .. ((with_path and url.path ~= '' and url.path ~= '/') and url.path or '')
+  end
+  local text = url.href ~= '' and url.href or (url.scheme .. ':' .. url.path)
+  return (utf8.len(text) or #text) > 40 and (wezterm.truncate_right(text, 39) .. '…') or text
+end
+
+-- True for a web pane (the fork sets the user var hivegrid_web on it).
+function M.is_web(pane)
+  local ok, vars = pcall(function() return pane:get_user_vars() end)
+  return ok and type(vars) == 'table' and vars.hivegrid_web == '1'
+end
+
+-- The WEZTERM_UNIX_SOCKET of the mux a pane belongs to (so `wezterm cli` aims at the right
+-- GUI instance), read from the environment of the pane's foreground process. A pane with no
+-- process of its own, a web pane, asks the other terminal panes of its tab instead. nil
+-- when none can say.
+function M.mux_socket(pane)
+  local function of(p)
+    local ok, info = pcall(function() return p:get_foreground_process_info() end)
+    local f = ok and info and info.pid and io.open('/proc/' .. info.pid .. '/environ', 'rb')
+    if not f then return nil end
+    local sock = f:read('a'):match('WEZTERM_UNIX_SOCKET=([^\0]+)')
+    f:close()
+    return sock
+  end
+  local sock = of(pane)
+  if sock then return sock end
+  local okt, tab = pcall(function() return pane:tab() end)
+  local okp, panes = pcall(function() return okt and tab and tab:panes() or {} end)
+  for _, p in ipairs(okp and panes or {}) do
+    if p:pane_id() ~= pane:pane_id() and not M.is_web(p) then
+      sock = of(p)
+      if sock then return sock end
+    end
+  end
+  return nil
+end
 
 -- Makes `items` a clickable region reported to the `status-click` event as `id`. A
 -- ResetAttributes inside `items` ends the region, so it is re-opened after each one.

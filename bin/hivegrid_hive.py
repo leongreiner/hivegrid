@@ -304,6 +304,7 @@ class HivePage(U.Page):
         self.hover = None          # id of the cell under the pointer (image cells draw it lighter)
         self.ry = None             # hex row pitch of the last layout (None: tiles)
         self.tile = None
+        self._web = None           # does this WezTerm have the web pane? (asked once, web_available)
 
     # core -------------------------------------------------------------------
     def core(self):
@@ -493,6 +494,45 @@ class HivePage(U.Page):
         ui.say("gathering agents into this tab…")
         self.background(work)
 
+    def web_available(self):
+        """True when this WezTerm has the web pane (the core looks for it in the binaries; asked once)."""
+        if self._web is None:
+            try:
+                self._web = bool(self.core().web_build())
+            except Exception:  # noqa: BLE001
+                self._web = False
+        return self._web
+
+    def spawn_web(self, ui):
+        """`+ web` / `w`: ask for a URL (or search) and open it in a new web pane of the tab the hive
+        was opened over. A page is no agent, so it never shows up as a cell here."""
+        if not self.web_available():
+            ui.say("this WezTerm has no web pane (it needs the Hivegrid build with the web feature)", True)
+            return
+        web = getattr(self.model, "web", None) or {}
+        profile, search = web.get("profile"), web.get("search", "")
+
+        def ok(text):
+            url, why = self.core().normalize_url(text, search)
+            if url is None:
+                return why
+
+            def work():
+                try:
+                    pane = self.core().spawn_web(url, profile=profile)
+                    err = "could not open a web pane (needs the Hivegrid WezTerm build and Chrome)"
+                except Exception as e:  # noqa: BLE001
+                    pane, err = None, str(e)
+                if pane is None:
+                    ui.say(err, True)
+                    return
+                ui.say(f"opened web pane {pane}")
+                self._force = True
+            ui.say("opening a web pane…")
+            self.background(work)
+            return None
+        ui.open_modal(U.PromptModal("New web pane", "", ok, "URL or search words; Enter opens"))
+
     def jump(self, ui, agent):
         try:
             ok = self.core().jump(agent)
@@ -674,6 +714,8 @@ class HivePage(U.Page):
     def command(self, ui, key, agent):
         if key == "n":
             self.spawn(ui)
+        elif key == "w":
+            self.spawn_web(ui)
         elif key == "t":
             self.toggle_mode()
         elif key == "c":
@@ -840,8 +882,12 @@ class HivePage(U.Page):
             cv.put(cx, y, text[0], col, None, BOLD)
             cv.put(cx + 1, y, text[1:], p["text"] if counts[s] else p["dim"])
             cx += len(text) + (2 if use_full else 1)
+        chip_w = U.chip_width("+ web")
+        show_chip = self.web_available() and cx + len(right) + chip_w + 2 < x + w
+        if show_chip:
+            U.chip(cv, p, x + w - 1 - chip_w, y, "+ web", kind="button", bg=p["base"], hit=lambda b: self.spawn_web(ui))
         if cx + len(right) < x + w:
-            cv.put(x + w - len(right) - 1, y, right, p["muted"])
+            cv.put(x + w - len(right) - 1 - (chip_w + 1 if show_chip else 0), y, right, p["muted"])
 
     def number(self, agent):
         """The agent's digit as the overview dock and the pane picker show it; prefixed with its

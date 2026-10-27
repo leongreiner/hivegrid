@@ -13,12 +13,15 @@ title-derived states and for remembering that an agent ran in a pane (a shell th
 import base64
 import json
 import math
+import mmap
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 from dataclasses import dataclass
 
 STATES = ("working", "busy", "done", "idle", "attention", "exited")
@@ -223,6 +226,114 @@ def is_chrome(comm, args):
     return comm in CHROME_PROGS or any(os.path.basename(t) in CHROME_PROGS for t in args.split()[:4])
 
 
+def is_web(pane):
+    """True for a web pane of the Hivegrid fork in a `wezterm cli list` entry. The fork lists a
+    boolean `is_web` (the Lua side's user var hivegrid_web); that marker decides when present.
+    Without it (a build that predates the marker) only a pane with no terminal (tty_name null)
+    whose directory is a non-file URL counts: SSH-domain and mux-client panes have no tty_name
+    either but report `file://host/...` from OSC 7, so a `file:` directory never makes a web
+    pane here."""
+    marker = pane.get("is_web")
+    if isinstance(marker, bool):
+        return marker
+    cwd = str(pane.get("cwd") or "")
+    scheme = re.match(r"([a-z][a-z0-9+.-]*):", cwd)
+    return not pane.get("tty_name") and scheme is not None and scheme.group(1) != "file"
+
+
+_web_builds = {}
+_web_scans = {}
+_web_lock = threading.Lock()
+
+
+def _scan_web_build(exe):
+    found = False
+    for path in (os.path.join(os.path.dirname(exe), "wezterm-gui"), exe):
+        try:
+            with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                found = found or mm.find(b"hivegrid_web") >= 0
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def web_build(exe=None):
+    """True when the wezterm of this terminal has the web pane: its binaries carry the user var
+    name `hivegrid_web`, which only the Hivegrid build with the web feature contains (the way the
+    settings panel's About recognises the fork). False when no wezterm is found. Scans the
+    binaries (tens of MB) on the first call, so a UI thread uses web_build_cached instead."""
+    exe = exe or find_wezterm()
+    if not exe:
+        return False
+    with _web_lock:
+        known = _web_builds.get(exe)
+    if known is None:
+        known = _scan_web_build(exe)
+        with _web_lock:
+            _web_builds[exe] = known
+    return known
+
+
+def web_build_cached(exe=None):
+    """Like web_build, never blocking: the cached answer, or None while a background thread is
+    still scanning the binaries (started by the first call). False when no wezterm is found."""
+    exe = exe or find_wezterm()
+    if not exe:
+        return False
+    with _web_lock:
+        if exe in _web_builds:
+            return _web_builds[exe]
+        if exe not in _web_scans:
+            t = threading.Thread(target=web_build, args=(exe,), daemon=True)
+            _web_scans[exe] = t
+            t.start()
+    return None
+
+
+def web_label(url):
+    """What a list shows for a page: host and path (the path only when it is more than "/"); a
+    URL without a host (data:, about:) as itself, cut to 40 characters."""
+    url = str(url or "")
+    m = re.match(r"[a-z][a-z0-9+.-]*://([^/?#]*)([^?#]*)", url)
+    if m and m.group(1):
+        return m.group(1) + (m.group(2) if m.group(2) != "/" else "")
+    return url if len(url) <= 40 else url[:39] + "…"
+
+
+_WEB_SCHEMES = {"http", "https", "file", "data"}
+
+
+def _local_host(host):
+    h = host.lower()
+    return (h == "localhost" or h.endswith(".localhost") or re.fullmatch(r"\d+\.\d+\.\d+\.\d+", h) is not None
+            or (h.startswith("[") and h.endswith("]")))
+
+
+def normalize_url(text, search=""):
+    """(url, None) for what a typed location stands for, else (None, reason). Twin of
+    normalize_url in config/web.lua: http, https, file and data URLs and exactly about:blank are kept; local hosts
+    ("localhost:3000", "127.0.0.1") get http://, other host names https://; anything else is a
+    search when `search` is a template holding %s. Other schemes (javascript:, chrome:, devtools:, about:flags, ...) are refused."""
+    text = (text or "").strip()
+    if not text:
+        return None, "nothing to open"
+    spaced = re.search(r"\s", text) is not None
+    hostport = (re.match(r"[^/?#:\s]+:\d+(?:$|[/?#])", text) or re.match(r"\[[0-9a-fA-F:.]+\]:\d+(?:$|[/?#])", text))
+    scheme = re.match(r"([A-Za-z][A-Za-z0-9+.-]*):", text)
+    if scheme and not hostport and not spaced:
+        if scheme.group(1).lower() in _WEB_SCHEMES or text.lower() == "about:blank":
+            return text, None
+        return None, f"cannot open a {scheme.group(1)}: address in a web pane"
+    if not spaced:
+        authority = re.match(r"[^/?#]+", text)  # none for "/x", "?q", "#a", "//host"
+        host = re.sub(r":\d+$", "", authority.group(0) if authority else "")
+        if _local_host(host) or (re.fullmatch(r"[A-Za-z0-9.-]+", host) and re.search(r"\.[A-Za-z]{2,}$", host)):
+            return ("http://" if _local_host(host) else "https://") + text, None
+    if search and "%s" in search:
+        return search.replace("%s", urllib.parse.quote(text, safe="")), None
+    return None, "not a web address, and no search engine is set (Settings, Web)"
+
+
 def _list_panes(run):
     text = run("list", "--format", "json")
     if not text:
@@ -235,7 +346,7 @@ def _list_panes(run):
 
 
 def _tty(pane):
-    return str(pane.get("tty_name", "")).replace("/dev/", "")
+    return str(pane.get("tty_name") or "").replace("/dev/", "")
 
 
 def _numbering(panes, fg):
@@ -292,6 +403,8 @@ def _collect(run, now, fg):
 
     for p in sorted(panes, key=lambda p: p["pane_id"]):
         pid_ = p["pane_id"]
+        if is_web(p):
+            continue  # a page is no agent (and has no terminal to look up)
         fpid, comm, _etimes, args = fg.get(_tty(p), (None, "", 0, ""))
         if is_chrome(comm, args):
             continue
@@ -678,14 +791,38 @@ def _agent_command():
     return ["bash", "-ic", f"{os.environ.get('HIVEGRID_AGENT_CMD') or 'omp'}; exec bash"]
 
 
-def _split_new(run, target_pane, cmd, cwd):
-    """Split target_pane (to the right when wide, else below) and run cmd in it; the new pane
-    follows target in reading order. Returns the new pane id or None."""
+def _split_new(run, target_pane, extra):
+    """Split target_pane (to the right when wide, else below) with split-pane's `extra` arguments
+    (the program to run, or the URL to show); the new pane follows target in reading order.
+    Returns the new pane id or None."""
     _x, _y, w, h = _geo(target_pane)
     direction = "--right" if w >= h * CELL_ASPECT else "--bottom"
-    out = run("split-pane", "--pane-id", str(target_pane["pane_id"]), direction, "--cwd", cwd, "--", *cmd)
+    out = run("split-pane", "--pane-id", str(target_pane["pane_id"]), direction, *extra)
     m = re.match(r"\s*(\d+)\s*$", out or "")
     return int(m.group(1)) if m else None
+
+
+def _spawn_in_origin(o, extra, run, out):
+    """Split a new pane off the last grid pane of the origin tab o = (pane, tab, window) with
+    split-pane's `extra` arguments, and re-grid the tab. Returns the new pane id or None."""
+    focus, tab, _window = o
+    new = None
+    for attempt in (0, 1):
+        panes = _list_panes(run)
+        in_tab = [p for p in panes or [] if p.get("tab_id") == tab]
+        if not in_tab:
+            return None
+        if _unzoom(run, in_tab):
+            in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab] or in_tab
+        grid = _grid_panes(in_tab, foreground_by_tty()) or [p for p in in_tab if p["pane_id"] == focus] or in_tab
+        new = _split_new(run, _reading_order(grid)[-1], extra)
+        if new is not None or attempt:
+            break
+        arrange(tab, run, focus, out)  # panes too small to split: re-grid, then try once more
+    if new is None:
+        return None
+    arrange(tab, run, focus, out)
+    return new
 
 
 def spawn_agent(cwd=None, near=None, run=wezterm_cli, out=None):
@@ -696,30 +833,24 @@ def spawn_agent(cwd=None, near=None, run=wezterm_cli, out=None):
     o = origin(run)
     if o is None:
         return None
-    focus, tab, _window = o
+    focus, _tab, _window = o
     if not cwd and near is not None and near.cwd:
         cwd = near.cwd
     if not cwd:
         here = next((p for p in _list_panes(run) or [] if p["pane_id"] == focus), None)
-        cwd = (_cwd_path(here.get("cwd")) if here else "") or os.environ.get("HOME", "/")
-    cmd = _agent_command()
-    new = None
-    for attempt in (0, 1):
-        panes = _list_panes(run)
-        in_tab = [p for p in panes or [] if p.get("tab_id") == tab]
-        if not in_tab:
-            return None
-        if _unzoom(run, in_tab):
-            in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab] or in_tab
-        grid = _grid_panes(in_tab, foreground_by_tty()) or [p for p in in_tab if p["pane_id"] == focus] or in_tab
-        new = _split_new(run, _reading_order(grid)[-1], cmd, cwd)
-        if new is not None or attempt:
-            break
-        arrange(tab, run, focus, out)  # panes too small to split: re-grid, then try once more
-    if new is None:
+        cwd = (_cwd_path(here.get("cwd")) if here and not is_web(here) else "") or os.environ.get("HOME", "/")
+    return _spawn_in_origin(o, ("--cwd", cwd, "--", *_agent_command()), run, out)
+
+
+def spawn_web(url, profile=None, run=wezterm_cli, out=None):
+    """Open `url` in a new web pane of the origin tab (`split-pane --url`, the Hivegrid fork's web
+    pane), placed and re-gridded like spawn_agent. `profile` names the browser profile (the fork's
+    default when None). Returns the new pane id or None."""
+    o = origin(run)
+    if o is None:
         return None
-    arrange(tab, run, focus, out)
-    return new
+    extra = ("--url", url) + (("--profile", profile) if profile else ())
+    return _spawn_in_origin(o, extra, run, out)
 
 
 def gather(origin_tab, run=wezterm_cli, out=None):

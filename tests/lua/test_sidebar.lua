@@ -391,6 +391,26 @@ T.test('the git view does not follow the grid while lazygit runs in it', functio
   T.eq(wz.GLOBAL.sidebar[key].dir, b)
 end)
 
+T.test('focusing a web pane leaves the git view alone and its page URL is no directory', function(wz)
+  T.clock(T0)
+  wz.stub.fork = true
+  local api = require('sidebar')({}, wz)
+  local a, b = T.tmpdir(), T.tmpdir()
+  wz.fake.pane { id = 6 }
+  -- file_path points at a real directory: only the web user var keeps it from being used
+  wz.fake.pane {
+    id = 1, user_vars = { hivegrid_web = '1' },
+    cwd = { scheme = 'https', host = 'localhost', path = '/', file_path = b, href = 'http://localhost:3000/' },
+  }
+  local win, tab = wz.fake.grid {}
+  column_mux(wz, tab, { { id = 5, width = 5 }, { id = 6, width = 44 }, { id = 1, width = 149, active = true } }, 100)
+  local key = tostring(tab:tab_id())
+  wz.GLOBAL.sidebar = { [key] = { handle = 5, content = 6, view = 'git', last = 1, dir = a } }
+  api.sync(win)
+  T.eq(cli_calls(wz, 'split-pane'), {}, 'no restart for a web pane')
+  T.eq(wz.GLOBAL.sidebar[key].dir, a, 'the directory is kept')
+end)
+
 T.test('Enter on a text file in the explorer opens an editor beside the grid pane used last', function(wz)
   T.clock(T0)
   wz.stub.on_child = function(argv)

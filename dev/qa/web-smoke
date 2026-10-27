@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Web pane smoke test in the QA sandbox (dev/qa/hgq, slot 12; local only: CI has no Xvfb, no fork
+build, no Chrome). It drives the real GUI (Xvfb, front_end=Software) and checks, with pixels and
+`wezterm cli`:
+
+  1 a data: page in a new pane shows its colour in the pane rectangle (bounding box = pane
+    size minus the focus border, centre and corner pixels), `cli list` shows tty_name null,
+    the URL as cwd and the URL as title, `cli get-text` line 0 is the URL
+  2 click, scroll, typing and an `input` field change the page title seen in `cli list`
+  3 window resize and zoom resize the page (innerWidth/innerHeight * devicePixelRatio == pane pixels), moving the
+    pane (`--move-pane-id`) moves its pixels, 3 terminals + 1 web pane arrange with the
+    pixels in the right place, the overview dock lists the web pane
+  4 a dialog and window.open do not hang or leak a window (policy: alert accepted, http(s)
+    popups loaded in the pane, other schemes ignored), killing Chrome shows the placeholder, Enter restarts it
+  5 kill-pane, killing the GUI with SIGKILL and a clean exit leave no Chrome behind
+
+  dev/qa/web-smoke [--keep]     --keep leaves slot 12 running for a look (hgq down 12 stops it)
+
+Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst), Chrome, and a fork build with web
+panes (HG_WEZTERM_DIR, e.g. OPT=/tmp/hgweb WRAPPER=/tmp/hgweb/hivegrid wezterm/build-hivegrid.sh).
+Screenshots land in /tmp/hivegrid-qa/s12/shots/web. HGQ_FRONT_END=WebGpu runs the same checks
+through the wgpu renderer (software Vulkan on a machine without a GPU path to Xvfb), and
+HGQ_XFT_DPI=144 at a window scale of 1.5. The checks adapt to the page's devicePixelRatio.
+"""
+import http.server
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+SLOT = 12
+PROFILE = "hgq-web-smoke"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HGQ = os.path.join(ROOT, "dev", "qa", "hgq")
+SHOTS = os.path.join(os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa"), f"s{SLOT}", "shots", "web")
+# The sandboxed GUI runs with HOME=$HGQ_ROOT/sSLOT/home (hgq), so its web profile lives there; the
+# real ~/.local/share/hivegrid is never touched.
+SANDBOX_HOME = os.path.join(os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa"), f"s{SLOT}", "home")
+PROFILE_DIR = os.path.join(SANDBOX_HOME, ".local", "share", "hivegrid", "web", f"profile-{PROFILE}")
+KEEP = "--keep" in sys.argv
+# The border drawn over the edge of the active web pane (render/web.rs FOCUS_BORDER_PX).
+BORDER = 2
+
+for k in ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET"):
+    os.environ.pop(k, None)
+
+fails = []
+shots = 0
+
+
+def hgq(*args, check=True, timeout=60):
+    r = subprocess.run([HGQ, *map(str, args)], capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"hgq {' '.join(map(str, args))}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def cli(*args, **kw):
+    return hgq("cli", SLOT, *args, **kw)
+
+
+def panes():
+    return json.loads(cli("list", "--format", "json"))
+
+
+def pane(pid):
+    for p in panes():
+        if p["pane_id"] == pid:
+            return p
+    return None
+
+
+def title(pid):
+    p = pane(pid)
+    return p["title"] if p else ""
+
+
+def waitfor(fn, what, timeout=15.0, every=0.25):
+    end = time.time() + timeout
+    last = None
+    while time.time() < end:
+        try:
+            last = fn()
+        except Exception as e:  # a poll that raises is a poll that is not there yet
+            last = None
+            err = e  # noqa: F841
+        if last:
+            return last
+        time.sleep(every)
+    return None
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  ({detail})" if detail and not ok else ""))
+    if not ok:
+        fails.append(f"{name} {detail}".strip())
+    return ok
+
+
+def shot(name, geo=None):
+    global shots
+    shots += 1
+    os.makedirs(SHOTS, exist_ok=True)
+    out = os.path.join(SHOTS, f"{shots:02d}-{name}.png")
+    hgq("shot", SLOT, out, *([geo] if geo else []))
+    return out
+
+
+def pixel(png, x, y):
+    out = subprocess.run(
+        ["convert", png, "-format", f"%[fx:int(255*p{{{x},{y}}}.r+0.5)],%[fx:int(255*p{{{x},{y}}}.g+0.5)],"
+         f"%[fx:int(255*p{{{x},{y}}}.b+0.5)]", "info:"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return tuple(int(v) for v in out.split(","))
+
+
+def near(c, want, tol=3):
+    return all(abs(a - b) <= tol for a, b in zip(c, want))
+
+
+def bbox(png, color, fuzz=2):
+    """(w, h, x, y) of the pixels within `fuzz`% of #rrggbb, or None."""
+    out = subprocess.run(
+        ["convert", png, "-fuzz", f"{fuzz}%", "-fill", "black", "+opaque", color, "-format", "%@", "info:"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    m = re.match(r"(\d+)x(\d+)\+(\d+)\+(\d+)$", out)
+    if not m:
+        return None
+    w, h, x, y = map(int, m.groups())
+    # ImageMagick reports a 1x1 box at the origin when nothing matched.
+    return (w, h, x, y) if (w, h, x, y) != (1, 1, 0, 0) else None
+
+
+def main_terminal():
+    """The widest terminal pane (not the bar or the dock)."""
+    return max((p for p in panes() if p["tty_name"]), key=lambda p: p["size"]["cols"])["pane_id"]
+
+
+def web_pane_ids():
+    return [p["pane_id"] for p in panes() if p["tty_name"] in (None, "")]
+
+
+def chrome_count():
+    out = subprocess.run(["pgrep", "-f", f"user-data-dir=.*profile-{PROFILE}"], capture_output=True, text=True).stdout
+    return len(out.split())
+
+
+def data_url(html):
+    return "data:text/html," + urllib.parse.quote(html)
+
+
+def apc(pid, command):
+    cli("send-text", "--no-paste", "--pane-id", pid, f"\x1b_hgweb;{command}\x1b\\")
+
+
+def open_web(url, where, target, private=False):
+    args = ["split-pane", "--pane-id", target, where, "--url", url, "--profile", PROFILE]
+    if private:
+        args.append("--private")
+    return int(cli(*args).strip())
+
+
+MAGENTA = data_url("<body style=background:#ff00ff>")
+PAGE = data_url(
+    """<body style="margin:0;background:#103060;height:4000px"><div style="position:fixed;left:40px;top:40px;width:80px;height:60px;background:#ff0000"></div>
+<input id=i style="position:fixed;left:200px;top:40px;width:200px"><script>var c=0,m='',k='';
+function t(){document.title='c'+c+' s'+Math.round(scrollY)+' k'+k+' m'+m+' v'+document.getElementById('i').value+' w'+innerWidth+'x'+innerHeight+' d'+devicePixelRatio}
+onclick=function(e){c++;m=Math.round(e.clientX)+','+Math.round(e.clientY);t()};onscroll=t;onresize=t;
+onkeydown=function(e){if(e.target.id!='i'){k+=e.key}t()};document.getElementById('i').oninput=t;t();</script></body>"""
+)
+class _Popup(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"<title>popup-loaded</title><body style=background:#ffaa00>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Popup)
+threading.Thread(target=_server.serve_forever, daemon=True).start()
+POPUP_URL = f"http://127.0.0.1:{_server.server_address[1]}/"
+
+DIALOGS = data_url(
+    "<body style=background:#00aa00><script>alert('hello');document.title='after-alert';"
+    "var ok=confirm('sure?');document.title+=' confirm='+ok;"
+    "var d=window.open('data:text/html,<title>data-popup</title>');document.title+=' data-open='+(d?'window':'null');"
+    "setTimeout(function(){var w=window.open('POPUP_URL');"
+    "document.title+=' open='+(w?'window':'null');},3000);</script></body>"
+).replace("POPUP_URL", POPUP_URL)
+
+
+SCALE = 1.0  # device pixels per css pixel, learnt from the first page that reports it
+
+
+ANIM = data_url(
+    "<body style=background:#202020><script>var n=0;function f(){n++;requestAnimationFrame(f)}f();"
+    "setInterval(function(){document.title='raf'+n},100);</script></body>"
+)
+
+
+COPYPAGE = data_url(
+    "<body style=background:#103060;color:white><p id=p>copyme-123</p><script>"
+    "getSelection().selectAllChildren(document.getElementById('p'));</script></body>"
+)
+
+
+def clipboard():
+    display = f":{90 + SLOT}"
+    r = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, text=True,
+                       env={**os.environ, "DISPLAY": display})
+    return r.stdout if r.returncode == 0 else None
+
+
+def raf(pid):
+    m = re.match(r"raf(\d+)$", title(pid))
+    return int(m.group(1)) if m else None
+
+
+def page_origin(png):
+    """Window pixel of the page's top left corner, from its red 80x60 css px box at css (40, 40)."""
+    b = bbox(png, "#ff0000", 3)
+    tol = 2 + 2 * SCALE  # JPEG edges eat a pixel or two on each side
+    if not b or abs(b[0] - 80 * SCALE) > tol or abs(b[1] - 60 * SCALE) > tol:
+        return None
+    return (round(b[2] - 40 * SCALE), round(b[3] - 40 * SCALE))
+
+
+def page_dims(pid):
+    m = re.search(r" w(\d+)x(\d+) d([\d.]+)", title(pid))
+    return (int(m.group(1)), int(m.group(2)), float(m.group(3))) if m else None
+
+
+def run():
+    shutil.rmtree(SHOTS, ignore_errors=True)
+    os.makedirs(SHOTS, exist_ok=True)
+    wez = os.path.join(os.environ.get("HG_WEZTERM_DIR", os.path.expanduser("~/.local/opt/hivegrid-wezterm")), "wezterm")
+    help_ = subprocess.run([wez, "cli", "split-pane", "--help"], capture_output=True, text=True).stdout
+    if "--url" not in help_:
+        sys.exit("web-smoke: this wezterm build has no web pane support (HG_WEZTERM_DIR)")
+    hgq("down", SLOT, check=False)
+    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+    hgq("up", SLOT, 1600, 900)
+    term = main_terminal()
+
+    # 1 ----------------------------------------------------------------------------------
+    t0 = time.time()
+    mg = open_web(MAGENTA, "--right", term)
+    p = waitfor(lambda: pane(mg), "web pane in list", 5)
+    check("1 web pane is listed", bool(p))
+    check("1 tty_name is null", p["tty_name"] is None, str(p["tty_name"]))
+    check("1 cwd is the page URL", p["cwd"] == MAGENTA, p["cwd"])
+    check("1 title falls back to the URL", p["title"] == MAGENTA, p["title"])
+    txt = cli("get-text", "--pane-id", mg)
+    check("1 get-text line 0 is the URL (cut to the row)", txt.splitlines()[0].rstrip().startswith("data:text/html,%3Cbody"), txt[:80])
+
+    def magenta_box():
+        png = shot("magenta")
+        b = bbox(png, "#ff00ff")
+        return (png, b) if b and b[0] > 100 else None
+
+    got = waitfor(magenta_box, "magenta page", 20, 0.5)
+    check("1 first frame arrives", bool(got))
+    first_frame_s = time.time() - t0
+    print(f"     split-pane to first visible frame: {first_frame_s:.2f} s (cold browser)")
+    png, b = got
+    p = pane(mg)
+    pw, ph = p["size"]["pixel_width"], p["size"]["pixel_height"]
+    check("1 pane rectangle == pane pixels minus focus border", (b[0], b[1]) == (pw - 2 * BORDER, ph - 2 * BORDER), f"bbox {b} pane {pw}x{ph}")
+    cx, cy = b[2] + b[0] // 2, b[3] + b[1] // 2
+    c = pixel(png, cx, cy)
+    check("1 centre pixel is #ff00ff (JPEG +-3)", near(c, (255, 0, 255)), str(c))
+    corners = [pixel(png, b[2] + dx, b[3] + dy) for dx in (0, b[0] - 1) for dy in (0, b[1] - 1)]
+    check("1 corner pixels are #ff00ff", all(near(x, (255, 0, 255)) for x in corners), str(corners))
+    edge = pixel(png, b[2] - 1, cy)
+    check("1 focus border (accent) around the active pane", not near(edge, (255, 0, 255), 40) and near(pixel(png, b[2] - BORDER, cy), edge, 4), str(edge))
+    # a second shot while idle: nothing moves, no new frames needed
+    time.sleep(1)
+    check("1 chrome is running for the profile", chrome_count() > 0)
+
+    # 2 ----------------------------------------------------------------------------------
+    inp = open_web(PAGE, "--bottom", mg)
+    waitfor(lambda: re.match(r"c0 ", title(inp)), "input page loaded", 15)
+    check("2 page title shows in cli list", bool(re.match(r"c0 ", title(inp))), title(inp))
+    global SCALE
+    SCALE = page_dims(inp)[2]
+    print(f"     device pixel ratio of the page: {SCALE}")
+    png = shot("input")
+    org = page_origin(png)
+    check("2 page pixels are where the pane is (red box at css 40,40)", bool(org), "red box not found")
+    hgq("focus", SLOT)
+    ox, oy = org
+    hgq("x", SLOT, "click", ox + round(50 * SCALE), oy + round(60 * SCALE))
+    # The origin comes from the red box's bounding box, which JPEG edges can shift by a pixel.
+    ok = waitfor(lambda: re.search(r"c1 .* m(49|50|51),(59|60|61) ", title(inp)), "click", 5)
+    check("2 click lands at css 50,60 (+-1)", bool(ok), title(inp))
+    hgq("x", SLOT, "scroll", ox + round(300 * SCALE), oy + round(200 * SCALE), "down", 2)
+    ok = waitfor(lambda: re.search(r" s200 ", title(inp)), "scroll", 5)
+    check("2 two wheel notches scroll 200 css px", bool(ok), title(inp))
+    hgq("x", SLOT, "type", "hi")
+    ok = waitfor(lambda: re.search(r" khi ", title(inp)), "type", 5)
+    check("2 typed keys reach the page", bool(ok), title(inp))
+    hgq("x", SLOT, "click", ox + round(250 * SCALE), oy + round(50 * SCALE))
+    time.sleep(0.4)
+    hgq("x", SLOT, "type", "abc")
+    ok = waitfor(lambda: re.search(r" vabc ", title(inp)), "input field", 5)
+    check("2 click focuses an input and text goes into it", bool(ok), title(inp))
+    # paste into the field (send-text without --no-paste is a bracketed paste -> send_paste)
+    cli("send-text", "--pane-id", inp, "XYZ")
+    ok = waitfor(lambda: re.search(r" vabcXYZ ", title(inp)), "paste", 5)
+    check("2 paste is inserted as text", bool(ok), title(inp))
+    if shutil.which("xclip"):
+        # The clipboard now: Ctrl+V pastes it into the focused field.
+        subprocess.run(["xclip", "-i", "-selection", "clipboard"], input=b"from-clipboard",
+                       env={**os.environ, "DISPLAY": f":{90 + SLOT}"}, timeout=10)
+        hgq("x", SLOT, "key", "ctrl+v")
+        ok = waitfor(lambda: re.search(r" vabcXYZfrom-clipboard ", title(inp)), "ctrl+v", 5)
+        check("2 Ctrl+V pastes the system clipboard into the page", bool(ok), title(inp))
+    apc(inp, "reload")
+    ok = waitfor(lambda: re.search(r"c0 s0 k m v", title(inp)), "reload via APC", 8)
+    check("2 APC reload reloads the page", bool(ok), title(inp))
+    apc(inp, "navigate;" + MAGENTA)
+    ok = waitfor(lambda: bbox(shot("navigated"), "#ff00ff"), "navigate via APC", 8)
+    check("2 APC navigate loads another page", bool(ok))
+    apc(inp, "back")
+    ok = waitfor(lambda: re.match(r"c0 ", title(inp)), "back via APC", 8)
+    check("2 APC back returns to the page", bool(ok), title(inp))
+    if shutil.which("xclip"):
+        apc(inp, "navigate;" + COPYPAGE)
+        waitfor(lambda: bbox(shot("copypage"), "#103060"), "copy page", 8)
+        time.sleep(0.5)
+        hgq("focus", SLOT)
+        cli("activate-pane", "--pane-id", inp)
+        hgq("x", SLOT, "key", "ctrl+c")
+        ok = waitfor(lambda: clipboard() == "copyme-123", "ctrl+c", 5)
+        check("2 Ctrl+C copies the page's selection to the system clipboard", bool(ok), repr(clipboard()))
+        apc(inp, "back")
+        waitfor(lambda: re.match(r"c0 ", title(inp)), "back again", 8)
+        apc(inp, "copy-url")
+        ok = waitfor(lambda: (clipboard() or "").startswith("data:text/html,"), "copy-url", 5)
+        check("2 APC copy-url puts the page URL on the clipboard", bool(ok), repr(clipboard())[:80])
+
+    # 3 ----------------------------------------------------------------------------------
+    cli("kill-pane", "--pane-id", mg)
+    waitfor(lambda: pane(mg) is None, "magenta pane gone", 5)
+
+    def sized():
+        p, d = pane(inp), page_dims(inp)
+        return d and abs(d[0] * d[2] - p["size"]["pixel_width"]) <= 1 and abs(d[1] * d[2] - p["size"]["pixel_height"]) <= 1
+
+    check("3 page viewport * pixel ratio == pane pixels", bool(waitfor(sized, "viewport", 6)), f"{title(inp)} {pane(inp)['size']}")
+    before = pane(inp)["size"]["cols"]
+    hgq("resize", SLOT, 1200, 700)
+    ok = waitfor(lambda: pane(inp)["size"]["cols"] < before and sized(), "resize", 10)
+    check("3 window resize resizes the page", bool(ok), f"{title(inp)} {pane(inp)['size']}")
+    time.sleep(0.5)
+    org = page_origin(shot("resized"))
+    check("3 pixels follow after the resize", bool(org))
+    cli("zoom-pane", "--pane-id", inp)
+    ok = waitfor(lambda: pane(inp)["is_zoomed"] and sized(), "zoom", 10)
+    check("3 zoom resizes the page", bool(ok), f"{title(inp)} {pane(inp)['size']}")
+    time.sleep(0.5)
+    zb = shot("zoomed")
+    org = page_origin(zb)
+    check("3 zoomed page is drawn (red box found, not the placeholder)", bool(org))
+    cli("zoom-pane", "--pane-id", inp, "--unzoom")
+    waitfor(lambda: not pane(inp)["is_zoomed"] and sized(), "unzoom", 10)
+    hgq("resize", SLOT, 1600, 900)
+    waitfor(sized, "back to full size", 10)
+
+    # move the web pane next to the terminal's other side: its pixels follow
+    old = page_origin(shot("before-move"))
+    cli("split-pane", "--pane-id", term, "--bottom", "--move-pane-id", inp)
+    time.sleep(1.5)
+    waitfor(sized, "sized after move", 10)
+    time.sleep(0.5)
+    new = page_origin(shot("after-move"))
+    check("3 --move-pane-id moves the page pixels", bool(new) and bool(old) and new != old, f"{old} -> {new}")
+
+    # three terminals + one web pane, arranged
+    cli("split-pane", "--pane-id", term, "--right")
+    cli("split-pane", "--pane-id", term, "--bottom")
+    time.sleep(1)
+    hgq("focus", SLOT)
+    hgq("x", SLOT, "key", "ctrl+shift+a")
+    time.sleep(3)
+    ps = [p for p in panes() if p["size"]["cols"] > 20]  # not the bar
+    web = [p for p in ps if p["tty_name"] is None]
+    check("3 arrange keeps one web pane next to the terminals", len(web) == 1 and len(ps) >= 4, f"{len(web)} web, {len(ps)} panes")
+    waitfor(sized, "sized after arrange", 10)
+    time.sleep(0.5)
+    arr = shot("arranged")
+    org = page_origin(arr)
+    w = pane(inp)
+    check("3 arranged page is drawn in place", bool(org) and sized(), f"{org} {title(inp)}")
+    dock = next((p["pane_id"] for p in panes() if "Overview" in cli("get-text", "--pane-id", p["pane_id"], check=False)), None)
+    check("3 overview dock is there and lists the web pane", dock is not None and re.search(r"c\d s\d+", cli("get-text", "--pane-id", dock)) is not None,
+          "no dock text with the page title")
+
+    # 4 ----------------------------------------------------------------------------------
+    anim = open_web(ANIM, "--bottom", inp)
+    waitfor(lambda: raf(anim), "animation page", 15)
+    a = raf(anim)
+    time.sleep(1)
+    b = raf(anim)
+    check("4 an animated page runs while visible", a is not None and b is not None and b - a > 20, f"{a} -> {b}")
+    tab0 = pane(anim)["tab_id"]
+    cli("spawn", "--pane-id", term)
+    time.sleep(2)
+    a = raf(anim)
+    time.sleep(1.5)
+    b = raf(anim)
+    check("4 the page is frozen while its tab is hidden", a is not None and b is not None and b - a <= 2, f"{a} -> {b}")
+    cli("activate-tab", "--tab-id", tab0)
+    time.sleep(1)
+    a = raf(anim)
+    time.sleep(1)
+    b = raf(anim)
+    check("4 and runs again when its tab is shown", a is not None and b is not None and b - a > 20, f"{a} -> {b}")
+    cli("kill-pane", "--pane-id", anim)
+
+    dlg = open_web(DIALOGS, "--bottom", inp)
+    ok = waitfor(lambda: re.search(r"after-alert confirm=false", title(dlg)), "dialogs", 12)
+    check("4 alert is accepted, confirm is dismissed (page keeps running)", bool(ok), title(dlg))
+    check("4 a data: popup is not followed (only http(s) addresses are)", "data-popup" not in title(dlg), title(dlg))
+    ok = waitfor(lambda: "popup-loaded" in title(dlg), "popup in same pane", 8)
+    check("4 window.open of an http URL loads in the same pane", bool(ok), title(dlg))
+    check("4 no extra pane or window appeared", len(web_pane_ids()) == 2 and len({p["window_id"] for p in panes()}) == 1, str(web_pane_ids()))
+    cli("kill-pane", "--pane-id", dlg)
+
+    n0 = chrome_count()
+    subprocess.run(["pkill", "-9", "-f", f"chrome --headless=new.*profile-{PROFILE}"])
+    ok = waitfor(lambda: "Press Enter to restart" in cli("get-text", "--pane-id", inp), "placeholder", 8)
+    check("4 killing Chrome shows the placeholder with Enter-to-restart", bool(ok), cli("get-text", "--pane-id", inp)[:200])
+    time.sleep(0.5)
+    ph_png = shot("crashed")
+    check("4 pane is a live pane, not removed", pane(inp) is not None)
+    check("4 no Chrome left after the kill", chrome_count() == 0, str(chrome_count()))
+    cli("activate-pane", "--pane-id", inp)
+    hgq("focus", SLOT)
+    hgq("x", SLOT, "key", "Return")
+    ok = waitfor(lambda: re.match(r"c0 ", title(inp)) and "Press Enter" not in cli("get-text", "--pane-id", inp), "restart", 25, 0.5)
+    check("4 Enter restarts the browser and the page comes back", bool(ok), title(inp))
+    time.sleep(1)
+    check("4 the page is drawn again", bool(page_origin(shot("restarted"))))
+    check("4 chrome is back, once", chrome_count() > 0)
+
+    # 5 ----------------------------------------------------------------------------------
+    cli("kill-pane", "--pane-id", inp)
+    ok = waitfor(lambda: chrome_count() == 0, "chrome gone after kill-pane", 10)
+    check("5 kill-pane of the last web pane leaves no Chrome", bool(ok), str(chrome_count()))
+    others = [p["pane_id"] for p in panes() if p["tty_name"] is None]
+    check("5 no web pane left", not others, str(others))
+
+    open_web(MAGENTA, "--right", term)
+    waitfor(lambda: chrome_count() > 0, "chrome up", 15)
+    gui = int(open(os.path.join(os.environ.get("HGQ_ROOT", "/tmp/hivegrid-qa"), f"s{SLOT}", "wezterm.pid")).read())
+    os.kill(gui, 9)
+    ok = waitfor(lambda: chrome_count() == 0, "chrome gone after kill -9 of the GUI", 10)
+    check("5 kill -9 of the GUI leaves no Chrome", bool(ok), str(chrome_count()))
+
+    hgq("down", SLOT)
+    hgq("up", SLOT, 1600, 900)
+    term = main_terminal()
+    open_web(MAGENTA, "--right", term)
+    waitfor(lambda: chrome_count() > 0, "chrome up", 15)
+    hgq("down", SLOT)
+    ok = waitfor(lambda: chrome_count() == 0, "chrome gone after a clean exit", 10)
+    check("5 closing the GUI (SIGTERM) leaves no Chrome", bool(ok), str(chrome_count()))
+
+
+try:
+    run()
+except Exception as e:  # noqa: BLE001
+    fails.append(f"aborted: {e!r}")
+    print(f"ABORT {e!r}")
+finally:
+    if not KEEP:
+        hgq("down", SLOT, check=False)
+    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+    try:
+        os.remove(PROFILE_DIR + ".log")
+    except OSError:
+        pass
+print(f"\n{shots} screenshots in {SHOTS}")
+if fails:
+    print(f"{len(fails)} failed:")
+    for f in fails:
+        print("  -", f)
+    sys.exit(1)
+print("web smoke passed")

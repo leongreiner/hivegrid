@@ -3,6 +3,7 @@ click regions, tty input decoding and colour codes."""
 import os
 import re
 import sys
+import unicodedata
 import unittest
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin")
@@ -152,6 +153,27 @@ class CanvasTest(unittest.TestCase):
         self.assertIn("\x1b[1;1H", out)
         self.assertIn("\x1b[2;1H", out)
         self.assertTrue(out.endswith("\x1b[0m"))
+
+    def test_hostile_text_never_reaches_the_output_as_control_characters(self):
+        # A page title as the panels draw it: ESC, OSC 52 (clipboard), OSC 1337 (user var that
+        # suspends the key bindings), C1 controls, line separators and bidi overrides.
+        evil = ("a\x1b]52;c;QUJD\x07b\x1b]1337;SetUserVar=hivegrid_capture=MQ==\x07c\x9d52;x\x9cd"
+                "\x1b[2Je\r\n\tf\u2028g\u2029h\u202ei\u2066j\x00k")
+        cv = U.Canvas(120, 2, FG, BG)
+        n = cv.put(0, 0, evil)
+        shown = text(cv, 0).rstrip()
+        self.assertEqual(shown, "a]52;c;QUJDb]1337;SetUserVar=hivegrid_capture=MQ==c52;xd[2Jefghijk")
+        self.assertEqual(n, len(shown))
+        cv.fill(0, 1, 3, 1, ch="\x1b")  # even a control fill char is not drawn
+        out = cv.render()
+        body = re.sub(r"\x1b\[[0-9;]*[Hm]", "", out)  # the canvas's own cursor and colour codes
+        self.assertFalse([c for c in body if unicodedata.category(c) == "Cc" or c in "\u2028\u2029\u202e\u2066"], repr(body))
+        self.assertNotIn("\x1b]", out)
+        self.assertNotIn("\x07", out)
+
+    def test_control_characters_have_no_width(self):
+        self.assertEqual(U.text_width("a\x1bb\x07"), 2)
+        self.assertEqual(U.printable_text("é\x1b\u200d\u2028x"), "é\u200dx")
 
 
 class HitTest(unittest.TestCase):
@@ -423,6 +445,29 @@ class ListRowTest(unittest.TestCase):
         self.assertEqual(row.end, 27)
 
 
+class PromptModalTest(unittest.TestCase):
+    def type(self, modal, text):
+        for ch in text:
+            modal.key(None, set(), ch)
+
+    def test_enter_hands_the_text_over_and_closes_on_success(self):
+        got = []
+        modal = U.PromptModal("t", "", lambda text: got.append(text))
+        self.type(modal, "ab")
+        self.assertTrue(modal.key(None, set(), "Enter"))
+        self.assertEqual(got, ["ab"])
+
+    def test_a_returned_error_keeps_it_open_with_the_message(self):
+        modal = U.PromptModal("t", "x", lambda text: "no good")
+        self.assertFalse(modal.key(None, set(), "Enter"))
+        self.assertEqual(modal.error, "no good")
+
+    def test_an_exception_in_the_callback_is_shown_instead_of_raised(self):
+        modal = U.PromptModal("t", "x", lambda text: 1 / 0)
+        self.assertFalse(modal.key(None, set(), "Enter"))
+        self.assertIn("division by zero", modal.error)
+
+
 class ChipTest(unittest.TestCase):
     def test_kinds(self):
         cv = canvas(40)
@@ -445,10 +490,13 @@ class StateTableTest(unittest.TestCase):
     def test_states_match_the_design_table(self):
         want = {"working": ("↻", "accent"), "busy": ("◔", "amber"), "attention": ("?", "violet"),
                 "done": ("✓", "green"), "idle": ("·", "grey"), "exited": ("○", "muted"), "bell": ("!", "red"),
-                "shell": ("›", "dim")}
+                "web": ("◍", "cyan"), "shell": ("›", "dim")}
         for kind, (glyph, color) in want.items():
             self.assertEqual((U.STATES[kind].glyph, U.STATES[kind].color), (glyph, color), kind)
         self.assertEqual(U.STATES["attention"].label, "needs you")
+        self.assertEqual(U.STATES["web"].label, "web")
+        ranks = [U.STATES[k].rank for k in ("exited", "web", "other", "shell")]
+        self.assertEqual(ranks, sorted(ranks), "web sorts after exited and before the plain-program states")
         self.assertEqual(U.state_style(PAL, "nonsense")[0], "·")
         self.assertIn(U.state_style(PAL, "working", now=0.0)[0], U.SPINNER)
 

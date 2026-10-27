@@ -25,7 +25,10 @@
 # started in a sandbox therefore land in the real omp history.
 # Overrides: HG_WEZTERM_DIR (a fork build, default ~/.local/opt/hivegrid-wezterm; deploy a test
 # build with OPT=/tmp/x WRAPPER=/tmp/x/hivegrid wezterm/build-hivegrid.sh), HIVEGRID_REPO,
-# HGQ_ROOT, HGQ_PROJECTS (linked as ~/Projects, default ~/Projects).
+# HGQ_ROOT, HGQ_PROJECTS (linked as ~/Projects, default ~/Projects), HGQ_FRONT_END (Software, the
+# default, OpenGL or WebGpu), HGQ_CONFIG (extra `--config` assignments, space separated) and
+# HGQ_XFT_DPI (the display's Xft.dpi, e.g. 144 for a scale of 1.5; applied when `up` starts the
+# display, so `down` first when switching).
 # Needs Xvfb, xwininfo, ImageMagick (import) and libXtst.
 set -euo pipefail
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -63,7 +66,12 @@ sandbox_env() {
   return 0
 }
 
-link() { [ -e "$1" ] || [ -L "$1" ] || return 0; mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; }
+# A real file or directory already at the destination is the slot's own (dev/demo prepares one): kept.
+link() {
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  { [ -e "$2" ] && [ ! -L "$2" ]; } && return 0
+  mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"
+}
 
 prepare_home() {
   mkdir -p "$H/.config/hivegrid" "$H/.local/bin" "$H/.cache" "$H/.local/share" "$S/work" "$S/shots"
@@ -104,17 +112,25 @@ up() {
   prepare_home
   if ! DISPLAY=$DISP xwininfo -root >/dev/null 2>&1; then
     # Own session, so a caller's timeout (a process-group kill) leaves the display alone.
-    setsid Xvfb "$DISP" -screen 0 "${w}x${h}x24" -nolisten tcp +extension GLX +extension RANDR \
+    # -noreset: the X server resets when its last client goes, which drops root properties
+    # such as the RESOURCE_MANAGER that HGQ_XFT_DPI sets.
+    setsid Xvfb "$DISP" -screen 0 "${w}x${h}x24" -nolisten tcp -noreset +extension GLX +extension RANDR \
       </dev/null >"$S/xvfb.log" 2>&1 &
     echo $! >"$S/xvfb.pid"
     for _ in $(seq 50); do DISPLAY=$DISP xwininfo -root >/dev/null 2>&1 && break; sleep 0.1; done
+    [ -z "${HGQ_XFT_DPI:-}" ] || echo "Xft.dpi: $HGQ_XFT_DPI" | DISPLAY=$DISP xrdb -nocpp -merge
   fi
   sandbox_env nosock
+  # HGQ_CONFIG="key=value ..." adds --config overrides; HGQ_FRONT_END picks Software (default),
+  # OpenGL or WebGpu.
+  local extra=() kv
+  for kv in ${HGQ_CONFIG:-}; do extra+=(--config "$kv"); done
   # A plain backgrounded command (no `&&` list): bash then forks straight into setsid, so no
   # intermediate shell keeps waiting on wezterm-gui while holding the caller's stdout pipe.
   (cd "$H" || exit 1
     setsid "${ENV[@]}" "$D/wezterm-gui" --config enable_wayland=false \
-      --config "front_end=\"Software\"" start --always-new-process --cwd "$H" \
+      --config "front_end=\"${HGQ_FRONT_END:-Software}\"" "${extra[@]}" \
+      start --always-new-process --cwd "$H" \
       </dev/null >"$S/wezterm.log" 2>&1 &
     echo $! >"$S/wezterm.pid")
   local id=""

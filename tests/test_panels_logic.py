@@ -295,7 +295,7 @@ class BrailleTest(unittest.TestCase):
 
 
 class ParsePanesTest(unittest.TestCase):
-    HOME = "/home/leon"
+    HOME = "/home/alex"
 
     def panes(self, panes, fg=None):
         return P.parse_panes(json.dumps(panes), fg or {}, home=self.HOME)
@@ -306,9 +306,11 @@ class ParsePanesTest(unittest.TestCase):
         self.assertEqual([(r["pane"], r["tab"], r["window"]) for r in rows], [(5, 1, 1), (6, 1, 1), (7, 2, 1), (8, 1, 2)])
 
     def test_cwd_from_url_shortened_under_home_only(self):
-        rows = self.panes([{"pane_id": 1, "cwd": "file://box/home/leon/proj/"}, {"pane_id": 2, "cwd": "file://box/home/leon"},
-                           {"pane_id": 3, "cwd": "file:///home/leonard/x"}, {"pane_id": 4, "cwd": "/"}])
-        self.assertEqual([r["cwd"] for r in rows], ["~/proj", "~", "/home/leonard/x", "/"])
+        rows = self.panes([{"pane_id": 1, "tty_name": "/dev/pts/1", "cwd": "file://box/home/alex/proj/"},
+                           {"pane_id": 2, "tty_name": "/dev/pts/2", "cwd": "file://box/home/alex"},
+                           {"pane_id": 3, "tty_name": "/dev/pts/3", "cwd": "file:///home/alexander/x"},
+                           {"pane_id": 4, "tty_name": "/dev/pts/4", "cwd": "/"}])
+        self.assertEqual([r["cwd"] for r in rows], ["~/proj", "~", "/home/alexander/x", "/"])
 
     def test_foreground_process_profile_and_kind(self):
         fg = {"pts/1": (10, "omp", 75, "omp --profile=alpha"), "pts/2": (11, "omp", 5, "omp --profile beta"),
@@ -320,10 +322,44 @@ class ParsePanesTest(unittest.TestCase):
         self.assertEqual(rows[0]["age"], 75)
 
     def test_hivegrid_chrome_panes_are_left_out(self):
-        fg = {"pts/1": (1, "python3", 1, "python3 /home/leon/.local/bin/hivegrid-bar"), "pts/2": (2, "yazi", 1, "yazi"),
+        fg = {"pts/1": (1, "python3", 1, "python3 /home/alex/.local/bin/hivegrid-bar"), "pts/2": (2, "yazi", 1, "yazi"),
               "pts/3": (3, "omp", 1, "omp")}
         rows = self.panes([{"pane_id": i, "tty_name": f"/dev/pts/{i}"} for i in (1, 2, 3)], fg)
         self.assertEqual([r["pane"] for r in rows], [3])
+
+    def test_a_web_pane_is_a_row_of_its_own_kind_with_the_page_as_directory(self):
+        fg = {"pts/1": (1, "omp", 4, "omp")}
+        rows = self.panes([
+            {"pane_id": 1, "tty_name": "/dev/pts/1", "cwd": "file://box/home/alex/proj/", "tab_id": 4, "window_id": 1},
+            {"pane_id": 2, "tty_name": None, "cwd": "https://docs.example.com/guide/intro", "title": "Guide · Example",
+             "tab_id": 4, "window_id": 1, "is_active": True},
+            {"pane_id": 3, "tty_name": None, "cwd": "https://example.org/", "title": "Example", "tab_id": 4, "window_id": 1},
+        ], fg)
+        self.assertEqual([r["pane"] for r in rows], [1, 2, 3])
+        web = rows[1]
+        self.assertEqual((web["proc"], web["cwd"], web["title"], web["agent"], web["idle"], web["profile"], web["age"]),
+                         ("web", "docs.example.com/guide/intro", "Guide · Example", False, False, "", 0))
+        self.assertEqual((web["tab"], web["window"], web["active"]), (1, 1, True))
+        self.assertEqual(rows[2]["cwd"], "example.org", "a bare / is not shown")
+        self.assertEqual(rows[0]["cwd"], "~/proj", "terminals are unchanged")
+
+    def test_a_local_page_is_web_by_the_fork_marker_not_by_a_missing_tty(self):
+        rows = self.panes([
+            {"pane_id": 1, "tty_name": None, "cwd": "file:///home/alex/slides.html", "title": "Slides", "is_web": True},
+            {"pane_id": 2, "tty_name": None, "cwd": "file://remote-box/home/alex/proj", "title": "omp"},
+            {"pane_id": 3},
+        ])
+        self.assertEqual([(r["proc"], r["cwd"]) for r in rows],
+                         [("web", "file:///home/alex/slides.html"), ("?", "~/proj"), ("?", "")],
+                         "an SSH or mux-client pane (no tty, file://host cwd) is no web pane")
+
+    def test_page_controlled_text_loses_its_control_characters(self):
+        evil = "T\x1b]52;c;QUJD\x07\x1b]1337;SetUserVar=hivegrid_capture=MQ==\x07\u2028end"
+        rows = self.panes([{"pane_id": 2, "tty_name": None, "cwd": "https://a.test/\x1b[2Jx", "title": evil,
+                            "is_web": True}])
+        for key in ("title", "cwd"):
+            self.assertFalse([c for c in rows[0][key] if ord(c) < 0x20 or c in "\u2028\u2029"], key)
+        self.assertEqual(rows[0]["title"], "T]52;c;QUJD]1337;SetUserVar=hivegrid_capture=MQ==end")
 
     def test_malformed_list_output(self):
         for text in ("", "not json", "{}", "null"):
@@ -465,13 +501,13 @@ class SettingsLayoutTest(Env):
     def test_narrow_keeps_the_section_strip(self):
         _, rows = self.draw(U.WIDE_COLS - 1)
         self.assertFalse(self.page.two_pane)
-        self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+About\s*$")
+        self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+Web\s+About\s*$")
 
     def test_wide_content_stays_in_its_column_for_every_section(self):
         for w in (U.WIDE_COLS, 240, 320):
             lx, tw = self.box(w)
             sep = lx + self.page.SUB_W + 1
-            for sub in range(4):
+            for sub in range(len(self.page.SUBS)):
                 with self.subTest(w=w, section=self.page.SUBS[sub]):
                     _, rows = self.draw(w, sub=sub)
                     self.assertTrue(self.page.two_pane)
@@ -484,10 +520,11 @@ class SettingsLayoutTest(Env):
                     self.assertEqual(rows[-1].index("↑↓"), lx, "the footer lines up")
 
     def test_about_arrows_walk_the_sections(self):
-        self.page.sub = 3
+        about = self.page.SUBS.index("About")
+        self.page.sub = about
         self.page.key(None, set(), "UpArrow")
-        self.assertEqual(self.page.SUBS[self.page.sub], "Accounts")
-        self.page.sub = 3
+        self.assertEqual(self.page.SUBS[self.page.sub], "Web")
+        self.page.sub = about
         self.page.key(None, set(), "DownArrow")
         self.assertEqual(self.page.SUBS[self.page.sub], "About", "stays on the last section")
 
@@ -520,6 +557,158 @@ class SettingsLayoutTest(Env):
         self.page.change_binding = lambda ui_, n: modal.append(n)
         ui.cv.hit_at(x + 2, y)("left")
         self.assertEqual(modal, ["overview_toggle"])
+
+
+class WebSettingsTest(Env):
+    """The Web section: links target, search engine and default profile, saved as settings.json "web"."""
+
+    def setUp(self):
+        super().setUp()
+        import hivegrid_settings_core as S
+        self.S = S
+        self.path = os.path.join(self.tmp, "settings.json")
+        self.model = S.Model(S.Settings(self.path))
+        self.page = P.SettingsPage(self.model)
+        self.page.about = SettingsLayoutTest.ABOUT
+        self.page.sub = self.page.SUBS.index("Web")
+        self.page.web_built = True
+        self.ui = mock.Mock()
+
+    def modal_for(self, row):
+        """Moves the cursor to `row`, presses Enter and returns the prompt that opened."""
+        self.page.cursor[3] = P.WEB_ROWS.index(row)
+        self.ui.open_modal.reset_mock()
+        self.page.key(self.ui, set(), "Enter")
+        return self.ui.open_modal.call_args[0][0]
+
+    def draw(self, w, h=50):
+        ui = U.UI(self.model, [self.page])
+        ui.size, ui.out = (w, h), io.StringIO()
+        ui.draw()
+        return ["".join(c[0] for c in row) for row in ui.cv.cells]
+
+    def test_defaults_and_the_section_summary(self):
+        self.assertEqual(self.model.web, {"links": "pane", "search": "", "profile": "main"})
+        self.assertFalse(self.model.dirty)
+        self.assertEqual(self.page.section_meta(self.page.sub), ("pane · main", "dim"))
+
+    def test_enter_on_links_switches_between_pane_and_system(self):
+        self.page.cursor[3] = 0
+        self.page.key(self.ui, set(), "Enter")
+        self.assertEqual(self.model.web["links"], "system")
+        self.assertTrue(self.model.dirty)
+        self.assertEqual(self.page.section_meta(self.page.sub), ("● system · main", "amber"))
+        self.page.key(self.ui, set(), "Space")
+        self.assertEqual(self.model.web["links"], "pane")
+        self.assertFalse(self.model.dirty, "switching back is no change")
+
+    def test_profile_prompt_validates_the_name(self):
+        modal = self.modal_for("profile")
+        for bad in ("", "../evil", "a b", "-x", "x" * 33):
+            with self.subTest(name=bad):
+                self.assertTrue(modal.on_ok(bad), "an error text")
+                self.assertEqual(self.model.web["profile"], "main")
+        self.assertIsNone(modal.on_ok(" work-2 "))
+        self.assertEqual(self.model.web["profile"], "work-2")
+
+    def test_search_prompt_needs_a_url_template_with_the_placeholder(self):
+        modal = self.modal_for("search")
+        for bad in ("duck.example/?q=%s", "https://duck.example/?q=", "ftp://x/%s"):
+            with self.subTest(template=bad):
+                self.assertTrue(modal.on_ok(bad))
+        self.assertEqual(self.model.web["search"], "")
+        self.assertIsNone(modal.on_ok("https://duck.example/?q=%s"))
+        self.assertEqual(self.model.web["search"], "https://duck.example/?q=%s")
+        self.assertIsNone(modal.on_ok(""), "empty turns the search off")
+        self.assertEqual(self.model.web["search"], "")
+
+    def test_arrows_move_the_cursor_and_r_resets_a_row(self):
+        self.page.key(self.ui, set(), "DownArrow")
+        self.page.key(self.ui, set(), "DownArrow")
+        self.page.key(self.ui, set(), "DownArrow")
+        self.assertEqual(self.page.cursor[3], len(P.WEB_ROWS) - 1)
+        self.model.web["profile"] = "work"
+        self.page.key(self.ui, set(), "r")
+        self.assertEqual(self.model.web["profile"], "main")
+        self.page.key(self.ui, set(), "UpArrow")
+        self.assertEqual(self.page.cursor[3], 1)
+        self.page.wheel(self.ui, -5)
+        self.assertEqual(self.page.cursor[3], 0)
+
+    def test_save_writes_only_non_default_values_and_keeps_foreign_entries(self):
+        with open(self.path, "w") as f:
+            json.dump({"web": {"future": 1}}, f)
+        model = self.S.Model(self.S.Settings(self.path))
+        model.web.update(links="system", profile="work")
+        ok, _ = model.save()
+        self.assertTrue(ok)
+        with open(self.path) as f:
+            self.assertEqual(json.load(f)["web"], {"future": 1, "links": "system", "profile": "work"})
+        self.assertEqual(self.S.Settings(self.path).web(), {"links": "system", "search": "", "profile": "work"})
+        model.web.update(links="pane", profile="main")
+        model.save()
+        with open(self.path) as f:
+            self.assertEqual(json.load(f)["web"], {"future": 1})
+        os.unlink(self.path)
+        model = self.S.Model(self.S.Settings(self.path))
+        model.save()
+        with open(self.path) as f:
+            self.assertNotIn("web", json.load(f), "all defaults: no web entry")
+
+    def test_the_section_draws_in_both_layouts(self):
+        self.model.web.update(links="system", search="https://duck.example/?q=%s")
+        for w in (100, 240):
+            with self.subTest(w=w):
+                text = "\n".join(self.draw(w))
+                for want in ("https://duck.example/?q=%s", "main"):
+                    self.assertIn(want, text, "the values are drawn")
+                self.assertEqual(self.page.SUBS[self.page.sub], "Web")
+
+    def test_a_click_on_a_value_edits_it(self):
+        rows = self.draw(100)
+        y = next(i for i, r in enumerate(rows) if P.WEB_LABELS["profile"] in r)
+        ui = U.UI(self.model, [self.page])
+        ui.size, ui.out = (100, 50), io.StringIO()
+        ui.draw()
+        opened = []
+        ui.open_modal = opened.append
+        ui.cv.hit_at(rows[y].index("main"), y)("left")
+        self.assertEqual(len(opened), 1)
+        self.assertIsInstance(opened[0], U.PromptModal)
+        self.assertEqual(opened[0].text, "main", "it edits the profile")
+
+    def test_a_wezterm_without_the_web_pane_is_said_so_beside_the_settings(self):
+        self.page.web_built = False
+        without = "\n".join(self.draw(120))
+        self.page.web_built = True
+        with_web = "\n".join(self.draw(120))
+        extra = [line for line in without.splitlines() if line not in with_web.splitlines()]
+        self.assertEqual(len(extra), 1, "one more line when the build lacks the web pane")
+        self.assertEqual(self.page.cursor[3], 0, "the settings stay editable")
+
+    def test_the_build_is_looked_up_once_when_the_section_draws(self):
+        page = P.SettingsPage(self.model)
+        page.sub = page.SUBS.index("Web")
+        calls = []
+        with mock.patch.object(P, "web_build_cached", lambda: calls.append(1) or True):
+            ui = U.UI(self.model, [page])
+            ui.size, ui.out = (120, 50), io.StringIO()
+            ui.draw()
+            ui.draw()
+        self.assertEqual(calls, [1])
+
+    def test_a_scan_still_running_shows_no_warning_and_is_asked_again(self):
+        page = P.SettingsPage(self.model)
+        page.sub = page.SUBS.index("Web")
+        answers = iter([None, None, False])
+        with mock.patch.object(P, "web_build_cached", lambda: next(answers)):
+            ui = U.UI(self.model, [page])
+            ui.size, ui.out = (120, 50), io.StringIO()
+            ui.draw()
+            self.assertIsNone(page.web_built)
+            ui.draw()
+            ui.draw()
+            self.assertIs(page.web_built, False)
 
 
 class FrameTest(Env):

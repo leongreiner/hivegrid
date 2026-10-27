@@ -106,13 +106,51 @@ class SettingsFileNormalisation(TempHome):
         path = self.settings_file({"custom": {"x": 1}, "keys": {"equalize": "CTRL+ALT+e"}})
         s = S.Settings(path)
         keys = s.keys()
-        s.write(s.theme(), keys, [])
+        s.write(s.theme(), keys, [], s.web())
         data = json.loads(path.read_text())
         self.assertEqual(data["custom"], {"x": 1})
         self.assertEqual(data["keys"], {"equalize": "CTRL+ALT+e"})
         self.assertEqual(data["version"], S.SCHEMA)
         self.assertEqual(S.Settings(path).keys(), keys)
         self.assertEqual([p.name for p in path.parent.iterdir()], ["settings.json"])  # no temp left
+
+    def test_web_settings_default_and_stored_values(self):
+        self.assertEqual(S.Settings(self.settings_file({})).web(), {"links": "pane", "search": "", "profile": "main"})
+        s = S.Settings(self.settings_file({"web": {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2"}}))
+        self.assertEqual(s.web(), {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2"})
+        self.assertEqual(s.effective()["web"], s.web())
+
+    def test_invalid_web_settings_fall_back_per_field(self):
+        s = S.Settings(self.settings_file({"web": {"links": "both", "search": "https://x.test/", "profile": "../evil"}}))
+        self.assertEqual(s.web(), S.WEB_DEFAULTS)
+        for stored in ("text", 5, ["pane"], None):
+            self.assertEqual(S.Settings(self.settings_file({"web": stored})).web(), S.WEB_DEFAULTS, repr(stored))
+        s = S.Settings(self.settings_file({"web": {"links": "system", "profile": 7, "search": ["x"]}}))
+        self.assertEqual(s.web(), {"links": "system", "search": "", "profile": "main"})
+
+    def test_a_stored_search_template_must_pass_valid_search(self):
+        for bad in ("javascript:alert(%s)", "chrome://settings/?q=%s", "ftp://x.test/%s", "x.test/?q=%s"):
+            with self.subTest(bad=bad):
+                self.assertIsNotNone(S.valid_search(bad))
+                self.assertEqual(S.Settings(self.settings_file({"web": {"search": bad}})).web()["search"], "")
+
+    def test_web_validators(self):
+        self.assertIsNone(S.valid_profile("main"))
+        self.assertIsNone(S.valid_profile("a" * 32))
+        for bad in ("", "a" * 33, "-x", ".x", "a b", "a/b", "ä"):
+            self.assertTrue(S.valid_profile(bad), repr(bad))
+        self.assertIsNone(S.valid_search(""))
+        self.assertIsNone(S.valid_search("https://duck.example/?q=%s"))
+        self.assertIsNone(S.valid_search("http://localhost:8080/s?q=%s"))
+        for bad in ("https://x.test/", "x.test/?q=%s", "ftp://x/%s"):
+            self.assertTrue(S.valid_search(bad), bad)
+
+    def test_web_leader_is_a_leader_binding_with_the_documented_default(self):
+        self.assertEqual(S.Settings(self.settings_file({})).keys()["web_leader"], "LEADER+w")
+        keys = S.Settings(self.settings_file({"keys": {"web_leader": "LEADER+x"}})).keys()
+        self.assertEqual(keys["web_leader"], "LEADER+x")
+        self.assertTrue([e for e in S.check_binding("web_leader", "LEADER+o", keys) if e[0] == "error"], "overview's key")
+        self.assertEqual(S.check_binding("web_leader", "LEADER+x", keys), [])
 
     def test_non_string_key_values_fall_back_instead_of_crashing(self):
         s = S.Settings(self.settings_file({"keys": {"equalize": 5, "arrange": True, "settings": ["x"],

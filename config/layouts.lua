@@ -110,18 +110,11 @@ return function(config, wezterm)
     if f then f:close() else cli_bin = 'wezterm' end
   end
 
-  -- Target the mux this pane belongs to; with several GUI instances `wezterm cli`
-  -- otherwise picks one itself and pane ids could refer to the wrong window.
+  -- Target the mux this pane belongs to (theme.mux_socket: a web pane asks another pane of
+  -- its tab); with several GUI instances `wezterm cli` otherwise picks one itself and pane
+  -- ids could refer to the wrong window.
   local function make_cli(pane)
-    local sock
-    local ok, info = pcall(function() return pane:get_foreground_process_info() end)
-    if ok and info and info.pid then
-      local f = io.open('/proc/' .. info.pid .. '/environ', 'rb')
-      if f then
-        sock = f:read('a'):match('WEZTERM_UNIX_SOCKET=([^\0]+)')
-        f:close()
-      end
-    end
+    local sock = require('theme').mux_socket(pane)
     return function(...)
       local cmd = {}
       if sock then
@@ -469,7 +462,7 @@ return function(config, wezterm)
   bind(eq_key.mods, eq_key.key, equalize_action)
 
   -- equalize(window, pane) is also called by the overview dock's button.
-  local api = { equalize = equalize }
+  local api = { equalize = equalize, grid_of = grid_of, in_order = in_order }
 
   -- Rebuilding ------------------------------------------------------------
   -- Arrange, rotate and swap rebuild the grid from a layout tree, keeping every process:
@@ -706,6 +699,11 @@ return function(config, wezterm)
     if not ok or not u then
       return ''
     end
+    -- A web pane reports its page URL: the pickers show the host (and path), not a path.
+    local web = require('theme').web_url(u)
+    if web then
+      return require('theme').web_label(web, true)
+    end
     local path = type(u) == 'string' and u:gsub('^file://[^/]*', '') or u.file_path or ''
     return home((path:gsub('(.)/$', '%1')))
   end
@@ -919,8 +917,16 @@ return function(config, wezterm)
         toast(window, 'Broadcast ended: tab changed')
         return
       end
+      -- Typing into a focused web page (a password, say) must never reach the other panes:
+      -- the mode ends instead of fanning the keys out.
+      if require('theme').is_web(pane) then
+        broadcast_off(window, pane)
+        toast(window, 'Broadcast ended: a web pane has the focus')
+        return
+      end
+      -- Never into a web pane either: the page would take the typing as keys.
       for _, p in ipairs(tab:panes()) do
-        if not is_dock(p:pane_id()) then send(window, p) end
+        if not is_dock(p:pane_id()) and not require('theme').is_web(p) then send(window, p) end
       end
     end)
   end
@@ -959,7 +965,13 @@ return function(config, wezterm)
   add('LeftArrow', 'CTRL', key('LeftArrow', 'CTRL'))
   add('RightArrow', 'CTRL', key('RightArrow', 'CTRL'))
   -- The clipboard is not readable from Lua, so a paste cannot be fanned out.
-  add('v', 'CTRL', wezterm.action_callback(function(window)
+  -- From a web pane it also ends the mode, as every other key does there.
+  add('v', 'CTRL', wezterm.action_callback(function(window, pane)
+    if require('theme').is_web(pane) then
+      broadcast_off(window, pane)
+      toast(window, 'Broadcast ended: a web pane has the focus')
+      return
+    end
     toast(window, 'Paste is not broadcast; type the text or leave broadcast mode')
   end))
   add('b', 'LEADER', wezterm.action_callback(broadcast_off))
@@ -982,6 +994,10 @@ return function(config, wezterm)
         end
         if line ~= 'broadcast' then
           toast(win, 'Broadcast not started: type the word broadcast')
+          return
+        end
+        if require('theme').is_web(pane) then
+          toast(win, 'Broadcast not started: a web pane has the focus')
           return
         end
         wezterm.GLOBAL.broadcast = { tab_id = win:active_tab():tab_id(), window_id = win:window_id() }

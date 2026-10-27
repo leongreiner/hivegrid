@@ -213,23 +213,15 @@ local function build(config, wezterm)
     return math.floor(below - above + 0.5)
   end
 
-  -- `wezterm cli`, aimed at the mux this pane belongs to so several GUI instances
-  -- cannot mix up pane ids.
+  -- `wezterm cli`, aimed at the mux this pane belongs to (theme.mux_socket) so several GUI
+  -- instances cannot mix up pane ids.
   local cli_bin = wezterm.executable_dir .. '/wezterm'
   do
     local f = io.open(cli_bin, 'rb')
     if f then f:close() else cli_bin = 'wezterm' end
   end
   local function make_cli(pane)
-    local sock
-    local ok, info = pcall(function() return pane:get_foreground_process_info() end)
-    if ok and info and info.pid then
-      local f = io.open('/proc/' .. info.pid .. '/environ', 'rb')
-      if f then
-        sock = f:read('a'):match('WEZTERM_UNIX_SOCKET=([^\0]+)')
-        f:close()
-      end
-    end
+    local sock = theme.mux_socket(pane)
     return function(...)
       local cmd = sock and { 'env', 'WEZTERM_UNIX_SOCKET=' .. sock } or {}
       cmd[#cmd + 1] = cli_bin
@@ -274,10 +266,11 @@ local function build(config, wezterm)
     end
   end
 
-  -- Directory the sidebar view starts in: the pane's directory, else home. The git view
-  -- scans it for repositories itself (the one around it and those below it).
+  -- Directory the sidebar view starts in: the pane's directory, else home (also for a web
+  -- pane: its working directory is a page URL). The git view scans it for repositories itself
+  -- (the one around it and those below it).
   local function dir_of(pane)
-    return pane and pane_dir(pane) or wezterm.home_dir
+    return pane and not theme.is_web(pane) and pane_dir(pane) or wezterm.home_dir
   end
 
   -- Window rescales and layout changes ------------------------------------------------
@@ -637,13 +630,14 @@ local function build(config, wezterm)
   -- focus, or its shell cd's). The keyboard stays in the grid pane. The directory is
   -- recorded before the restart so a failed one is not retried on every status tick.
   -- Never while lazygit runs in the view: the change waits until lazygit quits, then the
-  -- list is restarted for the directory the grid is in by then.
+  -- list is restarted for the directory the grid is in by then. A web pane has no
+  -- directory: focusing one leaves the view where it is.
   local last_follow = {}
   local function follow_git(window, tab, rs, rec)
     if rec.view ~= 'git' or not rec.content then return rs end
     local pane = window:active_pane()
     local id = pane:pane_id()
-    if id == rec.handle or id == rec.content or M.is_dock(id) then return rs end
+    if id == rec.handle or id == rec.content or M.is_dock(id) or theme.is_web(pane) then return rs end
     local dir = dir_of(pane)
     local prev = rec.dir
     -- An explorer opened before dir was tracked has an unknown start directory.
