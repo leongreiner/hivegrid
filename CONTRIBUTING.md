@@ -4,6 +4,8 @@ Pull requests are welcome: bug fixes, new features, documentation, themes, tests
 
 ## Ground rules
 
+- Using an AI coding agent? [AGENTS.md](AGENTS.md) is the guide it should read: safety rules for the sandbox, the layout, conventions and tests.
+
 - One topic per pull request, against `main`.
 - Keep the existing conventions: look at neighbouring code before adding a new pattern. The design language every surface follows is in `.claude/skills/hivegrid-qa/design.md`.
 - User-visible changes update `README.md` in the same pull request.
