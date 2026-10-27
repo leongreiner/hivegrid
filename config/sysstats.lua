@@ -1,8 +1,12 @@
--- System stats for the header's right status: CPU, RAM, disk of /, GPU.
+-- System stats for the header's right status: CPU, RAM, GPU and, when it runs full, disk of /.
+-- A calm summary chip: muted labels and numbers, a colour only on a metric past its warn
+-- (amber) or critical (red) threshold; the monitor panel (click) holds the detail.
 -- Wire: local ss = require('sysstats')(config, wezterm)
 --   ss.visible()        -> boolean (ALT+s toggles; default true)
 --   ss.segments(opts)   -> wezterm.format items, width in cells; opts.budget picks the richest
---                          tier (bars, amounts) that fits; {} , 0 if none does
+--                          tier that fits; {} , 0 if none does
+--   ss.tiers()          -> every tier richest first as { items, w }
+--   ss.level(pct)       -> 'ok' | 'warn' | 'crit' (the thresholds the colours follow)
 --   ss.text(opts)       -> plain text of the same content, for tests
 --   ss.record()         -> sample and log without rendering (the header calls it every tick)
 -- Sampling happens inside segments()/text() behind per-source caches, and the header's
@@ -237,17 +241,20 @@ return function(config, wezterm)
 
   -- Model and rendering -----------------------------------------------------
 
-  local function color(pct)
-    if pct > 85 then return P.red end
-    if pct >= 60 then return P.amber end
-    return P.green
+  -- Thresholds, mirrored by load_color() in bin/hivegrid_panels.py (the monitor panel's value
+  -- colour): a load above CRIT is critical, from WARN up a warning.
+  local WARN, CRIT = 60, 85
+  local function level(pct)
+    if pct > CRIT then return 'crit' end
+    return pct >= WARN and 'warn' or 'ok'
   end
+  -- The header colours only what needs a look: ok is the plain muted text.
+  local TONE = { ok = P.muted, warn = P.amber, crit = P.red }
 
   local function gib(kib) return kib / 1048576 end
   local function size(g) return g >= 10 and string.format('%.0f', g) or string.format('%.1f', g) end
 
-  -- One entry per available source: { label, pct, amount, amount width }. The amount
-  -- is padded to a fixed width so a changing number never shifts what follows it.
+  -- One entry per available source, in header order: { label, pct, amount, amount width }.
   local function metrics()
     local out = {}
     if cpu.pct then out[#out + 1] = { 'CPU', cpu.pct } end
@@ -258,9 +265,6 @@ return function(config, wezterm)
         string.format('%.1fG/%sG', used, size(gib(mem.total))), 9,
       }
     end
-    if disk.pct then
-      out[#out + 1] = { 'DSK', disk.pct, string.format('%sG free', size(gib(disk.free_kib))), 9 }
-    end
     if gpu.util and gpu.kind == 'nvidia' and gpu.total_mib then
       out[#out + 1] = {
         'GPU', gpu.util, string.format('%.1f/%sG', gpu.used_mib / 1024, size(gpu.total_mib / 1024)), 8,
@@ -268,49 +272,52 @@ return function(config, wezterm)
     elseif gpu.util and gpu.kind == 'jetson' then
       out[#out + 1] = { 'GPU', gpu.util }
     end
+    if disk.pct then
+      out[#out + 1] = { 'DSK', disk.pct, string.format('%sG free', size(gib(disk.free_kib))), 9 }
+    end
     return out
   end
 
-  -- Richest first; the caller takes the first tier that fits its cell budget. bar =
-  -- cells of the slim progress line after the percentage, amount = the absolute size
-  -- after it, only = labels kept. The narrowest keeps the CPU chip alone, which the header
-  -- never drops.
+  -- Richest first; the caller takes the first tier that fits its cell budget. only =
+  -- labels kept. Disk is in no tier's list: a disk past WARN is shown anyway, as is any
+  -- other metric past it (a problem is never narrowed away), with its amount in the richest
+  -- tier. The narrowest keeps the CPU alone.
   local TIERS = {
-    { bar = 6, amount = true },
-    { amount = true },
-    { bar = 5 },
-    {},
+    { only = { CPU = true, RAM = true, GPU = true }, amount = true },
     { only = { CPU = true, RAM = true } },
     { only = { CPU = true } },
   }
 
-  -- Items of one metric on the pill: muted label, the percentage in its state colour,
-  -- then the slim bar and the muted amount when the tier has them. Text always sits on
-  -- the plain pill, never on the bar.
+  local function shown(m, tier)
+    return level(m[2]) ~= 'ok' or tier.only[m[1]] == true
+  end
+
+  -- Items of one metric: dim label, the percentage muted, or amber / red past its threshold
+  -- (then followed by the amount in the richest tier).
   local function body(m, tier)
+    local lvl = level(m[2])
     local items = {
-      { Foreground = { Color = P.muted } }, { Text = m[1] .. ' ' },
-      { Foreground = { Color = color(m[2]) } }, { Text = string.format('%3.0f%%', m[2]) },
+      { Foreground = { Color = P.dim } }, { Text = m[1] .. ' ' },
+      { Foreground = { Color = TONE[lvl] } }, { Text = string.format('%3.0f%%', m[2]) },
     }
-    if tier.bar then
-      items[#items + 1] = { Text = ' ' }
-      theme.extend(items, theme.meter(m[2], tier.bar, color(m[2]), P.pill))
-    end
-    if tier.amount and m[3] then
+    if tier.amount and lvl ~= 'ok' and m[3] then
       items[#items + 1] = { Foreground = { Color = P.muted } }
-      items[#items + 1] = { Text = ' ' .. string.format('%-' .. m[4] .. 's', m[3]) }
+      items[#items + 1] = { Text = ' ' .. m[3] }
     end
     return items
   end
 
-  -- One continuous pill per tier, a thin divider between the metrics.
+  -- One quiet chip per tier, bare text on the header band, the metrics two spaces apart.
   local function render(tier)
-    local parts = {}
+    local items = {}
     for _, m in ipairs(metrics()) do
-      if not tier.only or tier.only[m[1]] then parts[#parts + 1] = body(m, tier) end
+      if shown(m, tier) then
+        if #items > 0 then items[#items + 1] = { Text = '  ' } end
+        theme.extend(items, body(m, tier))
+      end
     end
-    if #parts == 0 then return {} end
-    return theme.click('system', theme.group(parts, P.pill))
+    if #items == 0 then return {} end
+    return theme.click('system', items)
   end
 
   -- Renders only change when a source was sampled, so a tick between samples reuses
@@ -339,6 +346,8 @@ return function(config, wezterm)
   function api.visible()
     return wezterm.GLOBAL.sysstats_visible ~= false
   end
+
+  api.level = level
 
   -- Items and their width in cells: the richest tier within opts.budget (all
   -- tiers when absent). Returns {}, 0 when nothing fits or nothing is sampled.

@@ -1,6 +1,6 @@
 # Notes and limits
 
-- Agent state is shown in the overview dock, the pane picker and bell toasts, not in the header or the tab titles; a background tab's state is only visible after switching to it. On stock WezTerm the header is not clickable.
+- Agent state is shown in the overview dock, the pane picker and bell toasts; the header only counts the agents that work, are busy or need you (all tabs of the window), and the tab titles show none. A background tab's own state is only visible after switching to it. On stock WezTerm the header is not clickable.
 - The overlay covers the whole active tab; there is no centred modal mode.
 - Moving an omp chat to another account needs omp's per-terminal session record (omp 18); with several omp processes in one terminal it refuses rather than guess. The busy check uses the same heuristic as the agent states.
 - omp's state comes from the run-state glyph in its terminal title (`tui.titleState`, on by default in omp); when that is off, and for other agents, detection is heuristic: it combines the foreground process, screen text markers, the bell and screen activity.
