@@ -1376,7 +1376,8 @@ class AgentsPage(U.Page):
             pos += width
         cv.fill(x, y + 1, table, 1, fg=U.rule_color(p, p["base"]), ch="─")
         totals = usage_totals(r.get("usage") for r in self.rows)
-        self.page_rows = body = max(h - (5 if totals["agents"] else 4), 1)
+        est = totals["estimated"] is not None
+        self.page_rows = body = max(h - (4 + (1 + est if totals["agents"] else 0)), 1)
         self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
         self.top = min(max(self.top, self.cursor - body + 1), self.cursor, max(len(self.rows) - body, 0))
         for i in range(self.top, min(self.top + body, len(self.rows))):
@@ -1411,8 +1412,9 @@ class AgentsPage(U.Page):
         if totals["agents"]:
             n = totals["agents"]
             cv.put(x + 2, y + 4 + shown, U.fit_text(
-                f"Total of {n} agent{'s' if n != 1 else ''} reporting: {totals_text(totals)}   "
-                "~ estimated from list prices, not a bill", table - 4, "end"), p["muted"])
+                f"Total of {n} agent{'s' if n != 1 else ''} reporting: {totals_text(totals)}", table - 4, "end"), p["muted"])
+            if est:
+                cv.put(x + 2, y + 5 + shown, U.fit_text("~ estimated from list prices, not a provider's charge", table - 4, "end"), p["dim"])
         return (x, table) if w >= U.WIDE_COLS else None
 
 

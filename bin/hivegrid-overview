@@ -271,9 +271,9 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
     # and, under the title, the total over the rows.
     has_usage = any(usage_of(p) for p in panes)
     total = A.totals_text(A.usage_totals(usage_of(p) for p in panes)) if has_usage else None
-    first = top.body + (1 if total and h - top.body > 4 else 0)
+    first = top.body + (2 if total and h - top.body > 8 else 1 if total and h - top.body > 4 else 0)
     if first > top.body:
-        cv.put(1, top.body, fit("total " + total, w - 2), pal["muted"])
+        cv.put(1, top.body, ("total " + total if U.text_width("total " + total) <= w - 2 else fit(total, w - 2)), pal["muted"])
     avail = h - first - 1  # rows between the title and the footer
     rows_per = layout(len(panes), avail, has_usage)
     lines = {4: 3, 3: 2, 2: 2, 1: 1}[rows_per]
