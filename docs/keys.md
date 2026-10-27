@@ -5,7 +5,7 @@
 | Group | Keys | Action |
 | --- | --- | --- |
 | Panes | `Ctrl+Shift+\|` / `Ctrl+Shift+_` | split right / down |
-| | `Ctrl+Arrow` | split in that direction |
+| | `Shift+Arrow` | split in that direction |
 | | `Alt+Arrow`, `Alt+h/j/k/l` | focus pane |
 | | `Alt+z` | zoom pane |
 | | `LEADER+r` | resize mode (arrows or `h/j/k/l`, `Esc`/`Enter` leaves) |

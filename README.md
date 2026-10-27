@@ -65,7 +65,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 | Keys | Action |
 | --- | --- |
 | `LEADER+1` / `2` / `3` | new tab with one `omp` / a 2x2 grid / a 3x3 grid |
-| `Ctrl+Arrow` | split the pane in that direction (the grid re-tiles itself) |
+| `Shift+Arrow` | split the pane in that direction (the new pane stays where the split puts it; nothing re-tiles the grid) |
 | `Alt+Arrow`, `Alt+h/j/k/l` | focus a pane |
 | `Alt+z` | zoom a pane |
 | `LEADER+e`, `Ctrl+Shift+E` | equalize all dividers |
