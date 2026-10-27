@@ -81,18 +81,26 @@ return function(config, wezterm)
     return string.format('%dm', math.max(m, 1))
   end
 
-  local function windows(e)
+  -- A window whose reset time has passed has reset: it reads 0 % until a fetch says otherwise
+  -- (a token that expired while no session ran fetches nothing).
+  local function windows(e, now)
     local w = {}
-    if type(e.five_hour) == 'table' and e.five_hour.pct then w[#w + 1] = { '5h', e.five_hour } end
-    if type(e.seven_day) == 'table' and e.seven_day.pct then w[#w + 1] = { '7d', e.seven_day } end
+    for _, k in ipairs({ { '5h', 'five_hour' }, { '7d', 'seven_day' } }) do
+      local d = e[k[2]]
+      if type(d) == 'table' and d.pct then
+        if type(d.reset_at) == 'number' and d.reset_at < now then d = { pct = 0, reset_at = nil } end
+        w[#w + 1] = { k[1], d }
+      end
+    end
     return w
   end
 
   -- Pure summary of one account: the colour of its worst window, that window, and
-  -- whether the numbers are stale or need a login.
+  -- whether the numbers are stale or need a login. `expired` (the token ran out while the
+  -- last numbers are still shown) is stale, not a login.
   local function summarize(e, now)
-    local ws = windows(e)
-    local login = e.state == 'login'
+    local ws = windows(e, now)
+    local login = e.state == 'login' or (e.state == 'expired' and #ws == 0)
     local s = { label = tostring(e.label), windows = ws, login = login, e = e }
     if #ws == 0 then
       s.color = login and P.amber or P.grey
@@ -102,11 +110,10 @@ return function(config, wezterm)
     s.stale = e.state ~= 'ok' or now - (e.updated_at or 0) > STALE_AFTER
     s.worst = ws[1]
     for _, w in ipairs(ws) do
-      if type(w[2].reset_at) == 'number' and w[2].reset_at < now then s.stale = true end
       if w[2].pct > s.worst[2].pct then s.worst = w end
     end
     s.pct = s.worst[2].pct
-    s.color = login and P.amber or color(s.pct)
+    s.color = e.state == 'login' and P.amber or color(s.pct)
     return s
   end
 

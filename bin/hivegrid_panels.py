@@ -13,8 +13,9 @@ from pathlib import Path
 import hivegrid_ui as U
 from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome, is_web, state_dir, web_build_cached, web_label
 from hivegrid_settings_core import (
-    BINDINGS, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding, discover_accounts, effective_keys,
-    format_combo, merge_accounts, normalize, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
+    BINDINGS, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding, current_entry,
+    discover_accounts, effective_keys, format_combo, merge_accounts, normalize, omp_profiles, pair_profile, quota_state,
+    remove_account, tilde, untilde,
     valid_label, valid_profile, valid_search, wezterm_defaults,
 )
 
@@ -689,7 +690,7 @@ class SettingsPage(U.Page):
             cv.put(x + 2, row, "[ ]" if hidden else "[x]", p["dim"] if hidden else p["accent"], r.bg)
             cv.hit(x + 2, row, 3, 1, lambda b, i=i: (self.cursor.__setitem__(2, i), self.toggle_hidden(ui, i)))
             cv.put(x + 8, row, fields(a), fgc, r.bg)
-            quota = "hidden" if hidden else quota_state(a["label"])
+            quota = "hidden" if hidden else quota_state(a["label"], time.time())
             cv.put(x + qx, row, fit(quota, tw - qx - 1), p["amber"] if quota == "login needed" else fgc, r.bg)
         if self.two_pane and accts:
             self.draw_account_detail(ui, cv, x + tw + 4, y + 2, w - tw - 6, cur)
@@ -721,7 +722,7 @@ class SettingsPage(U.Page):
             ("Header", "hidden" if hidden else "shown", p["dim"] if hidden else p["text"]),
         ])
         cv.put(x, ry, "Quota", p["dim"])
-        for line in quota_lines(p, quota_entry(a["label"]), time.time()):
+        for line in quota_lines(p, quota_entry(a["label"], time.time()), time.time()):
             pos = x + 13
             for text, colour, attrs in line:
                 pos += cv.put(pos, ry, fit(text, max(x + w - pos, 0)), colour, None, attrs)
@@ -893,13 +894,17 @@ def series_for(samples, label, since, acc_dir=None):
     return out, resets, first
 
 
-def quota_entry(label):
-    """The header's cache entry of an account (percentages, reset times, state; no credentials)."""
+QUOTA_STATE_WORDS = {"login": "login needed", "expired": "token expired"}
+
+
+def quota_entry(label, now):
+    """The header's cache entry of an account as of `now` (percentages, reset times, state; no
+    credentials)."""
     try:
         e = json.loads((cache_dir() / f"{label}.json").read_text())
     except (OSError, ValueError):
         return None
-    return e if isinstance(e, dict) else None
+    return current_entry(e, now) if isinstance(e, dict) else None
 
 
 def quota_color(p, pct):
@@ -940,7 +945,7 @@ def quota_lines(p, e, now):
         out.append(line)
     state = e.get("state", "?")
     if state != "ok":
-        out.append([({"login": "login needed"}.get(state, state.replace("_", " ")), p["amber"], 0)])
+        out.append([(QUOTA_STATE_WORDS.get(state, state.replace("_", " ")), p["amber"], 0)])
     return out
 
 
@@ -1097,7 +1102,7 @@ class UsagePage(U.Page):
             sel = label == self.account
             r = U.list_row(cv, p, row, x=x, w=w, selected=sel, bg=p["base"], name=fit(label, 13),
                            hit=lambda b, label=label: setattr(self, "account", label))
-            e = quota_entry(label) or {}
+            e = quota_entry(label, now) or {}
             for dx, key in ((16, "five_hour"), (23, "seven_day")):
                 wd = e.get(key)
                 if isinstance(wd, dict) and isinstance(wd.get("pct"), (int, float)):
@@ -1105,7 +1110,7 @@ class UsagePage(U.Page):
             state = e.get("state", "ok") if e else "no data"
             wd = e.get("five_hour")
             if state != "ok":
-                text, colour = {"login": "login needed"}.get(state, state.replace("_", " ")), p["amber"]
+                text, colour = QUOTA_STATE_WORDS.get(state, state.replace("_", " ")), p["amber"]
             elif isinstance(wd, dict) and isinstance(wd.get("reset_at"), (int, float)) and wd["reset_at"] > now:
                 text, colour = remaining(wd["reset_at"] - now), p["dim"]
             else:
@@ -1122,7 +1127,7 @@ class UsagePage(U.Page):
         """`work  5h 12% resets in 3h10m  7d 40% resets in 4d02h`, from the header's cache."""
         p = ui.pal
         pos = x + cv.put(x, y, self.account, p["bright"], None, BOLD) + 3
-        for text, colour, attrs in quota_segments(p, quota_entry(self.account), now):
+        for text, colour, attrs in quota_segments(p, quota_entry(self.account, now), now):
             pos += cv.put(pos, y, fit(text, max(x + w - pos, 0)), colour, None, attrs)
 
     def braille(self, ui, cv, x, y, w, h, five, seven, x0, x1, since):

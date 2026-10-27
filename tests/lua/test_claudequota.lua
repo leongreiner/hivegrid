@@ -145,17 +145,36 @@ T.test('with no numbers anywhere, an account needing a login is spelled out befo
   T.ok(dots:find('2 login', 1, true), 'narrowest tier: ' .. dots)
 end)
 
-T.test('numbers older than 3 minutes, or with a reset already past, are marked stale', function(wz)
+T.test('numbers older than 3 minutes are marked stale', function(wz)
   local cq = setup(wz, { files = {
     main = ok_entry('main', 40, nil, { updated_at = T0 - 181 }),
-    ['2'] = ok_entry('2', 30, nil, { reset5 = T0 - 1 }),
     private = ok_entry('private', 20, nil, { updated_at = T0 - 170 }),
   } })
-  T.eq(cq.text(), '▮▮▮ main 5h 40%~')
+  T.eq(cq.text(), '▮▮ main 5h 40%~')
   local r = regions(wz, cq.tiers()[1].items)
   T.ok(r['quota:main']:find('~', 1, true), r['quota:main'])
-  T.ok(r['quota:2']:find('~', 1, true), r['quota:2'])
   T.ok(not r['quota:private']:find('~', 1, true), r['quota:private'])
+end)
+
+T.test('a window whose reset has passed reads 0% and is not stale', function(wz)
+  local cq = setup(wz, { accounts = { ACCOUNTS[1] }, files = {
+    main = ok_entry('main', 90, 30, { reset5 = T0 - 1 }),
+  } })
+  T.eq(cq.text(), '▮ main 7d 30%')
+  local r = regions(wz, cq.tiers()[1].items)
+  T.ok(r['quota:main']:find('5h 0%', 1, true), r['quota:main'])
+  T.ok(not r['quota:main']:find('~', 1, true), r['quota:main'])
+end)
+
+T.test('an expired token keeps the numbers, marked stale, instead of a login chip', function(wz)
+  local cq = setup(wz, { accounts = { ACCOUNTS[1] }, files = {
+    main = ok_entry('main', 40, 7, { state = 'expired', updated_at = T0 - 7200 }),
+  } })
+  T.eq(cq.text(), '▮ main 5h 40%~')
+  local all = wz.format(cq.tiers()[1].items)
+  T.ok(not all:find('login', 1, true), all)
+  local bare = setup(wz, { accounts = { ACCOUNTS[1] }, files = { main = { label = 'main', state = 'expired' } } })
+  T.eq(bare.text(), '▮ main login')
 end)
 
 T.test('a failed refresh keeps the last numbers but marks them stale', function(wz)

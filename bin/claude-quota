@@ -15,14 +15,23 @@ Read-only on credentials: tokens live only in memory and the request header; not
 ever refreshed or written. Per account the token comes from the paired omp profile first
 (~/.omp/profiles/<profile>/agent/agent.db, opened read-only; omp refreshes it while in
 use), then from the account directory's .credentials.json (which only the `claude` CLI
-refreshes). `login` means neither holds a valid token. The cache holds numbers,
-timestamps and a state string only.
+refreshes). `expired` means the credentials exist but their access token has run out: the
+last numbers stay on show, marked stale, for a day; after that, or without numbers, and when
+the API rejects the token, it is `login`. The cache holds numbers, timestamps and a state
+string only.
+
+statusline: Claude Code's documented statusLine hook. Reads the session JSON on stdin and stores
+         its rate_limits (the same 5h / 7d numbers, no token needed) for the account named by
+         CLAUDE_CONFIG_DIR; `--chain CMD` runs CMD on the same input and prints its output.
+install-statusline: sets that hook in each account's settings.json (an existing statusLine
+         command is kept as the chain).
 """
 import argparse
 import concurrent.futures
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -34,7 +43,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from hivegrid_settings_core import pair_profile  # noqa: E402
+from hivegrid_settings_core import current_entry, pair_profile  # noqa: E402
 
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 HOME = Path.home()
@@ -43,6 +52,9 @@ OMP_PROFILES = Path(os.environ.get("CLAUDE_QUOTA_OMP_PROFILES") or HOME / ".omp"
 CACHE_DIR = Path(os.environ.get("CLAUDE_QUOTA_CACHE_DIR") or HOME / ".cache" / "wezterm-claude-quota")
 OK_TTL = 60
 ERR_BASE, RATE_BASE, LOGIN_TTL, MAX_BACKOFF = 30, 300, 30, 1800
+EXPIRED_GRACE = 86400  # an expired token keeps the last numbers on show this long, then it is a login
+STATUSLINE_EVERY = 5  # the hook fires after every message: store at most this often
+CHAIN_TIMEOUT = 10
 HTTP_TIMEOUT = 5
 LOCK_STALE = 90
 STALE_AFTER = 180  # a shown number older than this gets the "~" mark
@@ -154,7 +166,7 @@ def backoff(kind, fails, retry_after=None):
     """Seconds until the next request. fails counts consecutive failures including this one."""
     if kind == "ok":
         return OK_TTL
-    if kind == "login":
+    if kind in ("login", "expired"):
         return LOGIN_TTL
     base = RATE_BASE if kind == "rate_limited" else ERR_BASE
     delay = min(MAX_BACKOFF, base * 2 ** max(0, fails - 1))
@@ -177,7 +189,7 @@ def fmt_remaining(secs):
 
 
 def read_token(cred_dir, now):
-    """-> (token, None) or (None, 'login'). Never logs or returns anything but the token."""
+    """-> (token, None), (None, 'expired') or (None, 'login'). Never logs or returns anything but the token."""
     try:
         data = json.loads((Path(cred_dir) / ".credentials.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -189,7 +201,7 @@ def read_token(cred_dir, now):
     if not isinstance(token, str) or not token or not isinstance(exp, (int, float)):
         return None, "login"
     if exp <= now * 1000:
-        return None, "login"
+        return None, "expired"
     return token, None
 
 
@@ -225,6 +237,9 @@ def read_omp_token(profile, now):
 def next_entry(prev, label, order, kind, now, windows=None, http=None, retry_after=None):
     """New cache record; failures keep the last good numbers so the header can mark them stale."""
     prev = prev if isinstance(prev, dict) else {}
+    updated = prev.get("updated_at")
+    if kind == "expired" and not (isinstance(updated, (int, float)) and now - updated <= EXPIRED_GRACE):
+        kind = "login"
     fails = 0 if kind == "ok" else int(prev.get("fails", 0) or 0) + 1
     entry = {
         "label": label, "order": order, "state": kind, "http": http,
@@ -244,14 +259,11 @@ def is_due(entry, now):
 def render(entries, now, compact=False):
     parts = []
     for e in sorted(entries, key=lambda e: e.get("order", 0)):
+        e = current_entry(e, now)
         wins = [(k, e.get(f)) for k, f in (("5h", "five_hour"), ("7d", "seven_day")) if isinstance(e.get(f), dict)]
         state = e.get("state")
-        mark = ""
-        if wins:
-            stale = state != "ok" or now - (e.get("updated_at") or 0) > STALE_AFTER
-            past = any((w["reset_at"] or now + 1) < now for _, w in wins)
-            mark = "~" if stale or past else ""
-        if state == "login" and not wins:
+        mark = "~" if wins and (state != "ok" or now - (e.get("updated_at") or 0) > STALE_AFTER) else ""
+        if state in ("login", "expired") and not wins:
             body = "login"
         elif not wins:
             body = "err"
@@ -446,6 +458,19 @@ def trim_history(path, now):
         pass
 
 
+def save_entry(entry, prev, now, cred_dir):
+    """Write the cache record; a good fetch also appends a history sample when one is due."""
+    if entry["state"] == "ok" and history_due(prev, entry, now):
+        try:
+            append_history(entry, now, cred_dir)
+            entry["hist"] = {"ts": int(now), **{k: entry[k]["pct"] for k in ("five_hour", "seven_day") if isinstance(entry.get(k), dict)}}
+        except OSError:
+            pass
+    elif isinstance(prev, dict) and "hist" in prev:
+        entry["hist"] = prev["hist"]
+    write_entry(entry)
+
+
 def refresh_one(cred_dir, label, order, version, now, profile=None):
     prev = read_entry(label)
     if not is_due(prev, now):
@@ -459,19 +484,108 @@ def refresh_one(cred_dir, label, order, version, now, profile=None):
         kind, windows, http, ra = fetch(token, version)
     token = None
     entry = next_entry(prev, label, order, kind, now, windows, http, ra)
-    if kind == "ok":
-        if history_due(prev, entry, now):
-            try:
-                append_history(entry, now, cred_dir)
-                entry["hist"] = {"ts": int(now), **{k: entry[k]["pct"] for k in ("five_hour", "seven_day") if isinstance(entry.get(k), dict)}}
-            except OSError:
-                pass
-        elif isinstance(prev, dict) and "hist" in prev:
-            entry["hist"] = prev["hist"]
-    elif isinstance(prev, dict) and "hist" in prev:
-        entry["hist"] = prev["hist"]
-    write_entry(entry)
+    save_entry(entry, prev, now, cred_dir)
     return entry, True
+
+
+def parse_statusline(payload):
+    """rate_limits of Claude Code's statusLine input -> {'five_hour': {pct, reset_at}, ...} or None."""
+    limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+    if not isinstance(limits, dict):
+        return None
+    out = {}
+    for key in ("five_hour", "seven_day"):
+        w = limits.get(key)
+        pct = w.get("used_percentage") if isinstance(w, dict) else None
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0 <= pct <= 100:
+            continue
+        reset = parse_ts(w.get("resets_at"))
+        out[key] = {"pct": float(pct), "reset_at": reset if reset and reset > 0 else None}
+    return out or None
+
+
+def statusline_account():
+    """(config dir, label, order) of the account whose Claude Code runs the hook."""
+    d = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude").expanduser()
+    for i, (ad, lb, _) in enumerate(default_accounts()):
+        if os.path.realpath(ad) == os.path.realpath(d):
+            return d, lb, i
+    return d, label_for(d), None
+
+
+def record_statusline(raw, now):
+    """Store the session's rate limits as this account's fresh numbers -> the cache entry, or None
+    when the input carries none (an API-key session has no rate_limits)."""
+    windows = parse_statusline(json.loads(raw))
+    if not windows:
+        return None
+    cred_dir, label, order = statusline_account()
+    ensure_cache_dir()
+    prev = read_entry(label)
+    if isinstance(prev, dict):
+        if prev.get("state") == "ok" and now - (prev.get("updated_at") or 0) < STATUSLINE_EVERY:
+            return prev
+        windows = {k: windows.get(k) or prev.get(k) for k in ("five_hour", "seven_day")}
+        order = prev.get("order", 99) if order is None else order
+    entry = next_entry(prev, label, 99 if order is None else order, "ok", now, windows)
+    save_entry(entry, prev, now, cred_dir)
+    return entry
+
+
+def cmd_statusline(args):
+    raw = sys.stdin.read()
+    now = time.time()
+    try:
+        entry = record_statusline(raw, now)
+    except (OSError, ValueError):
+        entry = None  # never let the hook break Claude Code's status line
+    out = ""
+    if args.chain:
+        try:
+            out = subprocess.run(args.chain, shell=True, input=raw, capture_output=True, text=True,
+                                 timeout=CHAIN_TIMEOUT, check=False).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    elif entry:
+        out = render([entry], now)
+    sys.stdout.write(out)
+    return 0
+
+
+def install_statusline(cred_dir):
+    """Point the account's statusLine at `claude-quota statusline`, chaining an existing command.
+    -> 'installed', 'chained', 'already', 'no config dir', 'unreadable' or 'unsupported'."""
+    cred_dir = Path(cred_dir)
+    if not cred_dir.is_dir():
+        return "no config dir"
+    path = cred_dir / "settings.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(data, dict):
+        return "unreadable"
+    old = data.get("statusLine")
+    command = f"{shlex.quote(str(Path(__file__).resolve()))} statusline"
+    result = "installed"
+    if old is not None:
+        if not (isinstance(old, dict) and old.get("type") == "command" and isinstance(old.get("command"), str)):
+            return "unsupported"
+        if re.search(r"claude-quota\S*\s+statusline", old["command"]):
+            return "already"
+        command += f" --chain {shlex.quote(old['command'])}"
+        result = "chained"
+    data["statusLine"] = {**(old or {}), "type": "command", "command": command}
+    try:
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+        tmp = path.with_name(f".settings.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        return "unreadable"
+    return result
 
 
 def cmd_refresh(args):
@@ -500,6 +614,13 @@ def cmd_show(args):
     entries = [e for e in (read_entry(lb) for _, lb, _ in resolve_accounts(args)) if e]
     print(render(entries, time.time(), args.compact))
     return 0
+
+
+def cmd_install_statusline(args):
+    results = [(lb, install_statusline(d)) for d, lb, _ in resolve_accounts(args)]
+    for lb, res in results:
+        print(f"{lb}: {res}")
+    return 0 if all(res in ("installed", "chained", "already") for _, res in results) else 1
 
 
 def resolve_accounts(args):
@@ -534,6 +655,11 @@ def main(argv=None):
     s = sub.add_parser("show", help="one-line summary from the cache")
     s.add_argument("--compact", action="store_true")
     s.set_defaults(fn=cmd_show)
+    t = sub.add_parser("statusline", help="Claude Code statusLine hook: store the session's rate limits")
+    t.add_argument("--chain", help="shell command that gets the same stdin; its output is the status line")
+    t.set_defaults(fn=cmd_statusline)
+    i = sub.add_parser("install-statusline", help="set the statusLine hook in each account's settings.json")
+    i.set_defaults(fn=cmd_install_statusline)
     args = p.parse_args(argv)
     return args.fn(args)
 

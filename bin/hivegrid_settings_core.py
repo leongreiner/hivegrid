@@ -400,19 +400,31 @@ def cache_dir():
     return Path(os.environ.get("CLAUDE_QUOTA_CACHE_DIR") or home() / ".cache" / "wezterm-claude-quota")
 
 
-def quota_state(label):
+def current_entry(e, now):
+    """A cache entry as of `now`: a window whose reset time has passed has reset, so it reads 0 %
+    with no reset time until a fetch says otherwise (the token may be unusable, so none comes)."""
+    out = dict(e)
+    for key in ("five_hour", "seven_day"):
+        w = e.get(key)
+        if isinstance(w, dict) and isinstance(w.get("reset_at"), (int, float)) and w["reset_at"] < now:
+            out[key] = {"pct": 0.0, "reset_at": None}
+    return out
+
+
+def quota_state(label, now):
     """One word / numbers from the helper's cache; the cache holds no credentials."""
     try:
         e = json.loads((cache_dir() / f"{label}.json").read_text())
     except (OSError, ValueError):
         return "no data"
+    e = current_entry(e, now)
     bits = []
     for key, tag in (("five_hour", "5h"), ("seven_day", "7d")):
         w = e.get(key)
         if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
             bits.append(f"{tag} {w['pct']:.0f}%")
     state = str(e.get("state", "?"))
-    word = {"login": "login needed"}.get(state, state.replace("_", " "))
+    word = {"login": "login needed", "expired": "token expired"}.get(state, state.replace("_", " "))
     if bits:
         return " ".join(bits) + ("" if state == "ok" else f" · {word}")
     return word

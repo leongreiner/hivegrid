@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import sys
@@ -291,6 +292,23 @@ class Backoff(unittest.TestCase):
         login = Q.next_entry(None, "main", 0, "login", NOW)
         self.assertEqual(Q.render([login], NOW), "main login")
 
+    def test_expired_token_keeps_the_numbers_for_a_day_then_is_a_login(self):
+        ok = Q.next_entry(None, "main", 0, "ok", NOW, {"five_hour": {"pct": 42.0, "reset_at": NOW + 86400}}, 200)
+        soon = Q.next_entry(ok, "main", 0, "expired", NOW + 3 * 3600)
+        self.assertEqual(soon["state"], "expired")
+        out = Q.render([soon], NOW + 3 * 3600, compact=True)
+        self.assertIn("42%~", out)
+        self.assertNotIn("login", out)
+        late = Q.next_entry(ok, "main", 0, "expired", NOW + Q.EXPIRED_GRACE + 1)
+        self.assertEqual(late["state"], "login")
+        self.assertEqual(Q.next_entry(None, "main", 0, "expired", NOW)["state"], "login")
+
+    def test_a_window_past_its_reset_reads_zero_and_is_not_stale(self):
+        ok = Q.next_entry(None, "main", 0, "ok", NOW + 650, {"five_hour": {"pct": 90.0, "reset_at": NOW + 600},
+                                                            "seven_day": {"pct": 30.0, "reset_at": NOW + 86400}}, 200)
+        self.assertEqual(Q.render([ok], NOW + 700, compact=True), "main 7d 30%")
+        self.assertEqual(Q.render([ok], NOW + 700), "main 5h 0% | 7d 30% 23h48m")
+
 
 class RefreshCache(Env):
     def test_not_due_means_no_request(self):
@@ -480,6 +498,121 @@ class TokenSources(Env):
         self.settings({"accounts": [{"label": "w", "dir": "~/.claude-w", "profile": "work"}]})
         Q.main(["refresh"])
         self.assertEqual(self.calls, ["omp-work"])
+
+
+class StatuslineHook(Env):
+    LIMITS = {"rate_limits": {"five_hour": {"used_percentage": 12.5, "resets_at": NOW + 3600},
+                              "seven_day": {"used_percentage": 40, "resets_at": NOW + 86400}}}
+
+    def hook(self, payload, *args, config_dir=None, now=NOW):
+        env = {"CLAUDE_CONFIG_DIR": str(config_dir)} if config_dir else {}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch("sys.stdout", out), mock.patch.object(Q.time, "time", lambda: now):
+            self.assertEqual(Q.main(["statusline", *args]), 0)
+        return out.getvalue()
+
+    def test_rate_limits_become_the_accounts_fresh_numbers(self):
+        d = self.claude_dir(".claude-2", token=None)
+        out = self.hook(self.LIMITS, config_dir=d)
+        e = Q.read_entry("2")
+        self.assertEqual((e["state"], e["updated_at"], e["fails"]), ("ok", NOW, 0))
+        self.assertEqual((e["five_hour"], e["seven_day"]),
+                         ({"pct": 12.5, "reset_at": NOW + 3600}, {"pct": 40.0, "reset_at": NOW + 86400}))
+        self.assertEqual(e["next_at"], NOW + Q.OK_TTL, "the poll waits while a session reports")
+        self.assertEqual(out, "2 5h 12% 1h00m | 7d 40% 1d0h")
+        self.assertEqual(len(self.history()), 1)
+
+    def test_account_comes_from_the_settings_list_and_a_login_state_is_cleared(self):
+        d = self.claude_dir(".claude-w", token=None)
+        self.settings({"accounts": [{"label": "work", "dir": "~/.claude-w"}]})
+        Q.ensure_cache_dir()
+        Q.write_entry(Q.next_entry(None, "work", 0, "login", NOW - 10))
+        self.hook(self.LIMITS, config_dir=d)
+        self.assertEqual(Q.read_entry("work")["state"], "ok")
+
+    def test_a_missing_window_keeps_the_previous_one(self):
+        d = self.claude_dir(".claude-2", token=None)
+        self.hook(self.LIMITS, config_dir=d)
+        only5 = {"rate_limits": {"five_hour": {"used_percentage": 50, "resets_at": NOW + 3000}}}
+        self.hook(only5, config_dir=d, now=NOW + 30)
+        e = Q.read_entry("2")
+        self.assertEqual((e["five_hour"]["pct"], e["seven_day"]["pct"]), (50.0, 40.0))
+
+    def test_bursts_are_stored_at_most_every_few_seconds(self):
+        d = self.claude_dir(".claude-2", token=None)
+        self.hook(self.LIMITS, config_dir=d)
+        other = {"rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": NOW + 3000}}}
+        self.hook(other, config_dir=d, now=NOW + Q.STATUSLINE_EVERY - 1)
+        self.assertEqual(Q.read_entry("2")["five_hour"]["pct"], 12.5)
+        self.hook(other, config_dir=d, now=NOW + Q.STATUSLINE_EVERY)
+        self.assertEqual(Q.read_entry("2")["five_hour"]["pct"], 99.0)
+
+    def test_input_without_usable_limits_stores_nothing_and_never_fails(self):
+        d = self.claude_dir(".claude-2", token=None)
+        for payload in ({}, {"rate_limits": None}, {"rate_limits": {"five_hour": {"used_percentage": 101}}},
+                        {"rate_limits": {"five_hour": {"used_percentage": True}}}):
+            self.assertEqual(self.hook(payload, config_dir=d), "")
+        self.assertIsNone(Q.read_entry("2"))
+        with mock.patch("sys.stdin", io.StringIO("not json")), mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(Q.main(["statusline"]), 0)
+
+    def test_chain_gets_the_same_input_and_its_output_is_the_status_line(self):
+        d = self.claude_dir(".claude-2", token=None)
+        out = self.hook(self.LIMITS, "--chain", "python3 -c \"import sys,json;print('model', 'rate_limits' in json.load(sys.stdin))\"",
+                        config_dir=d)
+        self.assertEqual(out, "model True\n")
+        self.assertEqual(Q.read_entry("2")["five_hour"]["pct"], 12.5)
+
+    def test_a_zero_reset_time_means_unknown(self):
+        w = Q.parse_statusline({"rate_limits": {"five_hour": {"used_percentage": 0, "resets_at": 0}}})
+        self.assertEqual(w, {"five_hour": {"pct": 0.0, "reset_at": None}})
+
+
+class InstallStatusline(Env):
+    def settings_of(self, d):
+        return json.loads((d / "settings.json").read_text())
+
+    def test_installs_keeping_the_other_settings(self):
+        d = self.claude_dir(".claude-2", token=None)
+        (d / "settings.json").write_text(json.dumps({"env": {"A": "1"}, "model": "opus"}))
+        self.assertEqual(Q.install_statusline(d), "installed")
+        s = self.settings_of(d)
+        self.assertEqual((s["env"], s["model"]), ({"A": "1"}, "opus"))
+        self.assertEqual(s["statusLine"]["type"], "command")
+        self.assertTrue(s["statusLine"]["command"].endswith("claude-quota statusline"), s["statusLine"])
+
+    def test_creates_a_missing_settings_file_privately(self):
+        d = self.claude_dir(".claude-2", token=None)
+        self.assertEqual(Q.install_statusline(d), "installed")
+        self.assertEqual(stat.S_IMODE((d / "settings.json").stat().st_mode), 0o600)
+
+    def test_an_existing_status_line_becomes_the_chain_and_a_rerun_changes_nothing(self):
+        d = self.claude_dir(".claude-2", token=None)
+        (d / "settings.json").write_text(json.dumps({"statusLine": {"type": "command", "command": "my 'line' --x", "padding": 1}}))
+        self.assertEqual(Q.install_statusline(d), "chained")
+        cmd = self.settings_of(d)["statusLine"]
+        self.assertEqual(cmd["padding"], 1)
+        self.assertEqual(shlex.split(cmd["command"])[1:], ["statusline", "--chain", "my 'line' --x"])
+        before = (d / "settings.json").read_text()
+        self.assertEqual(Q.install_statusline(d), "already")
+        self.assertEqual((d / "settings.json").read_text(), before)
+
+    def test_unreadable_and_unsupported_settings_are_left_alone(self):
+        d = self.claude_dir(".claude-2", token=None)
+        (d / "settings.json").write_text("{ not json")
+        self.assertEqual(Q.install_statusline(d), "unreadable")
+        self.assertEqual((d / "settings.json").read_text(), "{ not json")
+        (d / "settings.json").write_text(json.dumps({"statusLine": "plain string"}))
+        self.assertEqual(Q.install_statusline(d), "unsupported")
+        self.assertEqual(Q.install_statusline(self.home / "nope"), "no config dir")
+
+    def test_command_installs_every_listed_account(self):
+        a, b = self.claude_dir(".claude"), self.claude_dir(".claude-2")
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            self.assertEqual(Q.main(["--dirs", f"{a},{b}", "install-statusline"]), 0)
+        self.assertEqual(out.getvalue(), "main: installed\n2: installed\n")
 
 
 if __name__ == "__main__":
