@@ -740,6 +740,87 @@ return function(config, wezterm)
       end))
   end
 
+  -- Drag and drop ---------------------------------------------------------
+  -- The Hivegrid build tracks Alt+left-drag of a pane (config.pane_drag_modifiers) and emits
+  -- pane-drag-drop(window, source, target, zone) on release over another grid pane. Dropping
+  -- on the middle swaps the two panes; dropping on an edge band takes the source out of its
+  -- place and splits the target there, the source on that side. Both rebuild the grid like
+  -- swap and arrange: panes are moved, never recreated.
+  pcall(function() config.pane_drag_modifiers = 'ALT' end)
+
+  -- Tree t without leaf `id` (its sibling takes the room); nil when nothing is left.
+  local function without(t, id)
+    if type(t) ~= 'table' then
+      return t ~= id and t or nil
+    end
+    local a, b = without(t.a, id), without(t.b, id)
+    if a == nil or b == nil then
+      return a or b
+    end
+    return { dir = t.dir, a = a, b = b, frac = t.frac }
+  end
+
+  -- Tree t with leaf `id` replaced by `new`.
+  local function replaced(t, id, new)
+    if type(t) ~= 'table' then
+      return t == id and new or t
+    end
+    return { dir = t.dir, a = replaced(t.a, id, new), b = replaced(t.b, id, new), frac = t.frac }
+  end
+
+  local EDGE = {
+    left = { 'right', true }, right = { 'right', false },
+    top = { 'bottom', true }, bottom = { 'bottom', false },
+  }
+
+  local drop = exclusive(function(window, src, dst, zone)
+    local from, to = src:pane_id(), dst:pane_id()
+    local pane = window:active_pane()
+    if from == to or is_dock(from) or is_dock(to) then
+      return
+    end
+    if zone == 'center' then
+      permute(window, pane, function(order)
+        local ids = {}
+        for i, info in ipairs(order) do
+          local cur = info.pane:pane_id()
+          ids[i] = cur == from and to or cur == to and from or cur
+        end
+        return ids
+      end, from)
+      return
+    end
+    local edge = EDGE[zone]
+    if not edge then
+      return
+    end
+    local slots, seen = {}, {}
+    for i, info in ipairs(in_order(grid_of(window:active_tab()))) do
+      local id = info.pane:pane_id()
+      seen[id] = true
+      slots[i] = rect(id, info.left, info.top, info.width, info.height)
+    end
+    if not (seen[from] and seen[to]) or #slots < 2 then
+      return
+    end
+    local tree = carve(slots)
+    if not tree then
+      toast(window, 'This layout cannot be rebuilt; nothing was moved')
+      return
+    end
+    local pair = { dir = edge[1], frac = 0.5 }
+    if edge[2] then
+      pair.a, pair.b = from, to
+    else
+      pair.a, pair.b = to, from
+    end
+    tree = replaced(without(tree, from), to, pair)
+    if not rebuild(window, pane, tree, from) then
+      toast(window, 'Could not rebuild the layout; panes were put back side by side')
+    end
+  end)
+  wezterm.on('pane-drag-drop', drop)
+
   -- Pane mode -----------------------------------------------------------
   local function once(...)
     return act.Multiple { act.PopKeyTable, ... }

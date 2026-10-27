@@ -1,5 +1,6 @@
 -- config/layouts.lua through its public surface: api.arrange / api.equalize and the key
--- bindings / key tables it installs. Nothing in it runs on its own (no event handlers).
+-- bindings / key tables it installs, and its handler for the fork's pane-drag-drop event.
+-- Nothing else in it runs on its own.
 -- `wezterm cli` is answered by tests/lua/fakemux.lua, a model of WezTerm's split tree.
 local T = require 'tests.lua.t'
 local FM = require 'tests.lua.fakemux'
@@ -198,6 +199,54 @@ test('pane mode s swaps with the chosen pane, keyboard stays on the moved pane',
   pick.answer('3')
   T.eq((reading(mux)), { 3, 2, 1 })
   T.eq(mux.tabs[1].active, 1)
+end)
+
+-- Drag and drop (the fork's pane-drag-drop event) ----------------------------------------
+
+local function dropped(wz, mux, from, to, zone)
+  wz.stub.call('pane-drag-drop', mux.window, wz.mux.get_pane(from), wz.mux.get_pane(to), zone)
+end
+
+test('dropping a pane on the middle of another swaps them, keyboard follows the dragged one', function(wz)
+  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3 }, 250) })
+  dropped(wz, mux, 1, 3, 'center')
+  T.eq((reading(mux)), { 3, 2, 1 })
+  T.eq(mux.tabs[1].active, 1)
+end)
+
+test('dropping on an edge moves the pane beside the target, the others keep their order', function(wz)
+  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3 }, 250) })
+  dropped(wz, mux, 1, 3, 'bottom')
+  local ids, _, list = reading(mux)
+  T.eq(ids, { 2, 3, 1 }, 'reading order: 2 on top, 3 over 1')
+  T.eq(list[2].left, list[3].left, '3 and 1 share a column')
+  local three, one = mux:geometry(3), mux:geometry(1)
+  T.eq(three.left, one.left, 'same column')
+  T.ok(three.top < one.top, '3 above 1')
+  T.ok(math.abs(three.height - one.height) <= 1, 'the target is split in half')
+  T.eq(#mux.tabs, 1)
+end)
+
+test('dropping on the left edge puts the dragged pane left of the target', function(wz)
+  local root = FM.v(29, FM.h(124, FM.leaf(1), FM.leaf(2)), FM.leaf(3))
+  local mux = setup(wz, { cols = 250, rows = 60, root = root })
+  dropped(wz, mux, 3, 1, 'left')
+  local a, b, c = mux:geometry(3), mux:geometry(1), mux:geometry(2)
+  T.ok(a.left < b.left and a.top == b.top, '3 left of 1, same row')
+  T.ok(b.left < c.left, '1 still left of 2')
+  T.eq(a.height, c.height, 'one row now')
+end)
+
+test('a drop never moves the sidebar and ignores the sidebar as source or target', function(wz)
+  local root = FM.h(30, FM.leaf(99), FM.h(124, FM.leaf(1), FM.leaf(2)))
+  local mux = setup(wz, { cols = 280, rows = 60, root = root })
+  dock(wz, mux.tab:tab_id(), 99)
+  dropped(wz, mux, 1, 99, 'center')
+  dropped(wz, mux, 99, 1, 'top')
+  T.eq(#mux:commands(), 0, 'nothing was moved')
+  dropped(wz, mux, 1, 2, 'right')
+  T.eq(mux:geometry(99).width, 30, 'sidebar untouched')
+  T.eq(mux:geometry(99).left, 0)
 end)
 
 -- Nothing re-tiles by itself ---------------------------------------------------------
