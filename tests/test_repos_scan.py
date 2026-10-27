@@ -216,7 +216,7 @@ class StatusTest(unittest.TestCase):
         return R.status(R.Repo(path or self.repo, "repo"))
 
     def dot(self, st):
-        return GV.dot(st)[1]
+        return R.dot(st)[1]
 
     def conflict(self, path):
         """Two branches change README differently; returns with `git merge other` stopped on it."""
@@ -327,7 +327,7 @@ class StatusTest(unittest.TestCase):
         repo = R.Repo(gone, "gone")
         shutil.rmtree(gone)
         self.assertEqual(R.status(repo), {"error": True})
-        self.assertEqual(GV.dot(repo.status), ("✕", "red"))
+        self.assertEqual(R.dot(repo.status), ("✕", "red"))
 
     def test_broken_nested_repo_is_an_error_not_the_outer_repos_state(self):
         # e.g. an interrupted clone: listed (it holds `.git`) but unreadable; git must not walk
@@ -343,7 +343,7 @@ class StatusTest(unittest.TestCase):
                 self.assertEqual(self.status(path), {"error": True})
 
     def test_status_not_read_yet_is_neutral(self):
-        self.assertEqual(GV.dot(None)[1], "muted")
+        self.assertEqual(R.dot(None)[1], "muted")
 
 
 class ParseStatusTest(unittest.TestCase):

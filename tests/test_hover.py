@@ -429,6 +429,10 @@ class DockNumbersTest(unittest.TestCase):
         bgs = [cv.cells[y][20][2] for y in range(3, 6)]
         self.assertNotEqual(bgs[0], bgs[1])
         self.assertEqual(bgs[0], bgs[2])
+        roomy = D.render({"panes": self.DOC["panes"][:3]}, 40, 20, NOW)  # blank lines between: no stripes
+        self.assertEqual(roomy.cells[5][20][2], roomy.cells[8][20][2])
+
+
 class RowTitleTest(unittest.TestCase):
     """A row is named by the agent's own title; the directory is not repeated when every pane shares it."""
 
@@ -457,10 +461,6 @@ class RowTitleTest(unittest.TestCase):
             if "Overview" not in top:  # too narrow for the whole title: the buttons are gone, not drawn over it
                 self.assertFalse(set(top) & set("✕⊞▦"), (w, top))
             self.assertTrue(top.startswith(" ⬡ "), (w, top))
-
-
-        roomy = D.render({"panes": self.DOC["panes"][:3]}, 40, 20, NOW)  # blank lines between: no stripes
-        self.assertEqual(roomy.cells[5][20][2], roomy.cells[8][20][2])
 
 
 class DockCloseTest(unittest.TestCase):

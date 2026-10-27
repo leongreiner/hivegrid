@@ -4,11 +4,14 @@ find_repos() lists the repositories of a workspace directory the way VS Code's S
 view does: the repository around the directory plus every repository below it. status() reads one
 repository's branch, upstream distance and change counts with a single `git status` call, plus the
 operation in progress (merge, rebase, ...) from marker files. ci() reads the GitHub Actions result
-of the checked-out branch through the `gh` CLI, for repositories that have workflows.
+of the checked-out branch through the `gh` CLI, for repositories that have workflows. Where answers
+"which branch, and which worktree, is the checkout around this directory on" for the overview dock,
+cached, with the status read off the calling thread.
 """
 import json
 import os
 import subprocess
+import threading
 import time
 
 # Directories never worth descending into: dependency trees, build output and caches.
@@ -165,6 +168,119 @@ def status(repo):
         s["op"] = operation(repo.path)
         repo.status = s
     return repo.status
+
+
+def dot(st):
+    """(glyph, palette key) of the status dot: reading, unreadable, conflicts, changes, clean.
+    Only uncommitted work makes it amber; commits not yet pushed leave it green."""
+    if st is None:
+        return "…", "muted"
+    if st.get("error"):
+        return "✕", "red"
+    if st["conflicts"]:
+        return "●", "red"
+    if st["staged"] or st["changed"] or st["untracked"]:
+        return "●", "amber"
+    return "●", "green"
+
+
+def checkout(cwd):
+    """(work tree root, git directory) of the checkout around `cwd` (`~` allowed), or None for a
+    relative path (a web pane's host), a missing directory, a directory outside any repository
+    and a broken `.git`. Walks up looking for `.git`; runs no git."""
+    path = os.path.expanduser(cwd or "")
+    if not os.path.isabs(path) or not os.path.isdir(path):
+        return None
+    path = os.path.normpath(path)
+    while True:
+        if os.path.lexists(os.path.join(path, ".git")):
+            gd = git_dir(path)
+            return (path, gd) if gd and os.path.isdir(gd) else None
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def head(gd):
+    """(branch, detached) from the HEAD file of git directory `gd`: a detached HEAD reads as
+    "@" and the first 7 characters of the commit, as parse_status shows it. None when unreadable."""
+    try:
+        with open(os.path.join(gd, "HEAD"), encoding="utf-8") as f:
+            text = f.readline().strip()
+    except OSError:
+        return None
+    if text.startswith("ref:"):
+        ref = text[4:].strip()
+        return (ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref), False
+    return ("@" + text[:7], True) if text else None
+
+
+class Where:
+    """The branch and worktree of the checkout around a directory, for the overview dock, which
+    asks again on every redraw: call the instance with a directory. The branch comes from reading
+    HEAD (no git process), cached for `ttl` seconds per directory; the changes dot needs one
+    `git status` per repository, read at most every `status_ttl` seconds on a daemon thread (the
+    dot is missing until the first read lands; background=False reads it on the calling thread).
+    The answer is None outside a repository, else a dict:
+      branch    the branch, or "@abc1234" on a detached HEAD
+      detached  True on a detached HEAD
+      worktree  the directory name of a linked worktree (`git worktree add`), None otherwise
+      dot       "green" clean, "amber" uncommitted changes, "red" conflicts, None while unread"""
+
+    CACHE = 64  # directories remembered before the stale ones are dropped
+
+    def __init__(self, ttl=2.0, status_ttl=5.0, background=True, clock=time.monotonic):
+        self.ttl, self.status_ttl, self.background, self.clock = ttl, status_ttl, background, clock
+        self.places = {}  # cwd -> (read at, (root, branch, detached, linked) or None)
+        self.states = {}  # root -> {"at", "dot", "busy", "seen"}
+        self.lock = threading.Lock()
+
+    def __call__(self, cwd):
+        now = self.clock()
+        with self.lock:
+            hit = self.places.get(cwd)
+            if hit is None or now - hit[0] >= self.ttl:
+                hit = self.places[cwd] = (now, self.read(cwd))
+                if len(self.places) > self.CACHE:
+                    self.places = {k: v for k, v in self.places.items() if now - v[0] < self.ttl}
+                    self.states = {k: v for k, v in self.states.items() if now - v["seen"] < 300 or v["busy"]}
+            place = hit[1]
+            if place is None:
+                return None
+            root, branch, detached, linked = place
+            state = self.states.setdefault(root, {"at": None, "dot": None, "busy": False, "seen": now})
+            state["seen"] = now
+            stale = state["at"] is None or now - state["at"] >= self.status_ttl
+            start = stale and not state["busy"]
+            if start:
+                state["busy"] = True
+            dot_key = state["dot"]
+        if start:
+            if self.background:
+                threading.Thread(target=self.refresh, args=(root,), daemon=True).start()
+            else:
+                self.refresh(root)
+                dot_key = self.states[root]["dot"]
+        return {"branch": branch, "detached": detached, "worktree": os.path.basename(root) if linked else None,
+                "dot": dot_key}
+
+    @staticmethod
+    def read(cwd):
+        found = checkout(cwd)
+        h = head(found[1]) if found else None
+        if h is None:
+            return None
+        # A linked worktree's git directory (<repo>/.git/worktrees/<name>) points at the shared one.
+        return found[0], h[0], h[1], os.path.isfile(os.path.join(found[1], "commondir"))
+
+    def refresh(self, root):
+        st = status(Repo(root, ""))
+        key = None if st.get("error") else dot(st)[1]
+        with self.lock:
+            state = self.states.get(root)
+            if state is not None:
+                state.update(at=self.clock(), dot=key, busy=False)
 
 
 def has_ci(path):

@@ -35,7 +35,7 @@ Recorded from real omp sessions in an isolated sandbox window with fixture repos
 ## Features
 
 - **Agent grid**: `omp-grid` starts one agent per pane; panes tile themselves, equalize, rotate, swap, zoom, and can all be typed into at once (broadcast).
-- **Overview dock**: every pane with its number, state (working, busy, needs you, done, idle, exited), omp title and time; jump by click or digit, close panes safely.
+- **Overview dock**: every pane with its number, state (working, busy, needs you, done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
 - **Accounts and usage**: Claude Code usage (5 h and 7 d) of every account in the header; switch an account from a running chat without losing it.
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
