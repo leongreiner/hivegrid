@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Stand-in for `claude-quota` in the demo sandbox: writes plausible, fictional usage numbers for the
+accounts work, team and home into the cache that the header and the usage panel read, so the
+recording shows no real account usage. Installed over the sandbox's `claude-quota` by dev/demo/record.py.
+
+  fake-claude-quota refresh     rewrite the cache (the header calls this); seeds a 30-day history once
+  fake-claude-quota show        one line
+"""
+import json
+import math
+import os
+import sys
+import time
+from pathlib import Path
+
+CACHE = Path(os.environ.get("HOME", "~")).expanduser() / ".cache" / "wezterm-claude-quota"
+ACCOUNTS = [("work", "~/.claude", 0, 0.9), ("team", "~/.claude-2", 1, 0.55), ("home", "~/.claude-private", 2, 0.25)]
+H5, D7 = 5 * 3600, 7 * 86400
+
+
+def _local(t):
+    return t + time.localtime(t).tm_gmtoff
+
+
+def busy(t):
+    """Activity level at time t: quiet before 08:00 and after 22:00 local time."""
+    hour = (_local(t) % 86400) / 3600
+    return 0.05 if (hour < 8 or hour >= 22) else 1.0
+
+
+def gate(account, window):
+    """0..1: how much an account is used in one of its windows; about a third are barely used."""
+    x = (window * 2654435761 + account * 40503) % 1000003 / 1000003
+    return 0.0 if x < 0.3 else 0.35 + 0.65 * ((x - 0.3) / 0.7)
+
+
+def activity(t):
+    """Cumulative activity (busy hours) up to t; a day holds 14 * 1.0 + 10 * 0.15 = 15.5."""
+    lt = _local(t)
+    day, hour = divmod(lt, 86400)
+    hour /= 3600
+    within = 0.15 * min(hour, 8) + max(0, min(hour, 22) - 8) + 0.15 * max(0, hour - 22)
+    return day * 15.5 + within
+
+
+def shift():
+    """Seconds added to the clock so that it is 15:00 local time when the cache is first written
+    (kept in the cache directory): the recording shows a working afternoon whatever the real hour."""
+    f = CACHE / "shift"
+    try:
+        return float(f.read_text())
+    except (OSError, ValueError):
+        now = time.time()
+        s = (15 * 3600 - (_local(now) % 86400)) % 86400
+        CACHE.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(s))
+        return s
+
+
+def sample(label, level, order, real_t):
+    """({pct, reset_at} of the 5 h window, same of the 7 d window) at real time real_t. Windows restart
+    on a fixed schedule per account; the 5 h number climbs within its window, faster in the daytime,
+    the 7 d number accumulates the activity since its window started."""
+    sh = shift()
+    t = real_t + sh
+    start5 = ((t - order * 3600) // H5) * H5 + order * 3600
+    five = 100 * level * gate(order, int(start5 // H5)) * busy(t) * ((t - start5) / H5) ** 0.7 * (0.9 + 0.1 * math.sin(t / (1900 + order * 300)))
+    start7 = ((t - order * 86400) // D7) * D7 + order * 86400
+    seven = 100 * level * 0.9 * (activity(t) - activity(start7)) / (7 * 15.5)
+    return ({"pct": round(min(99.0, five), 0), "reset_at": start5 + H5 - sh},
+            {"pct": round(min(99.0, seven), 0), "reset_at": start7 + D7 - sh})
+
+
+def refresh():
+    CACHE.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    (CACHE / "version").write_text("demo\n")
+    for label, _dir, order, level in ACCOUNTS:
+        five, seven = sample(label, level, order, now)
+        entry = {"label": label, "order": order, "state": "ok", "http": 200, "checked_at": now,
+                 "next_at": now + 60, "fails": 0, "updated_at": now, "five_hour": five, "seven_day": seven,
+                 "hist": {"ts": int(now), "five_hour": five["pct"], "seven_day": seven["pct"]}}
+        (CACHE / f"{label}.json").write_text(json.dumps(entry))
+    hist = CACHE / "history.jsonl"
+    if not hist.exists():
+        with open(hist, "w") as f:
+            t = now - 30 * 86400
+            while t < now:
+                for label, d, order, level in ACCOUNTS:
+                    five, seven = sample(label, level, order, t)
+                    f.write(json.dumps({"ts": int(t), "label": label, "dir": d, "five_hour": five, "seven_day": seven},
+                                       separators=(",", ":")) + "\n")
+                t += 1200
+        os.chmod(hist, 0o600)
+
+
+def main():
+    cmd = sys.argv[-1] if len(sys.argv) > 1 else "refresh"
+    if cmd == "show":
+        now = time.time()
+        print(" | ".join(f"{label} 5h {sample(label, lv, o, now)[0]['pct']:.0f}%" for label, _d, o, lv in ACCOUNTS))
+    else:
+        refresh()
+
+
+main()
