@@ -40,6 +40,7 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
+import hivegrid_agents as A  # noqa: E402
 import hivegrid_repos as R  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
 from hivegrid_ui import decode, mix, split_complete  # noqa: E402
@@ -186,12 +187,27 @@ def confirm_line(cv, pal, x, y, w, bg, questions, answer, hover):
         x += cv.put(x, y, text, U.state_style(pal, kind)[2] if kind else pal["amber"], bg, U.BOLD)
 
 
-def layout(n, avail):
-    """Rows per pane for n panes in `avail` rows: 3 (two lines and a blank), 2 (two lines) or 1."""
-    for per in (3, 2):
-        if n * per - (1 if per == 3 else 0) <= avail:
+def layout(n, avail, usage=False):
+    """Rows per pane for n panes in `avail` rows: 4 (three lines and a blank, only with `usage`: the
+    third line is the token and cost line), 3 (two lines and a blank), 2 (two lines) or 1."""
+    for per in (4, 3, 2) if usage else (3, 2):
+        if n * per - (1 if per >= 3 else 0) <= avail:
             return per
     return 1
+
+
+def usage_of(p):
+    """A pane's reported usage (hivegrid_agents.Usage) or None: shells and web panes have none."""
+    return A.parse_usage(p.get("usage")) if p.get("kind") not in ("shell", "web") else None
+
+
+def usage_segments(pal, p):
+    """The token and cost line of an agent row as [(text, colour)]: muted (an estimated cost
+    leads with `~`), and a dim `—` when the agent reported nothing. [] for a non-agent."""
+    if p.get("kind") in ("shell", "web"):
+        return []
+    text = A.usage_text(usage_of(p))
+    return [(text, pal["muted"])] if text else [("—", pal["dim"])]
 
 
 def detail_of(p, name, mixed=False):
@@ -298,9 +314,16 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
     if asking and ask[0] == "tab":
         confirm_line(cv, pal, 1, 0, w - 1, bg, close_question(panes), answer, hover)
 
-    avail = h - top.body - 1  # rows between the title and the footer
-    rows_per = layout(len(panes), avail)
-    lines = 2 if rows_per > 1 else 1
+    # Token and cost telemetry: one muted line per agent row (when any agent reported something)
+    # and, under the title, the total over the rows.
+    has_usage = any(usage_of(p) for p in panes)
+    total = A.totals_text(A.usage_totals(usage_of(p) for p in panes)) if has_usage else None
+    first = top.body + (2 if total and h - top.body > 8 else 1 if total and h - top.body > 4 else 0)
+    if first > top.body:
+        cv.put(1, top.body, ("total " + total if U.text_width("total " + total) <= w - 2 else fit(total, w - 2)), pal["muted"])
+    avail = h - first - 1  # rows between the title and the footer
+    rows_per = layout(len(panes), avail, has_usage)
+    lines = {4: 3, 3: 2, 2: 2, 1: 1}[rows_per]
     shown = max(avail // rows_per, 1) if panes else 0
     act = next((i for i, p in enumerate(panes) if p.get("active")), 0)
     cur = next((i for i, p in enumerate(panes) if p["id"] == sel), act)
@@ -320,7 +343,7 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
     # Numbers take as many columns as the widest one, so names line up past pane 9.
     num_w = max((len(str(p["num"])) for p in panes), default=1)
     stripe = mix(bg, pal["raised"], U.STRIPE)
-    y = top.body
+    y = first
     # The row ✕: on the row being asked about, else the row under the pointer, else the selected
     # row; one at a time, so buttons never stack on neighbouring rows.
     asked = ask[1] if asking and ask[0] == "pane" else None
@@ -372,6 +395,10 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
             tx = w - 1 - tag_w if detail else nx
             for text, tint in tag:
                 tx += cv.put(tx, y + 1, text, tint, row.bg)
+        if lines > 2 and p["id"] != asked:  # the token and cost line, under the name
+            ux = 5 + num_w
+            for text, tint in usage_segments(pal, p):
+                ux += cv.put(ux, y + 2, U.fit_text(text, w - 1 - ux, "end"), tint, row.bg)
         if p["id"] == asked:  # the question takes the second line, or a one-line row after its glyph
             qx, qy = (row.name_x, y + 1) if lines > 1 else (2, y)
             qw = (w if lines > 1 else row.end) - qx

@@ -385,6 +385,8 @@ local function scan(window, force)
         end
       end
       st.reason = ext and type(ext.reason) == 'string' and ext.reason or nil
+      -- tokens and cost as omp reported them; the dock formats them (bin/hivegrid_agents.py parse_usage)
+      st.usage = ext and type(ext.usage) == 'table' and ext.usage or nil
       st.unseen = pane:has_unseen_output()
       st.kind = step(st, {
         now = now,
@@ -483,7 +485,8 @@ end
 -- `kind` is the state key (see STATES; 'idle' when nothing is known), `since` the epoch
 -- second it last changed, `name` the pane directory's basename and `cwd` the whole path (~ for
 -- home), `title` omp's session title (or the pane title of another program), `reason` the
--- extension's detail ('bash: npm test (12s)', '1 background job', 'plan review', ...) or nil.
+-- extension's detail ('bash: npm test (12s)', '1 background job', 'plan review', ...) or nil,
+-- `usage` the extension's table of tokens and cost omp reported (or nil).
 function api.overview(window, tab_id)
   for _, t in ipairs(scan(window)) do
     if t.id == tab_id then
@@ -496,7 +499,7 @@ function api.overview(window, tab_id)
         if name == '' then name = st.cwd or '' end
         rows[#rows + 1] = {
           id = e.pane:pane_id(), num = e.num, kind = kind, glyph = s.glyph, text = state_text(s, st),
-          color = s.color, name = name, cwd = st.cwd or '', title = st.heading or '', reason = st.reason, proc = st.proc or '',
+          color = s.color, name = name, cwd = st.cwd or '', title = st.heading or '', reason = st.reason, usage = st.usage, proc = st.proc or '',
           since = st.since, active = e.info.is_active, zoomed = e.info.is_zoomed,
         }
       end
