@@ -556,4 +556,8 @@ overview = require('overview')(config, wezterm, as, sb, layouts)
 -- Web pane: LEADER+w table, links into a web pane, "+" menu rows (Hivegrid build only).
 web = require('web')(config, wezterm, sb, layouts)
 
+-- Session snapshot and restore (config/session.lua): the layout and the omp chats survive a
+-- crash. Last, so it sees every module it reads from.
+require('session')(config, wezterm, { as = as, sb = sb, web = web })
+
 return config

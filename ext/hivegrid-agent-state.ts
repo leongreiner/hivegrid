@@ -297,6 +297,8 @@ export interface DocMeta {
 	pane: number;
 	pid: number;
 	sessionId: string | null;
+	/** Absolute path of the session's JSONL file, null until omp has written it (a chat without a message has none). */
+	sessionFile: string | null;
 	cwd: string;
 	title: string | null;
 	profile: string | null;
@@ -366,6 +368,7 @@ export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<str
 		pane: meta.pane,
 		pid: meta.pid,
 		sessionId: meta.sessionId,
+		sessionFile: meta.sessionFile,
 		cwd: meta.cwd,
 		title: meta.title,
 		profile: meta.profile,
@@ -471,9 +474,13 @@ export default function hivegridAgentState(pi: any): void {
 				agentDir = process.env.PI_CODING_AGENT_DIR ?? null;
 			}
 			let sessionId: string | null = null;
+			let sessionFile: string | null = null;
 			let title: string | null = null;
 			try {
 				sessionId = ctxRef?.sessionManager?.getSessionId?.() ?? null;
+			} catch {}
+			try {
+				sessionFile = ctxRef?.sessionManager?.getSessionFile?.() ?? null;
 			} catch {}
 			try {
 				title = ctxRef?.sessionManager?.getSessionName?.() ?? pi?.getSessionName?.() ?? null;
@@ -482,6 +489,7 @@ export default function hivegridAgentState(pi: any): void {
 				pane,
 				pid: process.pid,
 				sessionId,
+				sessionFile,
 				cwd: ctxRef?.cwd ?? process.cwd(),
 				title: title || null,
 				profile: profileFromAgentDir(agentDir),

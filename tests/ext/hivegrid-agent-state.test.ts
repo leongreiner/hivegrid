@@ -207,19 +207,20 @@ describe("helpers", () => {
 	test("toDoc has the contract keys", () => {
 		const doc = toDoc(
 			initialModel(1),
-			{ pane: 3, pid: 9, sessionId: "s", cwd: "/x", title: null, profile: null },
+			{ pane: 3, pid: 9, sessionId: "s", sessionFile: "/s.jsonl", cwd: "/x", title: null, profile: null },
 			2,
 		);
 		expect(Object.keys(doc).sort()).toEqual(
-			["cwd", "error", "pane", "pending", "pid", "profile", "reason", "sessionId", "since", "state", "title", "updated", "usage", "v"].sort(),
+			["cwd", "error", "pane", "pending", "pid", "profile", "reason", "sessionFile", "sessionId", "since", "state", "title", "updated", "usage", "v"].sort(),
 		);
+		expect(doc.sessionFile).toBe("/s.jsonl");
 		expect(doc.v).toBe(1);
 	});
 });
 
 describe("usage", () => {
 	const stats = { input: 10, output: 52, cacheRead: 100, cacheWrite: 8333, totalTokens: 8495, cost: 0.5, subagentCost: 0.125, premiumRequests: 0 };
-	const meta = { pane: 3, pid: 9, sessionId: "s", cwd: "/x", title: null, profile: null };
+	const meta = { pane: 3, pid: 9, sessionId: "s", sessionFile: null, cwd: "/x", title: null, profile: null };
 
 	test("usageDoc copies only what omp reported", () => {
 		expect(usageDoc(stats, ["anthropic"])).toEqual({
@@ -315,7 +316,7 @@ describe("extension wiring (fake pi)", () => {
 			const mkCtx = (kind: string) => ({
 				agent: { kind },
 				cwd: "/work",
-				sessionManager: { getSessionId: () => "sid", getSessionName: () => "T" },
+				sessionManager: { getSessionId: () => "sid", getSessionFile: () => "/work/sid.jsonl", getSessionName: () => "T" },
 				getAsyncJobSnapshot: () => ({ running: [] }),
 				getPendingPlanReview: () => undefined,
 				resolvePlanReview: (...a: unknown[]) => (resolved.push(a), false),
@@ -327,7 +328,7 @@ describe("extension wiring (fake pi)", () => {
 			const stateFile = path.join(dir, "hivegrid-agents", "4242.json");
 			await handlers.session_start({}, main);
 			expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toMatchObject({
-				v: 1, pane: 4242, state: "idle", profile: "beta", cwd: "/work", sessionId: "sid", title: "T", pending: null,
+				v: 1, pane: 4242, state: "idle", profile: "beta", cwd: "/work", sessionId: "sid", sessionFile: "/work/sid.jsonl", title: "T", pending: null,
 			});
 			await handlers.agent_start({}, mkCtx("sub"));
 			expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).state).toBe("idle");

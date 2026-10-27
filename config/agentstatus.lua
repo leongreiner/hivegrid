@@ -263,6 +263,15 @@ local function write_ack(id, since)
   os.rename(tmp, path)
 end
 
+-- The omp profile named on a command line: --profile=NAME or --profile NAME.
+local function profile_arg(argv)
+  for i, a in ipairs(type(argv) == 'table' and argv or {}) do
+    local v = a:match('^%-%-profile=(.+)$') or (a == '--profile' and argv[i + 1])
+    if v then return v end
+  end
+  return nil
+end
+
 -- The first lookup runs at once (a fresh pane needs its process to be classified); later
 -- ones are staggered per pane.
 local function refresh_slow(pane, st, now)
@@ -273,14 +282,17 @@ local function refresh_slow(pane, st, now)
   -- The shell reports its directory (OSC 7) only at a prompt, so for a program started
   -- after a `cd` on the same line (`cd x && omp`) its own directory is the truth.
   local path
+  st.profile_arg = nil
   if st.proc ~= '' and not SHELLS[st.proc] then
     local okp, info = pcall(pane.get_foreground_process_info, pane)
     path = okp and info and info.cwd or nil
+    st.profile_arg = okp and info and profile_arg(info.argv) or nil
   end
   if not path or path == '' then
     local okc, cwd = pcall(pane.get_current_working_dir, pane)
     path = okc and url_path(cwd) or ''
   end
+  st.path = path
   st.cwd = short_path(path)
   st.label = basename(st.cwd) .. (st.proc ~= '' and (':' .. st.proc) or '')
 end
@@ -294,6 +306,7 @@ local function scan_web(pane, st, now)
   local okt, title = pcall(pane.get_title, pane)
   st.proc = 'web'
   st.cwd = url and theme.web_label(url) or ''
+  st.url = url and url.href or nil
   st.label = st.cwd .. ':web'
   st.heading = okt and type(title) == 'string' and title or ''
   st.kind, st.state, st.unseen, st.reason = 'web', nil, false, nil
@@ -370,9 +383,13 @@ local function scan(window, force)
         end
       end
       local ext_state = ext and ext.state
+      st.session = nil
       if ext then
         if type(ext.title) == 'string' and ext.title ~= '' then st.heading = calm_title(ext.title) end
-        if type(ext.cwd) == 'string' and ext.cwd ~= '' then st.cwd = short_path(ext.cwd) end
+        if type(ext.cwd) == 'string' and ext.cwd ~= '' then st.cwd, st.path = short_path(ext.cwd), ext.cwd end
+        -- The chat omp would resume (ext/hivegrid-agent-state.ts writes these): config/session.lua
+        local function str(v) return type(v) == 'string' and v ~= '' and v or nil end
+        st.session = { id = str(ext.sessionId), file = str(ext.sessionFile), profile = str(ext.profile) }
       end
       if ext_state == 'done' then
         acks = acks or read_json(STATE_DIR .. '/acks.json') or {}
@@ -467,6 +484,20 @@ end
 
 function api.pane_label(pane_id)
   return panes[pane_id] and panes[pane_id].label or nil
+end
+
+-- What a pane runs, for the session snapshot (config/session.lua), as of the last scan; nil
+-- for a pane not scanned yet. { proc, kind, path = the working directory in full ('' when
+-- unknown), url = the page of a web pane, profile = the omp profile of the command line,
+-- session = { id, file, profile } of the chat omp reports through its extension (nil
+-- without it or while its heartbeat is stale) }.
+function api.facts(pane_id)
+  local st = panes[pane_id]
+  if not st or not st.proc then return nil end
+  return {
+    proc = st.proc, kind = st.kind, path = st.path or '', url = st.url,
+    profile = st.profile_arg, session = st.session,
+  }
 end
 
 -- Reading-order number of a pane within its tab (matches the minimap digits).

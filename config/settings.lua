@@ -8,6 +8,7 @@
 --                          profile = browser profile name, home = location the browser button and
 --                          "new web pane" open on an empty answer, browser = 'auto' or the absolute
 --                          path of a Chromium-family binary } (see below)
+--   S.session           -> { enabled = false only when the file says "session": { "enabled": false } }
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
 --                          list plus any ~/.claude[-X] directory holding a .credentials.json that
 --                          the list does not mention (main first, then by label). An account pairs
@@ -109,6 +110,11 @@ local function build(wezterm)
     home = (type(web.home) == 'string' and web.home:find('%S')) and web.home:match('^%s*(.-)%s*$') or 'about:blank',
     browser = type(web.browser) == 'string' and web.browser:match('^%s*(/.-)%s*$') or 'auto',
   }
+
+  -- Session restore (config/session.lua): the layout is saved and built again after a crash or a
+  -- restart. Only "session": { "enabled": false } turns it off; the panel does not edit it.
+  local session = type(data.session) == 'table' and data.session or {}
+  S.session = { enabled = session.enabled ~= false }
 
   -- Accounts ------------------------------------------------------------------
 
