@@ -3,13 +3,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import factory, {
+	costKindOf,
 	type HiveEvent,
 	handleCommand,
 	initialModel,
 	isCmdFile,
+	pricedProvider,
 	profileFromAgentDir,
 	reduce,
 	toDoc,
+	usageDoc,
 	withError,
 } from "../../ext/hivegrid-agent-state";
 
@@ -208,9 +211,59 @@ describe("helpers", () => {
 			2,
 		);
 		expect(Object.keys(doc).sort()).toEqual(
-			["cwd", "error", "pane", "pending", "pid", "profile", "reason", "sessionId", "since", "state", "title", "updated", "v"].sort(),
+			["cwd", "error", "pane", "pending", "pid", "profile", "reason", "sessionId", "since", "state", "title", "updated", "usage", "v"].sort(),
 		);
 		expect(doc.v).toBe(1);
+	});
+});
+
+describe("usage", () => {
+	const stats = { input: 10, output: 52, cacheRead: 100, cacheWrite: 8333, totalTokens: 8495, cost: 0.5, subagentCost: 0.125, premiumRequests: 0 };
+	const meta = { pane: 3, pid: 9, sessionId: "s", cwd: "/x", title: null, profile: null };
+
+	test("usageDoc copies only what omp reported", () => {
+		expect(usageDoc(stats, ["anthropic"])).toEqual({
+			input: 10, output: 52, cacheRead: 100, cacheWrite: 8333, total: 8495, cost: 0.5, subagentCost: 0.125, costKind: "estimated",
+		});
+	});
+
+	test("a field omp did not report is null, not 0", () => {
+		const doc = usageDoc({ input: 7, output: 1, cost: 0 }, []);
+		expect(doc).toMatchObject({ input: 7, output: 1, cacheRead: null, cacheWrite: null, total: null, subagentCost: null, cost: 0 });
+		expect(doc?.costKind).toBeNull();
+	});
+
+	test("nothing reported -> null; junk values are dropped", () => {
+		expect(usageDoc(undefined, [])).toBeNull();
+		expect(usageDoc({}, [])).toBeNull();
+		expect(usageDoc({ input: "5", output: -1, totalTokens: NaN, cost: Infinity }, [])).toBeNull();
+		expect(usageDoc({ input: 5, output: "x", cost: -2 }, [])).toMatchObject({ input: 5, output: null, cost: null });
+	});
+
+	test("costKind: gateway charges are reported, catalog prices estimated, both mixed", () => {
+		expect(costKindOf([])).toBeNull();
+		expect(costKindOf(["openrouter"])).toBe("reported");
+		expect(costKindOf(["openrouter", "cline-pass"])).toBe("reported");
+		expect(costKindOf(["anthropic"])).toBe("estimated");
+		expect(costKindOf(["openrouter", "anthropic"])).toBe("mixed");
+		expect(usageDoc({ input: 1, cost: 1 }, ["openrouter"])?.costKind).toBe("reported");
+		// a subagent's spend names no provider, so a gateway session with subagents is mixed
+		expect(usageDoc({ input: 1, cost: 1, subagentCost: 0.5 }, ["openrouter"])?.costKind).toBe("mixed");
+	});
+
+	test("pricedProvider reads session entries, ignoring free and non-usage ones", () => {
+		const msg = (provider: string, total: number) => ({ type: "message", message: { role: "assistant", provider, usage: { cost: { total } } } });
+		expect(pricedProvider(msg("anthropic", 0.01))).toBe("anthropic");
+		expect(pricedProvider(msg("anthropic", 0))).toBeNull();
+		expect(pricedProvider({ type: "model_usage", provider: "openrouter", usage: { cost: { total: 0.2 } } })).toBe("openrouter");
+		expect(pricedProvider({ type: "message", message: { role: "toolResult", toolName: "task", details: { usage: { cost: { total: 1 } } } } })).toBe("?");
+		expect(pricedProvider({ type: "message", message: { role: "user", content: "hi" } })).toBeNull();
+		expect(pricedProvider(null)).toBeNull();
+	});
+
+	test("toDoc carries usage, null when absent", () => {
+		expect(toDoc(initialModel(1), meta, 2).usage).toBeNull();
+		expect(toDoc(initialModel(1), { ...meta, usage: usageDoc(stats, ["anthropic"]) }, 2).usage).toMatchObject({ input: 10, cost: 0.5 });
 	});
 });
 
@@ -319,6 +372,91 @@ describe("extension wiring (fake pi)", () => {
 			expect(n).toBe(0);
 		} finally {
 			if (old !== undefined) process.env.WEZTERM_PANE = old;
+		}
+	});
+
+	test("publishes omp's usage totals and re-reads them when the cost moves", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hg-ext-"));
+		const oldEnv = { x: process.env.XDG_RUNTIME_DIR, p: process.env.WEZTERM_PANE };
+		process.env.XDG_RUNTIME_DIR = dir;
+		process.env.WEZTERM_PANE = "4243";
+		try {
+			const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+			const pi = { on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h), pi: { getAgentDir: () => "/h/.omp/agent" } };
+			let stats: Record<string, number> = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, subagentCost: 0 };
+			let entries: unknown[] = [];
+			let scans = 0;
+			let tickFn: (() => void) | null = null;
+			const ctx = {
+				agent: { kind: "main" },
+				cwd: "/work",
+				sessionManager: {
+					getSessionId: () => "sid",
+					getSessionName: () => "T",
+					getUsageStatistics: () => ({ ...stats }),
+					getEntries: () => (scans++, entries),
+				},
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				getPendingPlanReview: () => undefined,
+				setInterval: (fn: () => void) => ((tickFn = fn), 1),
+				clearTimer: () => {},
+			};
+			factory(pi);
+			const stateFile = path.join(dir, "hivegrid-agents", "4243.json");
+			const read = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+			await handlers.session_start({}, ctx);
+			expect(read().usage).toMatchObject({ input: 0, cost: 0, costKind: null });
+
+			stats = { input: 10, output: 52, cacheRead: 0, cacheWrite: 8333, totalTokens: 8395, cost: 0.05, subagentCost: 0 };
+			entries = [{ type: "message", message: { role: "assistant", provider: "anthropic", usage: { cost: { total: 0.05 } } } }];
+			await handlers.turn_end({}, ctx);
+			expect(read().usage).toEqual({
+				input: 10, output: 52, cacheRead: 0, cacheWrite: 8333, total: 8395, cost: 0.05, subagentCost: 0, costKind: "estimated",
+			});
+
+			const before = scans;
+			tickFn!();
+			tickFn!();
+			expect(scans).toBe(before); // the cost did not move: the entries are not walked again
+
+			await handlers.session_shutdown({}, ctx);
+			expect(read()).toMatchObject({ state: "exited", usage: { total: 8395, cost: 0.05 } });
+		} finally {
+			process.env.XDG_RUNTIME_DIR = oldEnv.x;
+			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = oldEnv.p;
+			if (oldEnv.x === undefined) delete process.env.XDG_RUNTIME_DIR;
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an omp without usage statistics still publishes the state, usage null", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hg-ext-"));
+		const oldEnv = { x: process.env.XDG_RUNTIME_DIR, p: process.env.WEZTERM_PANE };
+		process.env.XDG_RUNTIME_DIR = dir;
+		process.env.WEZTERM_PANE = "4244";
+		try {
+			const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+			factory({ on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h), pi: {} });
+			const ctx = {
+				agent: { kind: "main" },
+				cwd: "/work",
+				sessionManager: { getSessionId: () => "sid", getSessionName: () => "T" },
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				getPendingPlanReview: () => undefined,
+				setInterval: () => 1,
+				clearTimer: () => {},
+			};
+			await handlers.session_start({}, ctx);
+			await handlers.turn_end({}, ctx);
+			expect(JSON.parse(fs.readFileSync(path.join(dir, "hivegrid-agents", "4244.json"), "utf8"))).toMatchObject({ state: "idle", usage: null });
+			await handlers.session_shutdown({}, ctx);
+		} finally {
+			process.env.XDG_RUNTIME_DIR = oldEnv.x;
+			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = oldEnv.p;
+			if (oldEnv.x === undefined) delete process.env.XDG_RUNTIME_DIR;
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

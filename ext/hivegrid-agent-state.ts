@@ -270,6 +270,29 @@ export function withError(m: AgentModel, error: string | null): AgentModel {
 // State file document
 // ---------------------------------------------------------------------------------
 
+/**
+ * Token counts and cost exactly as omp reports them for the session (its `getUsageStatistics()`
+ * snapshot, subagents included). Fields omp did not report are null; nothing is estimated here.
+ */
+export interface UsageDoc {
+	input: number | null;
+	output: number | null;
+	cacheRead: number | null;
+	cacheWrite: number | null;
+	/** omp's sum of every request's `totalTokens` (a cached prompt counts again on each request) */
+	total: number | null;
+	/** USD as omp sums it over the session; `costKind` says what it is made of */
+	cost: number | null;
+	/** the part of `cost` that subagents spent */
+	subagentCost: number | null;
+	/**
+	 * `reported`: every priced request came from a gateway whose own charge omp keeps;
+	 * `estimated`: omp priced the reported tokens from its model catalog (API list price, which
+	 * is not a bill on a subscription); `mixed`: both; null: no cost yet.
+	 */
+	costKind: "reported" | "estimated" | "mixed" | null;
+}
+
 export interface DocMeta {
 	pane: number;
 	pid: number;
@@ -277,6 +300,64 @@ export interface DocMeta {
 	cwd: string;
 	title: string | null;
 	profile: string | null;
+	usage?: UsageDoc | null;
+}
+
+/**
+ * Providers whose own per-request charge omp keeps instead of pricing the tokens itself
+ * (omp docs, provider-quirks: OpenRouter and ClinePass `usage.cost` is authoritative when the
+ * gateway reports it). Every other provider's cost is omp's catalog price times the reported tokens.
+ */
+export const GATEWAY_COST_PROVIDERS: Record<string, true> = { openrouter: true, "cline-pass": true };
+
+function amount(v: unknown): number | null {
+	return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** Provider name of a persisted session entry that cost money; "?" when the entry names none (a subagent's spend). */
+export function pricedProvider(entry: unknown): string | null {
+	const e = asRecord(entry);
+	const m = asRecord(e.type === "message" ? e.message : e);
+	let usage: unknown;
+	if (e.type === "model_usage" || m.role === "assistant") usage = m.usage;
+	else if (m.role === "toolResult" && m.toolName === "task") usage = asRecord(m.details).usage;
+	if (!amount(asRecord(asRecord(usage).cost).total)) return null;
+	return typeof m.provider === "string" && m.provider ? m.provider : "?";
+}
+
+export function costKindOf(providers: Iterable<string>): UsageDoc["costKind"] {
+	let gateway = 0;
+	let n = 0;
+	for (const p of providers) {
+		n++;
+		if (GATEWAY_COST_PROVIDERS[p]) gateway++;
+	}
+	if (n === 0) return null;
+	return gateway === n ? "reported" : gateway === 0 ? "estimated" : "mixed";
+}
+
+/**
+ * The state file's `usage` from omp's `sessionManager.getUsageStatistics()` and the providers
+ * that priced the session. Only numbers omp reported are copied; null when it reported none.
+ */
+export function usageDoc(stats: unknown, providers: Iterable<string>): UsageDoc | null {
+	const s = asRecord(stats);
+	const doc: UsageDoc = {
+		input: amount(s.input),
+		output: amount(s.output),
+		cacheRead: amount(s.cacheRead),
+		cacheWrite: amount(s.cacheWrite),
+		total: amount(s.totalTokens),
+		cost: amount(s.cost),
+		subagentCost: amount(s.subagentCost),
+		costKind: null,
+	};
+	if (doc.input === null && doc.output === null && doc.total === null && doc.cost === null) return null;
+	// a subagent's spend names no provider: it counts as estimated unless a gateway charge is the only cost
+	const named = new Set(providers);
+	if (doc.subagentCost) named.add("?");
+	if (doc.cost) doc.costKind = costKindOf(named);
+	return doc;
 }
 
 export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<string, unknown> {
@@ -288,6 +369,7 @@ export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<str
 		cwd: meta.cwd,
 		title: meta.title,
 		profile: meta.profile,
+		usage: meta.usage ?? null,
 		state: m.state,
 		reason: m.reason,
 		since: m.since,
@@ -370,6 +452,8 @@ export default function hivegridAgentState(pi: any): void {
 		let timer: unknown = null;
 		let dead = false;
 		let busyCmd = false;
+		let usage: UsageDoc | null = null;
+		let scanned: { cost: unknown; providers: Set<string> } | null = null;
 
 		const isMain = (ctx: any): boolean => {
 			try {
@@ -401,6 +485,7 @@ export default function hivegridAgentState(pi: any): void {
 				cwd: ctxRef?.cwd ?? process.cwd(),
 				title: title || null,
 				profile: profileFromAgentDir(agentDir),
+				usage,
 			};
 		};
 
@@ -409,6 +494,30 @@ export default function hivegridAgentState(pi: any): void {
 			const tmp = `${file}.tmp.${process.pid}`;
 			fs.writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
 			fs.renameSync(tmp, file);
+		};
+
+		/**
+		 * Re-reads omp's usage totals: the snapshot is a cheap copy, so every call takes one; the
+		 * session entries are walked (for the providers that priced it) only when the cost moved.
+		 */
+		const refreshUsage = (ctx: any) => {
+			try {
+				const sm = ctx?.sessionManager;
+				const stats = sm?.getUsageStatistics?.();
+				if (!stats) return;
+				if (!scanned || scanned.cost !== stats.cost) {
+					const providers = new Set<string>();
+					const entries = sm?.getEntries?.();
+					if (Array.isArray(entries)) {
+						for (const e of entries) {
+							const p = pricedProvider(e);
+							if (p) providers.add(p);
+						}
+					}
+					scanned = { cost: stats.cost, providers };
+				}
+				usage = usageDoc(stats, scanned.providers);
+			} catch {}
 		};
 
 		const write = (force: boolean) => {
@@ -437,6 +546,7 @@ export default function hivegridAgentState(pi: any): void {
 		const apply = (ev: HiveEvent) => {
 			try {
 				model = reduce(model, ev, nowS());
+				if (ev.type === "agent_end" || ev.type === "session_stop") refreshUsage(ctxRef);
 				write(false);
 			} catch {}
 		};
@@ -446,6 +556,7 @@ export default function hivegridAgentState(pi: any): void {
 			if (dead) return;
 			dead = true;
 			try {
+				refreshUsage(ctxRef);
 				put(exitedDoc(model, meta(), nowS()));
 			} catch {}
 		};
@@ -489,6 +600,7 @@ export default function hivegridAgentState(pi: any): void {
 		const tick = (ctx: any) => {
 			try {
 				if (dead) return;
+				refreshUsage(ctx);
 				const jobs = jobCount(ctx);
 				apply({ type: "tick", jobs: jobs ?? model.jobs });
 				write(false); // heartbeat
@@ -514,6 +626,9 @@ export default function hivegridAgentState(pi: any): void {
 					dead = false;
 					model = initialModel(nowS());
 				}
+				usage = null;
+				scanned = null;
+				refreshUsage(ctx);
 				write(true);
 				const pr = ctx?.getPendingPlanReview?.();
 				if (pr) apply({ type: "plan_review_requested", review: pr });
@@ -523,6 +638,13 @@ export default function hivegridAgentState(pi: any): void {
 		pi.on(
 			"agent_start",
 			guard(() => apply({ type: "agent_start" })),
+		);
+		pi.on(
+			"turn_end",
+			guard((_e, ctx) => {
+				refreshUsage(ctx); // omp has persisted the turn's message: its totals include it now
+				write(false);
+			}),
 		);
 		pi.on(
 			"agent_end",

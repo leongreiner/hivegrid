@@ -11,7 +11,8 @@ from collections import deque
 from pathlib import Path
 
 import hivegrid_ui as U
-from hivegrid_agents import AGENT_PROCS, SHELLS, is_chrome, is_web, state_dir, web_build_cached, web_label
+from hivegrid_agents import (AGENT_PROCS, SHELLS, format_cost, format_tokens, is_chrome, is_web, parse_usage, state_dir,
+                             totals_text, usage_totals, web_build_cached, web_label)
 from hivegrid_settings_core import (
     BINDINGS, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding, current_entry,
     discover_accounts, effective_keys, format_combo, merge_accounts, normalize, omp_profiles, pair_profile, quota_state,
@@ -1240,19 +1241,24 @@ def parse_panes(text, fg, home=None):
             cwd = "~" + cwd[len(home.rstrip("/")):]
         m = re.search(r"--profile[= ](\S+)", args)
         profile = m.group(1) if m and comm == "omp" else ""
-        if comm == "omp" and not profile:
-            # started without --profile: the hive extension's state file names the one omp chose
+        usage = None
+        if comm == "omp":
+            # the hive extension's state file names the profile omp chose when it started without
+            # --profile, and carries the tokens and cost omp reported
             try:
                 with open(os.path.join(state_dir(), f"{pane.get('pane_id')}.json")) as f:
                     state = json.load(f)
-                profile = state.get("profile") if isinstance(state, dict) and isinstance(state.get("profile"), str) else ""
             except (OSError, ValueError):
-                pass
+                state = None
+            if isinstance(state, dict):
+                if not profile and isinstance(state.get("profile"), str):
+                    profile = state["profile"]
+                usage = parse_usage(state.get("usage"))
         rows.append({
             "pane": pane.get("pane_id"), "tab": tabs[win][pane.get("tab_id")], "window": windows[win],
             "proc": comm or "?", "profile": profile, "profile_set": bool(m), "cwd": cwd,
             "title": str(pane.get("title", "")), "age": etimes, "active": bool(pane.get("is_active")),
-            "agent": comm in AGENT_PROCS, "idle": comm in SHELLS,
+            "agent": comm in AGENT_PROCS, "idle": comm in SHELLS, "usage": usage,
         })
     return rows
 
@@ -1317,6 +1323,17 @@ class AgentsPage(U.Page):
     def move(self, step):
         self.cursor = max(0, min(len(self.rows) - 1, self.cursor + step))
 
+    @staticmethod
+    def usage_cells(r, p):
+        """The tokens and cost cells of a row: what omp reported (an estimated cost leads with `~`),
+        a dim `—` for an agent that reported nothing, blank for a pane that is no agent."""
+        if not r["agent"]:
+            return [("", p["dim"], 0, "end")] * 2
+        u = r.get("usage")
+        tokens = (format_tokens(u.tokens), p["muted"]) if u and u.tokens is not None else ("—", p["dim"])
+        cost = (format_cost(u.cost, u.cost_kind), p["muted"]) if u and u.cost is not None else ("—", p["dim"])
+        return [(tokens[0], tokens[1], 0, "end"), (cost[0], cost[1], 0, "end")]
+
     def wheel(self, ui, dy):
         self.move(dy)
 
@@ -1345,10 +1362,10 @@ class AgentsPage(U.Page):
             return None
         multi = any(r["window"] > 1 for r in self.rows)
         tw = 6 if multi else 4
-        rest = max(w - (tw + 7 + 11 + 11 + 9) - 4, 20)
+        rest = max(w - (tw + 7 + 11 + 11 + 9 + 8 + 10) - 4, 20)
         dw = min(max(rest * 2 // 5, 16), 60)  # directory column: 40% of the free room
         cols = [("tab", tw, ">"), ("pane", 7, ">"), ("process", 11, "<"), ("profile", 11, "<"), ("running", 9, "<"),
-                ("directory", dw + 2, "<"), ("title", min(rest - dw - 2, 62), "<")]
+                ("tokens", 8, ">"), ("cost", 10, ">"), ("directory", dw + 2, "<"), ("title", min(rest - dw - 2, 62), "<")]
         table = min(w, 2 + sum(c[1] for c in cols))  # the selection slab ends with the table, as in Settings
         # The table is centred on a wide window (its width is capped by the column caps).
         if w >= U.WIDE_COLS:
@@ -1358,7 +1375,8 @@ class AgentsPage(U.Page):
             cv.put(pos, y, f"{name:{align}{width - 2}}", p["muted"], None, BOLD)
             pos += width
         cv.fill(x, y + 1, table, 1, fg=U.rule_color(p, p["base"]), ch="─")
-        self.page_rows = body = max(h - 4, 1)
+        totals = usage_totals(r.get("usage") for r in self.rows)
+        self.page_rows = body = max(h - (5 if totals["agents"] else 4), 1)
         self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
         self.top = min(max(self.top, self.cursor - body + 1), self.cursor, max(len(self.rows) - body, 0))
         for i in range(self.top, min(self.top + body, len(self.rows))):
@@ -1375,6 +1393,7 @@ class AgentsPage(U.Page):
                      (r["proc"], p["green"] if r["agent"] else (p["dim"] if r["idle"] else text), BOLD if r["agent"] else 0, "end"),
                      (r["profile"], text if r["profile_set"] else p["dim"], 0, "end"),
                      (human_age(r["age"]) if r["age"] else "", p["muted"], 0, "end"),
+                     *self.usage_cells(r, p),
                      (r["cwd"], text, 0, "path"), (r["title"], text, 0, "end")]
             pos = x + 2
             for (value, colour, attrs, how), (_, width, align) in zip(cells, cols):
@@ -1389,6 +1408,11 @@ class AgentsPage(U.Page):
         n = len(self.rows)
         cv.put(x + 2, y + 3 + shown, f"{n} pane{'s' if n != 1 else ''} in {ntabs} tab{'s' if ntabs != 1 else ''}, {agents} "
                f"agent{'s' if agents != 1 else ''}{more}   • active pane of its tab", p["dim"])
+        if totals["agents"]:
+            n = totals["agents"]
+            cv.put(x + 2, y + 4 + shown, U.fit_text(
+                f"Total of {n} agent{'s' if n != 1 else ''} reporting: {totals_text(totals)}   "
+                "~ estimated from list prices, not a bill", table - 4, "end"), p["muted"])
         return (x, table) if w >= U.WIDE_COLS else None
 
 

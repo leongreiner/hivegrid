@@ -191,6 +191,101 @@ class Agent:
     error: str = None
     num: int = 0                  # reading-order number in its tab (the dock's and picker's digits)
     tab_index: int = 1            # position of its tab in the window, from 1 (the picker's "tab N")
+    usage: "Usage" = None         # tokens and cost omp reported (the state file's `usage`), None when it reported none
+
+
+# ---------------------------------------------------------------- usage (tokens and cost)
+
+COST_KINDS = ("reported", "estimated", "mixed")
+
+
+@dataclass
+class Usage:
+    """What omp reports about a session's spend (the extension copies it into the state file's
+    `usage`). A field omp did not report is None, never 0. `cost_kind` says what `cost` is:
+    `reported` (a gateway's own charge), `estimated` (omp priced the tokens from its catalog, not a
+    bill on a subscription) or `mixed`. Local compute (CPU, RAM) is not part of this."""
+    tokens: float = None          # omp's total token count (cached prompts count on every request)
+    cost: float = None            # USD
+    cost_kind: str = None
+
+
+def _amount(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0 else None
+
+
+def parse_usage(doc):
+    """The `usage` object of a state file -> Usage, or None when it holds no reported number.
+    Tokens are omp's total, else the sum of the input and output it reported."""
+    if not isinstance(doc, dict):
+        return None
+    tokens = _amount(doc.get("total"))
+    if tokens is None:
+        parts = [n for n in (_amount(doc.get("input")), _amount(doc.get("output"))) if n is not None]
+        tokens = sum(parts) if parts else None
+    cost = _amount(doc.get("cost"))
+    kind = doc.get("costKind") if doc.get("costKind") in COST_KINDS else None
+    if cost is not None and kind is None:
+        kind = "estimated" if cost else None  # a cost of unknown origin is not presented as a charge
+    if tokens is None and cost is None:
+        return None
+    return Usage(tokens, cost, kind if cost else None)
+
+
+def format_tokens(n):
+    """1234 -> '1.2k', 1_300_000 -> '1.3M'; '—' when not reported."""
+    if n is None:
+        return "—"
+    for unit, size in (("B", 1e9), ("M", 1e6), ("k", 1e3)):
+        if n >= size:
+            v = n / size
+            return f"{v:.1f}{unit}" if v < 10 else f"{v:.0f}{unit}"
+    return str(int(n))
+
+
+def format_cost(cost, kind=None):
+    """USD with two decimals (a cent less than that shows as <$0.01); an estimate or a mix leads
+    with `~`; '—' when not reported."""
+    if cost is None:
+        return "—"
+    text = "$0.00" if cost == 0 else "<$0.01" if cost < 0.005 else f"${cost:,.2f}"
+    return "~" + text if kind in ("estimated", "mixed") and cost else text
+
+
+def usage_text(u):
+    """`1.3M tok · $4.82` ('~$4.82' when estimated); None when there is nothing to show."""
+    if u is None:
+        return None
+    return " · ".join((f"{format_tokens(u.tokens)} tok", format_cost(u.cost, u.cost_kind)))
+
+
+def usage_totals(usages):
+    """Sum over agents: {'agents': n reporting, 'tokens': sum | None, 'reported': USD of gateway
+    charges | None, 'estimated': USD of catalog-priced (or mixed) cost | None}. The two cost
+    kinds stay apart; nothing here adds compute."""
+    out = {"agents": 0, "tokens": None, "reported": None, "estimated": None}
+    for u in usages:
+        if u is None:
+            continue
+        out["agents"] += 1
+        if u.tokens is not None:
+            out["tokens"] = (out["tokens"] or 0) + u.tokens
+        if u.cost is not None:
+            key = "reported" if u.cost_kind == "reported" else "estimated"
+            out[key] = (out[key] or 0) + u.cost
+    return out
+
+
+def totals_text(t):
+    """`1.3M tok · $1.20 + ~$3.62 est`; None when no agent reported anything."""
+    if not t["agents"]:
+        return None
+    costs = []
+    if t["reported"] is not None:
+        costs.append(format_cost(t["reported"]))
+    if t["estimated"] is not None:
+        costs.append(format_cost(t["estimated"], "estimated") + (" est" if costs else ""))
+    return " · ".join([f"{format_tokens(t['tokens'])} tok"] + ([" + ".join(costs)] if costs else ["—"]))
 
 
 def omp_title(title):
@@ -436,6 +531,7 @@ def _collect(run, now, fg):
             agent.reason = sf["reason"] if isinstance(sf.get("reason"), str) else ""
             agent.pending = sf["pending"] if isinstance(sf.get("pending"), dict) else None
             agent.error = sf["error"] if isinstance(sf.get("error"), str) else None
+            agent.usage = parse_usage(sf.get("usage"))
             if not alive:
                 agent.state = "exited"
                 agent.pending = None
