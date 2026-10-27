@@ -5,8 +5,10 @@ Runs in a narrow pane at the right edge of the tab (LEADER+o opens and closes it
 config/overview.lua). The WezTerm config writes the state of every grid pane to
 $XDG_RUNTIME_DIR/hivegrid-overview-$WEZTERM_PANE.json about once a second; this program only
 draws it. Per pane: number (the minimap digit), state glyph, directory, how long it has been in
-that state, and omp's session title. A click on a row, or its number on the keyboard, jumps to
-that pane (user var hivegrid_overview_goto, handled by the config; past pane 9 a digit that may
+that state, and omp's session title; on the second line, right-aligned, the pane's git branch (cyan,
+with a green / amber / red dot for clean / uncommitted changes / conflicts, and `◇ name` when the
+pane runs in a linked worktree), resolved from the pane's directory and cached (hivegrid_repos.Where).
+A click on a row, or its number on the keyboard, jumps to that pane (user var hivegrid_overview_goto, handled by the config; past pane 9 a digit that may
 start a longer number waits a moment for the next one). j / k or the arrows (PageUp / PageDown,
 g / G, Home / End) move the selection mark (it starts on, and follows, the active pane) and
 Enter jumps to the selected pane. q or Esc closes the dock. With no blank line left between the
@@ -38,6 +40,7 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
+import hivegrid_repos as R  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
 from hivegrid_ui import decode, mix, split_complete  # noqa: E402
 
@@ -59,6 +62,15 @@ def load(path):
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) and isinstance(doc.get("panes"), list) else None
+
+
+def with_git(doc, where):
+    """The document with each pane's row carrying "git", where(cwd)'s answer (see
+    hivegrid_repos.Where). A web pane has no directory, so it gets none."""
+    if not doc:
+        return doc
+    return dict(doc, panes=[dict(p, git=where(p.get("cwd") or "")) if p.get("kind") != "web" else p
+                            for p in doc["panes"]])
 
 
 def clean(text):
@@ -210,6 +222,41 @@ def detail_of(p, name, mixed=False):
     return name, detail, "start" if detail and detail in (title if is_path else None, cwd) else "end"
 
 
+WORKTREE = "◇"  # marks the worktree name of a pane that runs in a linked worktree
+GIT_MIN_DETAIL = 12  # cells the second line keeps for its text before the git tag takes the rest
+GIT_MIN_BRANCH = 4  # the branch is cut to this many cells before the tag shrinks further
+GIT_BRANCH_KEPT = 10  # cells of the branch kept (or all of it) before the worktree tag gives way
+
+
+def git_tag(pal, g, room):
+    """The git tag of a pane's second line as [(text, colour)] and its width, fitted to `room`
+    cells: the changes dot (green clean, amber uncommitted, red conflicts; none until read), the
+    branch in cyan, then `◇ worktree` in muted when the pane runs in a linked worktree. It narrows
+    from the end: the worktree's name goes first (the ◇ stays), then the ◇, then the branch is cut,
+    and at the very end only the dot is left. `g` is hivegrid_repos.Where's answer (None outside a repository: no tag)."""
+    if not g or room < 1:
+        return [], 0
+    dot = [("●", pal[g["dot"]])] if g.get("dot") in ("green", "amber", "red") else []
+    gap = 1 if dot else 0
+    branch = clean(g.get("branch") or "")
+    if not branch:
+        return dot, len(dot)
+    name = clean(g["worktree"]) if g.get("worktree") else ""
+    lead = len(dot) + gap
+    # The worktree tag in full, then as the bare marker, then not at all; the first the branch
+    # keeps GIT_BRANCH_KEPT cells (or all of it, when shorter) beside.
+    options = [f"  {WORKTREE} {name}", f" {WORKTREE}"] if name else []
+    keep = min(U.text_width(branch), GIT_BRANCH_KEPT)
+    tail = next((t for t in options if room - lead - U.text_width(t) >= keep), "")
+    tail_w = U.text_width(tail)
+    branch_room = room - lead - tail_w
+    if branch_room < min(GIT_MIN_BRANCH, U.text_width(branch)):
+        return dot[:room], min(len(dot), room)
+    branch = fit(branch, branch_room)
+    segs = dot + [((" " if dot else "") + branch, pal["cyan"])] + ([(tail, pal["muted"])] if tail else [])
+    return segs, sum(U.text_width(t) for t, _ in segs)
+
+
 def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, digits="", scroll=None, sel=None,
            close=None, close_tab=None, ask=None, answer=None, pointer=None):
     """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
@@ -297,6 +344,15 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
             right = age  # the state word goes first when the dock is narrow
         if lines == 1 or p["id"] == asked:
             detail = ""
+        # The second line also carries the git tag (branch, worktree): right-aligned beside the
+        # text it has, from the name column when there is none. The text keeps GIT_MIN_DETAIL cells.
+        nx, tag, tag_w = 5 + num_w, [], 0
+        if lines > 1 and p["id"] != asked:
+            room = w - 1 - nx
+            keep = min(U.text_width(detail), GIT_MIN_DETAIL) + 2 if detail else 0
+            tag, tag_w = git_tag(pal, p.get("git"), room - keep)
+            if tag and detail:
+                detail = U.fit_text(detail, room - tag_w - 2, how)
         # Dense lists (no blank line between rows) stripe every second row so rows stay apart.
         row_bg = stripe if rows_per < 3 and (start + k) % 2 else bg
         action, lit = None, max(hover.get(p["id"], 0.0), hover.get(("x", p["id"]), 0.0))
@@ -312,6 +368,10 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
                          right=right, right_color=color, sub=detail, sub_fit=how,
                          hit=(lambda button, pid=p["id"]: goto(pid)) if goto else None, key=p["id"] if goto else None,
                          action=action)
+        if tag:
+            tx = w - 1 - tag_w if detail else nx
+            for text, tint in tag:
+                tx += cv.put(tx, y + 1, text, tint, row.bg)
         if p["id"] == asked:  # the question takes the second line, or a one-line row after its glyph
             qx, qy = (row.name_x, y + 1) if lines > 1 else (2, y)
             qw = (w if lines > 1 else row.end) - qx
@@ -352,6 +412,7 @@ class Dock:
         self.bg = None  # the background colour last announced with OSC 11
         self.ask = None  # the close waiting for its answer: ('pane', pane id) or ('tab', None)
         self.closing = {}  # pane id -> monotonic time its close was sent (its row is hidden meanwhile)
+        self.where = R.Where()  # branch and worktree per directory, cached
 
     def reload(self):
         try:
@@ -540,7 +601,7 @@ class Dock:
         active = next((p["id"] for p in (self.doc or {}).get("panes", []) if p.get("active")), None)
         if active != self.active:  # another pane got the focus: follow it again
             self.active, self.scroll, self.sel = active, None, None
-        view = None if self.doc is None else dict(self.doc, panes=self.panes())
+        view = None if self.doc is None else with_git(dict(self.doc, panes=self.panes()), self.where)
         if self.ask and self.ask[0] == "pane" and (view is None or all(p["id"] != self.ask[1] for p in view["panes"])):
             self.ask = None  # the pane went away while the question was open
         self.cv = render(view, cols, rows, now, self.goto, self.equalize, self.arrange, hover, self.digits,
@@ -623,7 +684,7 @@ def main(argv=None):
             return 2
     path = path or state_path()
     if dump_size:
-        print("\n".join(dump(render(load(path), *dump_size, time.time(), lambda _: None, lambda: None, lambda: None))))
+        print("\n".join(dump(render(with_git(load(path), R.Where(background=False)), *dump_size, time.time(), lambda _: None, lambda: None, lambda: None))))
         return 0
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("hivegrid-overview: needs a terminal (--dump prints one frame)", file=sys.stderr)

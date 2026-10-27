@@ -312,7 +312,7 @@ class View:
         p = self.pal
         tally = {"red": 0, "amber": 0, "green": 0}
         for r in self.repos:
-            color = dot(r.status)[1]
+            color = R.dot(r.status)[1]
             if color in tally and r.status and not r.status.get("error"):
                 tally[color] += 1
         counts = [(f"●{n}", p[c]) for c, n in tally.items() if n]
@@ -335,7 +335,7 @@ class View:
         p, repo = self.pal, self.repos[i]
         st = repo.status
         sel = i == self.sel
-        glyph, color = dot(st)
+        glyph, color = R.dot(st)
         sync = ""
         if st and not st.get("error") and st["ahead"] is not None:
             sync = " ".join(t for t in (f"↑{st['ahead']}" if st["ahead"] else "",
@@ -485,19 +485,6 @@ class View:
             pass
         finally:
             self.leave()
-
-
-def dot(st):
-    """(glyph, palette key) of the status dot: reading, unreadable, conflicts, changes, clean."""
-    if st is None:
-        return "…", "muted"
-    if st.get("error"):
-        return "✕", "red"
-    if st["conflicts"]:
-        return "●", "red"
-    if st["staged"] or st["changed"] or st["untracked"]:
-        return "●", "amber"
-    return "●", "green"
 
 
 def main(argv=None):
