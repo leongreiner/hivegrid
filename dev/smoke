@@ -17,6 +17,12 @@ HGQ=dev/qa/hgq
 SHOTS=${HGQ_ROOT:-/tmp/hivegrid-qa}/s$SLOT/shots/smoke
 fails=0
 
+# Two runs on one slot (two agents, or a run beside a manual hgq session) drive the same window
+# and fail each other's pane checks: wait for the slot instead (hgq itself has no lock).
+mkdir -p "${HGQ_ROOT:-/tmp/hivegrid-qa}"
+exec 9>"${HGQ_ROOT:-/tmp/hivegrid-qa}/slot$SLOT.lock"
+flock -w 300 9 || { echo "smoke: slot $SLOT is busy (another dev/smoke run); gave up after 300 s" >&2; exit 2; }
+
 for t in Xvfb xwininfo import; do
   command -v "$t" >/dev/null || { echo "smoke: $t is not installed" >&2; exit 2; }
 done
