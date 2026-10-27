@@ -205,8 +205,9 @@ class SettingsFileNormalisation(TempHome):
         snap_stub = self.make_exe("bin/chromium-browser", "#!/bin/sh\necho 'Command requires the chromium snap to be installed' >&2\nexec snap install chromium\n")
         flatpak = self.make_exe("bin/brave-browser", "#!/bin/sh\nexec flatpak run --branch=stable com.brave.Browser \"$@\"\n")
         real = self.make_exe("bin/vivaldi", "#!/bin/sh\nexec /opt/vivaldi/vivaldi \"$@\"\n")
+        launcher = self.make_exe("launcher/snap", "#!/bin/sh\nexit 0\n")  # /snap/bin/<name> links to the snap launcher
         link = self.home / "bin" / "microsoft-edge"
-        link.symlink_to("/usr/bin/snap")
+        link.symlink_to(launcher)
         found, skipped = S.detect_browsers(str(self.home / "bin"))
         self.assertEqual([p for _, p in found], [real])
         self.assertEqual(sorted(p for p, _ in skipped), sorted([snap_stub, flatpak, str(link)]))
