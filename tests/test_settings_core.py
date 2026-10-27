@@ -116,7 +116,10 @@ class SettingsFileNormalisation(TempHome):
 
     def test_web_settings_default_and_stored_values(self):
         self.assertEqual(S.Settings(self.settings_file({})).web(),
-                         {"links": "pane", "search": "", "profile": "main", "home": "about:blank", "browser": "auto"})
+                         {"links": "pane", "search": "https://www.google.com/search?q=%s", "profile": "main",
+                          "home": "about:blank", "browser": "auto"})
+        self.assertEqual(S.Settings(self.settings_file({"web": {"search": ""}})).web()["search"], "",
+                         "an explicit empty string is no search")
         s = S.Settings(self.settings_file({"web": {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
                                                     "home": "https://start.test/", "browser": "/usr/bin/brave-browser"}}))
         self.assertEqual(s.web(), {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
@@ -125,11 +128,11 @@ class SettingsFileNormalisation(TempHome):
 
     def test_invalid_web_settings_fall_back_per_field(self):
         s = S.Settings(self.settings_file({"web": {"links": "both", "search": "https://x.test/", "profile": "../evil"}}))
-        self.assertEqual(s.web(), S.WEB_DEFAULTS)
+        self.assertEqual(s.web(), dict(S.WEB_DEFAULTS, search=""), "an invalid stored search means no search")
         for stored in ("text", 5, ["pane"], None):
             self.assertEqual(S.Settings(self.settings_file({"web": stored})).web(), S.WEB_DEFAULTS, repr(stored))
         s = S.Settings(self.settings_file({"web": {"links": "system", "profile": 7, "search": ["x"]}}))
-        self.assertEqual(s.web(), dict(S.WEB_DEFAULTS, links="system"))
+        self.assertEqual(s.web(), dict(S.WEB_DEFAULTS, links="system", search=""))
 
     def test_a_stored_home_must_be_an_address_and_a_stored_browser_a_path(self):
         for home in ("javascript:alert(1)", "two words", "", 5, ["https://x.test"]):

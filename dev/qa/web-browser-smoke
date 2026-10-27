@@ -7,14 +7,14 @@ checks, with pixels, `wezterm cli` and a recording wrapper around Chrome:
     settings name a browser, and four when that browser is missing (stock WezTerm behaves the same:
     the config only asks for the button when it found a browser on the fork build); the buttons
     come and go with settings.json, no restart
-  2 a click on the browser button in a tab without a web pane opens the location prompt; typing a
-    page and Enter opens a web pane that shows it, and the browser started is the one of
+  2 a click on the browser button in a tab without a web pane opens a web pane on web.home at
+    once (no prompt); typing a page in its header (LEADER+w l) and Enter shows it, and the browser started is the one of
     `web.browser` in settings.json (the wrapper script records its argv, then execs the real Chrome)
   3 a click with a web pane in the tab focuses it instead (also while another pane is zoomed) and
     opens nothing
   4 `wezterm cli split-pane --url` without --browser uses the settings' browser, and `--browser PATH`
     beats it (a second wrapper), for a profile of its own
-  5 an empty answer to the prompt opens `web.home`
+  5 the click opens `web.home` (green)
 
   dev/qa/web-browser-smoke [--keep]     --keep leaves slot 13 running for a look (hgq down 13 stops it)
 
@@ -230,16 +230,18 @@ def run():
     # 2 ----------------------------------------------------------------------------------
     term = terminal_ids()[0]
     click_bar_button(3, 5)
-    time.sleep(1.5)
-    shot("prompt")
-    page = "data:text/html," + urllib.parse.quote("<body style=background:#ff00ff><title>mg</title>")
-    hgq("x", SLOT, "type", page)
-    hgq("x", SLOT, "key", "Return")
     web = waitfor(lambda: web_ids() or None, 15)
-    check("2 click, location, Enter: a web pane opens", bool(web), f"panes {len(panes())}")
+    check("2 click: a web pane opens at once, no location prompt", bool(web), f"panes {len(panes())}")
     if not web:
         return
     web = web[0]
+    time.sleep(1.0)
+    shot("home-open")
+    page = "data:text/html," + urllib.parse.quote("<body style=background:#ff00ff><title>mg</title>")
+    hgq("x", SLOT, "key", "ctrl+space", "w", "l")
+    time.sleep(0.5)
+    hgq("x", SLOT, "type", page)
+    hgq("x", SLOT, "key", "Return")
     ran = waitfor(lambda: launches(chrome_a) or None, 15)
     check("2 the browser of settings.json is the one launched", bool(ran) and "--remote-debugging-pipe" in ran[0], str(ran))
     check("2 and it got the default profile of the settings",
@@ -293,9 +295,8 @@ def run():
     time.sleep(1.0)
     click_bar_button(3, 5)
     time.sleep(1.0)
-    hgq("x", SLOT, "key", "Return")
     web = waitfor(lambda: web_ids() or None, 15)
-    check("5 an empty answer opens a web pane", bool(web))
+    check("5 a click on the browser button opens a web pane", bool(web))
     if web:
         time.sleep(3.0)
         shot("home")

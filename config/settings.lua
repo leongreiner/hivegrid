@@ -94,7 +94,8 @@ local function build(wezterm)
 
   -- Web pane settings (key "web" of the file): links = 'pane' opens http(s) links clicked in a
   -- terminal inside a web pane, 'system' leaves them to the system browser; search is the
-  -- http(s) URL template (with %s) a location that is no URL becomes, empty = no search; profile
+  -- http(s) URL template (with %s) a location that is no URL becomes (Google when the key is
+  -- absent, an empty string = no search, an invalid value = none); profile
   -- names the browser profile (cookies and logins) new web panes use; home is the location a
   -- new web pane opens when nothing is typed (checked by web.lua's normalize_url, which this
   -- file cannot call: an unusable one is about:blank there); browser is 'auto' (the fork's own
@@ -103,8 +104,9 @@ local function build(wezterm)
   local web = type(data.web) == 'table' and data.web or {}
   S.web = {
     links = web.links == 'system' and 'system' or 'pane',
-    search = (type(web.search) == 'string' and web.search:find('%s', 1, true) and web.search:match('^https?://'))
-      and web.search or '',
+    search = web.search == nil and 'https://www.google.com/search?q=%s'
+      or ((type(web.search) == 'string' and web.search:find('%s', 1, true) and web.search:match('^https?://'))
+        and web.search or ''),
     profile = (type(web.profile) == 'string' and web.profile:match('^%w[%w._-]*$') and #web.profile <= 32)
       and web.profile or 'main',
     home = (type(web.home) == 'string' and web.home:find('%S')) and web.home:match('^%s*(.-)%s*$') or 'about:blank',

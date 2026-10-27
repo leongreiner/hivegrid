@@ -625,7 +625,7 @@ class WebSettingsTest(Env):
         for bad in ("duck.example/?q=%s", "https://duck.example/?q=", "ftp://x/%s"):
             with self.subTest(template=bad):
                 self.assertTrue(modal.on_ok(bad))
-        self.assertEqual(self.model.web["search"], "")
+        self.assertEqual(self.model.web["search"], self.S.WEB_DEFAULTS["search"])
         self.assertIsNone(modal.on_ok("https://duck.example/?q=%s"))
         self.assertEqual(self.model.web["search"], "https://duck.example/?q=%s")
         self.assertIsNone(modal.on_ok(""), "empty turns the search off")

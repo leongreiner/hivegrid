@@ -139,12 +139,14 @@ FIXED_BINDINGS = [
 # ---- web pane ----------------------------------------------------------------------
 
 # settings.json "web": links "pane" (an http(s) link clicked in a terminal opens in a web pane)
-# or "system"; search is the URL template (with %s) a location that is no URL becomes, "" = none;
+# or "system"; search is the URL template (with %s) a location that is no URL becomes (Google when the
+# key is absent, "" = none, an invalid value = none);
 # profile names the browser profile (cookies, logins) new web panes use; home is the page the
 # browser button and "new web pane" open when no address is typed (any location normalize_url
 # accepts, about:blank by default); browser is "auto" (the engine's own search: Google Chrome,
 # then Chromium) or the absolute path of a Chromium-family binary. Mirrors config/settings.lua.
-WEB_DEFAULTS = {"links": "pane", "search": "", "profile": "main", "home": "about:blank", "browser": "auto"}
+WEB_DEFAULTS = {"links": "pane", "search": "https://www.google.com/search?q=%s", "profile": "main",
+                "home": "about:blank", "browser": "auto"}
 WEB_LINKS = ("pane", "system")
 BROWSER_AUTO = "auto"
 
@@ -281,8 +283,9 @@ def web_settings(stored):
     out = dict(WEB_DEFAULTS)
     if stored.get("links") in WEB_LINKS:
         out["links"] = stored["links"]
-    if isinstance(stored.get("search"), str) and valid_search(stored["search"]) is None:
-        out["search"] = stored["search"]
+    if "search" in stored:  # absent keeps the default engine; "" or an invalid value means no search
+        search = stored["search"]
+        out["search"] = search if isinstance(search, str) and valid_search(search) is None else ""
     if isinstance(stored.get("profile"), str) and valid_profile(stored["profile"]) is None:
         out["profile"] = stored["profile"]
     if isinstance(stored.get("home"), str) and normalize_home(stored["home"])[0]:

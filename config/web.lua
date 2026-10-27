@@ -1,9 +1,10 @@
 -- Web pane: a browser in a pane of the grid (Hivegrid WezTerm fork only). Wire (parent):
 --   local web = require('web')(config, wezterm, sb, layouts)
---   LEADER+w   web key table: l location, n new web pane, b back, f forward, r reload, R hard
---              reload, s stop, y copy the URL, o open in the system browser, Esc leaves
---   The browser button of the sidebar bar: focuses the tab's web pane, else asks for a location
---   (Enter alone opens the home page, settings key web.home) and opens a web pane; the bar shows
+--   LEADER+w   web key table: l type a location in the pane's header (asks and opens a pane when
+--              there is none), h show/hide the header, n new web pane, b back, f forward, r reload,
+--              R hard reload, s stop, y copy the URL, o open in the system browser, Esc leaves
+--   The browser button of the sidebar bar: focuses the tab's web pane, else opens a web pane on
+--   the home page (settings key web.home, about:blank by default) without asking; the bar shows
 --   it only when a browser is found (sb.set_web_button, see sidebar.lua)
 --   A click on an http(s) link in a terminal pane opens it in the tab's web pane (settings
 --   key web.links = "pane", the default, and only when Chrome or Chromium is found: probed once
@@ -12,7 +13,8 @@
 -- private mode through the HIVEGRID_WEB_PROFILE / HIVEGRID_WEB_PRIVATE environment) and
 -- driven by control sequences written to the pane, `ESC _ hgweb ; <command> [; <arg>] ESC \`
 -- (navigate;URL, back, forward, reload, hardreload, stop, restart, copy-url, zoom;PERCENT,
--- devtools). The fork marks it with the user var hivegrid_web=1; it is a grid pane like a
+-- header;toggle|show|hide, location, devtools). The fork marks it with the user var
+-- hivegrid_web=1; it is a grid pane like a
 -- terminal (numbered, split, zoomed, arranged), only broadcast skips it.
 -- Without the fork (theme.has_web false) nothing is registered: no key table, no binding, no
 -- open-uri handler, and the returned api only reports `enabled = false`.
@@ -260,7 +262,8 @@ return function(config, wezterm, sb, layouts)
 
   -- The browser button of the sidebar bar: the tab's web pane takes the focus (the same
   -- activation as every other focus change: a zoom that hides it ends, the chrome stays), a tab
-  -- without one asks for a location and opens a web pane for it.
+  -- without one opens a web pane on the home page at once (settings web.home); the header row
+  -- of the pane is where the location is typed.
   function api.browser_button(window, pane)
     local tab = tab_of(window, pane)
     local existing = tab and web_of(tab)
@@ -269,7 +272,12 @@ return function(config, wezterm, sb, layouts)
       existing:activate()
       return
     end
-    api.prompt_new(window, pane)
+    if not has_chrome then
+      toast(window, NO_CHROME)
+      return
+    end
+    local ok, err = api.open(window, pane, home_url(), { new = true })
+    if not ok then toast(window, 'Could not open the web pane: ' .. tostring(err)) end
   end
 
   -- The web pane a command acts on: this pane when it is one, else the tab's.
@@ -279,7 +287,8 @@ return function(config, wezterm, sb, layouts)
     return tab and web_of(tab)
   end
 
-  -- Asks for a location and shows it in the web pane at hand, a new one when there is none.
+  -- Asks for a location and opens a new web pane with it (the key table's `l` types in the
+  -- header of an existing web pane instead; this is the path when the tab has none).
   function api.prompt_location(window, pane)
     prompt(window, pane, 'Location: URL or search (Enter opens, Esc cancels)', function(win, url)
       local target = target_of(win, pane)
@@ -319,7 +328,19 @@ return function(config, wezterm, sb, layouts)
 
   config.key_tables = config.key_tables or {}
   config.key_tables.web = {
-    { key = 'l', action = once(wezterm.action_callback(api.prompt_location)) },
+    {
+      key = 'l',
+      action = once(wezterm.action_callback(function(window, pane)
+        local target = target_of(window, pane)
+        if target then
+          api.command(target, 'location')
+          target:activate()
+        else
+          api.prompt_location(window, pane)
+        end
+      end)),
+    },
+    { key = 'h', action = once(send 'header;toggle') },
     { key = 'n', action = once(wezterm.action_callback(function(window, pane) api.prompt_new(window, pane) end)) },
     { key = 'b', action = once(send 'back') },
     { key = 'f', action = once(send 'forward') },
