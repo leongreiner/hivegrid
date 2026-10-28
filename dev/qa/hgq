@@ -94,7 +94,12 @@ prepare_home() {
   for c in atuin gh lazygit; do link "$REAL/.config/$c" "$H/.config/$c"; done
   touch "$H/.sudo_as_admin_successful" "$H/.hushlogin"
   link "$REAL/.cache/wezterm-claude-quota" "$H/.cache/wezterm-claude-quota"
-  link "$REAL/.local/share/hivegrid" "$H/.local/share/hivegrid"
+  # Not a link to the real directory: it holds the user's web pane browser profiles (signed in to sites,
+  # and locked while the real Hivegrid runs). The sandbox keeps profiles of its own; only the icon font
+  # is shared. An older slot has the link: it is removed (no trailing slash: never the real directory).
+  [ -L "$H/.local/share/hivegrid" ] && rm "$H/.local/share/hivegrid"
+  mkdir -p "$H/.local/share/hivegrid"
+  link "$REAL/.local/share/hivegrid/SymbolsNerdFontMono-Regular.ttf" "$H/.local/share/hivegrid/SymbolsNerdFontMono-Regular.ttf"
   link "$REAL/.local/share/wezterm" "$H/.local/share/wezterm"
   link "$REAL/.local/share/fonts" "$H/.local/share/fonts"
   link "$REAL/.fonts" "$H/.fonts"

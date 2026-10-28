@@ -13,6 +13,8 @@ build, no Chrome). It drives the real GUI (Xvfb, front_end=Software) and checks,
   4 a dialog and window.open do not hang or leak a window (policy: alert accepted, http(s)
     popups loaded in the pane, other schemes ignored), killing Chrome shows the placeholder, Enter restarts it
   5 kill-pane, killing the GUI with SIGKILL and a clean exit leave no Chrome behind
+  6 tabs: the strip takes a row above the header from the second tab, Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1 /
+    Ctrl+T / Ctrl+W (real X11 keys), a hidden tab's animation runs again when shown, the last tab stays
 
   dev/qa/web-smoke [--keep]     --keep leaves slot 12 running for a look (hgq down 12 stops it)
 
@@ -160,11 +162,21 @@ def apc(pid, command):
     cli("send-text", "--no-paste", "--pane-id", pid, f"\x1b_hgweb;{command}\x1b\\")
 
 
-def open_web(url, where, target, private=False):
+def fresh_session():
+    """Session restore would reopen the panes of the last run (a web pane included): start from an empty one."""
+    shutil.rmtree(os.path.join(SANDBOX_HOME, ".local", "state", "hivegrid"), ignore_errors=True)
+
+
+def open_web(url, where, target, private=False, header=False):
+    """Split off a web pane. The header row is hidden unless `header`: most checks compare the page to
+    the whole pane (the header row and the tab strip have checks of their own, section 6)."""
     args = ["split-pane", "--pane-id", target, where, "--url", url, "--profile", PROFILE]
     if private:
         args.append("--private")
-    return int(cli(*args).strip())
+    pid = int(cli(*args).strip())
+    if not header:
+        apc(pid, "header;hide")
+    return pid
 
 
 MAGENTA = data_url("<body style=background:#ff00ff>")
@@ -251,6 +263,7 @@ def run():
         sys.exit("web-smoke: this wezterm build has no web pane support (HG_WEZTERM_DIR)")
     hgq("down", SLOT, check=False)
     shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+    fresh_session()
     hgq("up", SLOT, 1600, 900)
     term = main_terminal()
 
@@ -456,6 +469,85 @@ def run():
     check("4 the page is drawn again", bool(page_origin(shot("restarted"))))
     check("4 chrome is back, once", chrome_count() > 0)
 
+    # 6 ----------------------------------------------------------------------------------
+    # Tabs: the strip and the header row take two rows of the pane, the page the rest.
+    def tab_page(name, color):
+        return data_url(
+            f"<title>{name}</title><body style='margin:0;background:{color}'><script>"
+            f"function t(){{document.title='{name} w'+innerWidth+'x'+innerHeight+' d'+devicePixelRatio}}"
+            "onresize=t;t();</script></body>"
+        )
+
+    def tab_title(pid):
+        return title(pid).split(" ")[0]
+
+    def rows_above(pid):
+        """Rows the page does not cover: its viewport against the pane's pixels."""
+        p, d = pane(pid), page_dims(pid)
+        cell = p["size"]["pixel_height"] / p["size"]["rows"]
+        return round((p["size"]["pixel_height"] - d[1] * d[2]) / cell) if d else None
+
+    tb = open_web(tab_page("ta", "#ff0000"), "--right", term, header=True)
+    waitfor(lambda: tab_title(tb) == "ta" and page_dims(tb), "first tab", 15)
+    cli("zoom-pane", "--pane-id", tb)
+    waitfor(lambda: pane(tb)["is_zoomed"], "zoomed", 5)
+    check("6 one tab: the header row is the only row above the page", waitfor(lambda: rows_above(tb) == 1, "header row", 6) is not None, f"{title(tb)} {pane(tb)['size']}")
+    apc(tb, "tab;new;" + tab_page("tb", "#00ff00"))
+    waitfor(lambda: tab_title(tb) == "tb", "second tab", 15)
+    check("6 a new tab is the active one and shows its title", tab_title(tb) == "tb", title(tb))
+    ok = waitfor(lambda: rows_above(tb) == 2, "strip row", 6)
+    check("6 from the second tab the strip takes a row above the header", bool(ok), f"{title(tb)} {pane(tb)['size']}")
+    time.sleep(0.5)
+    check("6 the active tab's page is drawn", bool(bbox(shot("tab-b"), "#00ff00")))
+    row0 = cli("get-text", "--pane-id", tb).splitlines()[0]
+    check("6 the strip lists both tabs and the + button", "ta" in row0 and "tb" in row0 and "+" in row0, row0)
+    hgq("focus", SLOT)
+    cli("activate-pane", "--pane-id", tb)
+    hgq("x", SLOT, "key", "ctrl+Tab")
+    ok = waitfor(lambda: tab_title(tb) == "ta", "ctrl+tab", 5)
+    check("6 Ctrl+Tab (WezTerm's own binding elsewhere) switches to the next tab, wrapping", bool(ok), title(tb))
+    time.sleep(0.5)
+    check("6 the first tab's page is drawn again", bool(bbox(shot("tab-a"), "#ff0000")))
+    hgq("x", SLOT, "key", "ctrl+shift+Tab")
+    check("6 Ctrl+Shift+Tab goes back", bool(waitfor(lambda: tab_title(tb) == "tb", "ctrl+shift+tab", 5)), title(tb))
+    hgq("x", SLOT, "key", "ctrl+1")
+    check("6 Ctrl+1 picks the first tab", bool(waitfor(lambda: tab_title(tb) == "ta", "ctrl+1", 5)), title(tb))
+
+    # A page in a hidden tab stops rendering; it runs again once picked.
+    hgq("x", SLOT, "key", "ctrl+t")
+    ok = waitfor(lambda: "about:blank" in (pane(tb)["cwd"] or ""), "ctrl+t", 8)
+    check("6 Ctrl+T opens a blank tab", bool(ok), str(pane(tb)["cwd"]))
+    hgq("x", SLOT, "key", "Escape")
+    apc(tb, "navigate;" + ANIM)
+    waitfor(lambda: raf(tb), "animation in a tab", 15)
+    time.sleep(1)
+    a = raf(tb)
+    apc(tb, "tab;prev")
+    waitfor(lambda: tab_title(tb) == "ta", "back to the first tab", 5)
+    time.sleep(0.5)
+    apc(tb, "tab;next")
+    waitfor(lambda: raf(tb) is not None, "animation tab shown", 5)
+    time.sleep(1.5)
+    b = raf(tb)
+    check("6 the animation tab runs again after it was hidden and shown", a is not None and b is not None and b > a, f"{a} -> {b}")
+
+    # Close: Ctrl+W closes the active tab, the strip goes with the second to last, the last tab stays.
+    hgq("x", SLOT, "key", "ctrl+w")
+    ok = waitfor(lambda: tab_title(tb) in ("ta", "tb") and rows_above(tb) == 2, "ctrl+w", 8)
+    check("6 Ctrl+W closes the active tab; the neighbour takes over", bool(ok), title(tb))
+    apc(tb, "tab;select;1")
+    waitfor(lambda: tab_title(tb) == "ta", "first tab", 5)
+    hgq("x", SLOT, "key", "ctrl+w")
+    time.sleep(1)
+    hgq("x", SLOT, "key", "ctrl+w")
+    ok = waitfor(lambda: rows_above(tb) == 1, "strip gone", 8)
+    check("6 with one tab left the strip is gone", bool(ok), f"{title(tb)} {pane(tb)['size']}")
+    hgq("x", SLOT, "key", "ctrl+w")
+    time.sleep(1)
+    check("6 Ctrl+W never closes the last tab or the pane", pane(tb) is not None and bool(page_dims(tb)), title(tb))
+    cli("zoom-pane", "--pane-id", tb, "--unzoom")
+    cli("kill-pane", "--pane-id", tb)
+    waitfor(lambda: pane(tb) is None, "tab pane gone", 5)
     # 5 ----------------------------------------------------------------------------------
     cli("kill-pane", "--pane-id", inp)
     ok = waitfor(lambda: chrome_count() == 0, "chrome gone after kill-pane", 10)
@@ -471,6 +563,7 @@ def run():
     check("5 kill -9 of the GUI leaves no Chrome", bool(ok), str(chrome_count()))
 
     hgq("down", SLOT)
+    fresh_session()
     hgq("up", SLOT, 1600, 900)
     term = main_terminal()
     open_web(MAGENTA, "--right", term)
@@ -489,10 +582,11 @@ finally:
     if not KEEP:
         hgq("down", SLOT, check=False)
     shutil.rmtree(PROFILE_DIR, ignore_errors=True)
-    try:
-        os.remove(PROFILE_DIR + ".log")
-    except OSError:
-        pass
+    for leftover in (PROFILE_DIR + ".log", PROFILE_DIR + ".history.json"):
+        try:
+            os.remove(leftover)
+        except OSError:
+            pass
 print(f"\n{shots} screenshots in {SHOTS}")
 if fails:
     print(f"{len(fails)} failed:")

@@ -112,6 +112,12 @@ def launches(path):
         return [line for line in f.read().splitlines() if line]
 
 
+def browser_starts(path):
+    """The wrapper's log lines of a browser start; the `--version` the engine runs first (for the user
+    agent) is no start."""
+    return [line for line in launches(path) if "--remote-debugging-pipe" in line]
+
+
 def write_settings(web):
     os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
     with open(SETTINGS + ".tmp", "w") as f:
@@ -194,7 +200,7 @@ def run():
     shutil.rmtree(os.path.join(QA, f"s{SLOT}", "work"), ignore_errors=True)
     os.makedirs(WORK, exist_ok=True)
     profile = "hgq-browser-smoke"
-    shutil.rmtree(os.path.expanduser(f"~/.local/share/hivegrid/web/profile-{profile}"), ignore_errors=True)
+    shutil.rmtree(os.path.join(HOME, ".local", "share", "hivegrid", "web", f"profile-{profile}"), ignore_errors=True)
     chrome_a, chrome_b = wrapper("chrome-a"), wrapper("chrome-b")
     home = "data:text/html," + urllib.parse.quote("<body style=background:#00aa44>")  # a location has no spaces
     write_settings({"browser": chrome_a, "profile": profile, "home": home})
@@ -242,8 +248,8 @@ def run():
     time.sleep(0.5)
     hgq("x", SLOT, "type", page)
     hgq("x", SLOT, "key", "Return")
-    ran = waitfor(lambda: launches(chrome_a) or None, 15)
-    check("2 the browser of settings.json is the one launched", bool(ran) and "--remote-debugging-pipe" in ran[0], str(ran))
+    ran = waitfor(lambda: browser_starts(chrome_a) or None, 15)
+    check("2 the browser of settings.json is the one launched", bool(ran), str(launches(chrome_a)))
     check("2 and it got the default profile of the settings",
           bool(ran) and any(f"profile-{profile}" in line for line in ran), str(ran))
     check("2 the other wrapper was not used", launches(chrome_b) == [])
@@ -278,11 +284,11 @@ def run():
         (["--profile", "hgq-cli-settings"], chrome_a, chrome_b, "no --browser: the settings' browser"),
         (["--profile", "hgq-cli-flag", "--browser", chrome_b], chrome_b, None, "--browser beats the settings"),
     ):
-        shutil.rmtree(os.path.expanduser(f"~/.local/share/hivegrid/web/profile-{url_flags[1]}"), ignore_errors=True)
-        before = len(launches(wrapper_path))
+        shutil.rmtree(os.path.join(HOME, ".local", "share", "hivegrid", "web", f"profile-{url_flags[1]}"), ignore_errors=True)
+        before = len(browser_starts(wrapper_path))
         pid = cli("split-pane", "--pane-id", term, "--bottom", "--url", "about:blank", *url_flags).strip()
-        got = waitfor(lambda: len(launches(wrapper_path)) > before, 15)
-        check(f"4 {what}", bool(got) and any(url_flags[1] in line for line in launches(wrapper_path)[before:]), pid)
+        got = waitfor(lambda: len(browser_starts(wrapper_path)) > before, 15)
+        check(f"4 {what}", bool(got) and any(url_flags[1] in line for line in browser_starts(wrapper_path)[before:]), pid)
         if other:
             check("4   and not the other one", all(url_flags[1] not in line for line in launches(other)))
 

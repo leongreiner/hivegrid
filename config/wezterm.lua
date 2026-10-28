@@ -233,7 +233,7 @@ local MODES = {
 -- The web key table exists only on the Hivegrid build (config/web.lua).
 if theme.has_web then
   MODES.web = { 'WEB', P.amber, {
-    { 'l', 'location' }, { 'b', 'back' }, { 'f', 'fwd' }, { 'r', 'reload' }, { 'Esc', 'done' },
+    { 'l', 'location' }, { 't', 'tab' }, { 'b', 'back' }, { 'f', 'fwd' }, { 'r', 'reload' }, { 'Esc', 'done' },
   } }
 end
 

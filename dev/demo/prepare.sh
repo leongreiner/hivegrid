@@ -33,11 +33,9 @@ rm -rf "$H/Projects"
 rm -rf "$S/run/hivegrid-agents" "$H/.cache/hivegrid/sysstats.jsonl" "$H/.cache/hivegrid/sysstats.jsonl.1"
 # Session restore would rebuild the previous recording's layout: start from an empty one.
 rm -rf "$H/.local/state/hivegrid"
-# hgq links ~/.local/share/hivegrid to the real one, which holds the user's web pane browser profile (signed in
-# to sites). The demo gets an empty directory of its own: a fresh, signed-out profile. (No trailing slash: rm
-# removes the link, never the real directory.)
-rm -rf "$H/.local/share/hivegrid"
-mkdir -p "$H/.local/share/hivegrid"
+# The demo's web pane starts signed out: hgq gives every slot a browser profile directory of its own, and a
+# profile left by an earlier recording is removed.
+rm -rf "$H/.local/share/hivegrid/web"
 # lazygit shows a welcome popup on its first run and a notice after an update; the sandbox's state says both were seen.
 mkdir -p "$H/.local/state/lazygit"
 printf 'startuppopupversion: 5\nlastversion: %s\n' "$(lazygit --version | sed -n 's/.*version=\([0-9.]*\),.*/\1/p')" >"$H/.local/state/lazygit/state.yml"

@@ -318,8 +318,8 @@ return function(config, wezterm, sb, layouts)
     end)
   end
 
-  local function send(name)
-    return on_web(function(_, target) api.command(target, name) end)
+  local function send(name, arg)
+    return on_web(function(_, target) api.command(target, name, arg) end)
   end
 
   local function once(action)
@@ -355,6 +355,24 @@ return function(config, wezterm, sb, layouts)
       end)),
     },
     { key = 'n', action = once(wezterm.action_callback(function(window, pane) api.prompt_new(window, pane) end)) },
+    -- Tabs inside the web pane (one browser pane, several pages): t opens one and types its
+    -- address (without a web pane it opens the pane), x closes the active one, ] and [ move,
+    -- 1-9 pick. Ctrl+T, Ctrl+W, Ctrl+Tab and Ctrl+1-9 do the same inside the pane.
+    {
+      key = 't',
+      action = once(wezterm.action_callback(function(window, pane)
+        local target = target_of(window, pane)
+        if target then
+          api.command(target, 'tab;new')
+          target:activate()
+        else
+          api.prompt_new(window, pane)
+        end
+      end)),
+    },
+    { key = 'x', action = once(send 'tab;close') },
+    { key = ']', action = once(send 'tab;next') },
+    { key = '[', action = once(send 'tab;prev') },
     { key = 'b', action = once(send 'back') },
     { key = 'f', action = once(send 'forward') },
     { key = 'r', action = once(send 'reload') },
@@ -376,6 +394,13 @@ return function(config, wezterm, sb, layouts)
     { key = 'Escape', action = act.PopKeyTable },
   }
 
+  for n = 1, 9 do
+    table.insert(config.key_tables.web, {
+      key = tostring(n),
+      action = once(send('tab;select', n)),
+    })
+  end
+
   config.keys = config.keys or {}
   local leader = S.key('web_leader', 'LEADER+w')
   table.insert(config.keys, {
@@ -384,6 +409,26 @@ return function(config, wezterm, sb, layouts)
       name = 'web', one_shot = false, prevent_fallback = true, timeout_milliseconds = 4000,
     },
   })
+
+  -- WezTerm's default bindings switch its own tabs with these chords. In a web pane they are the
+  -- browser's tab keys (the pane handles them), everywhere else they keep that default.
+  for _, chord in ipairs {
+    { key = 'Tab', mods = 'CTRL', tab = 1 },
+    { key = 'Tab', mods = 'CTRL|SHIFT', tab = -1 },
+    { key = 'PageDown', mods = 'CTRL', tab = 1 },
+    { key = 'PageUp', mods = 'CTRL', tab = -1 },
+  } do
+    table.insert(config.keys, {
+      key = chord.key, mods = chord.mods,
+      action = wezterm.action_callback(function(window, pane)
+        if theme.is_web(pane) then
+          window:perform_action(act.SendKey { key = chord.key, mods = chord.mods }, pane)
+        else
+          window:perform_action(act.ActivateTabRelative(chord.tab), pane)
+        end
+      end),
+    })
+  end
 
   -- Links ---------------------------------------------------------------------------------------
   -- A clicked http(s) link of a terminal pane of the active tab opens in the tab's web pane

@@ -441,6 +441,52 @@ T.test('LEADER+w activates the web table (rebindable); its keys drive the tab\'s
   T.eq(#term.sent, 0, 'the terminal pane is never written to')
 end)
 
+T.test('the web table drives the tabs of the web pane: t, x, ] [ and 1-9', function(wz)
+  local config, win = setup(wz, { { id = 1, width = 100, height = 50 }, { pane = web_pane(wz, 7, 'https://a.test/'), left = 101, width = 50, height = 50 } })
+  local term, page = wz.mux.get_pane(1), wz.mux.get_pane(7)
+  local expect = { x = 'tab;close', [']'] = 'tab;next', ['['] = 'tab;prev', ['3'] = 'tab;select;3', ['9'] = 'tab;select;9' }
+  for key, body in pairs(expect) do
+    wz.stub.perform(wz.stub.key(config.key_tables.web, key), win, term)
+    T.eq(page.sent[#page.sent], APC .. body .. '\27\\', key)
+  end
+  T.eq(wz.stub.key(config.key_tables.web, '0'), nil, 'tabs are counted from 1')
+  wz.stub.perform(wz.stub.key(config.key_tables.web, 't'), win, term)
+  T.eq(page.sent[#page.sent], APC .. 'tab;new\27\\', 't opens a tab and the pane types its address')
+  T.eq(#term.sent, 0, 'the terminal pane is never written to')
+end)
+
+T.test('t without a web pane asks for a location and opens the pane', function(wz)
+  local config, win = setup(wz, { { id = 1, width = 200, height = 50 } })
+  local pane = wz.mux.get_pane(1)
+  wz.stub.perform(wz.stub.key(config.key_tables.web, 't'), win, pane)
+  local prompt = win.actions[#win.actions].action
+  T.eq(prompt.kind, 'PromptInputLine')
+  wz.stub.perform(prompt.args.action, win, wz.fake.pane {}, 'example.com')
+  T.eq(pane.splits[1].args, { 'hivegrid:web', 'https://example.com' })
+  local config2, win2 = setup(wz, { { id = 1, width = 100, height = 50 } })
+  wz.stub.perform(wz.stub.key(config2.key_tables.web, 'x'), win2, wz.mux.get_pane(1))
+  T.eq(#win2.toasts, 1, 'closing a tab needs a web pane')
+end)
+
+T.test('Ctrl+Tab and Ctrl+PageUp/Down belong to the web pane\'s tabs, and switch WezTerm tabs elsewhere', function(wz)
+  local config, win = setup(wz, { { id = 1, width = 100, height = 50 }, { pane = web_pane(wz, 7, 'https://a.test/'), left = 101, width = 50, height = 50 } })
+  local term, page = wz.mux.get_pane(1), wz.mux.get_pane(7)
+  for _, c in ipairs { { 'Tab', 'CTRL', 1 }, { 'Tab', 'CTRL|SHIFT', -1 }, { 'PageDown', 'CTRL', 1 }, { 'PageUp', 'CTRL', -1 } } do
+    local action = wz.stub.key(config.keys, c[1], c[2])
+    T.ok(action, c[1] .. ' ' .. c[2] .. ' is bound')
+    local n = #win.actions
+    wz.stub.perform(action, win, page)
+    local pressed = win.actions[#win.actions].action
+    T.eq(pressed.kind, 'SendKey', 'a web pane gets the key')
+    T.eq(pressed.args, { key = c[1], mods = c[2] })
+    wz.stub.perform(action, win, term)
+    local moved = win.actions[#win.actions].action
+    T.eq(moved.kind, 'ActivateTabRelative', 'a terminal pane keeps the default')
+    T.eq(moved.args, c[3])
+    T.ok(#win.actions > n)
+  end
+end)
+
 T.test('the web key table needs a web pane and says so', function(wz)
   local config, win = setup(wz, { { id = 1, width = 100, height = 50 } })
   wz.stub.perform(wz.stub.key(config.key_tables.web, 'b'), win, wz.mux.get_pane(1))
