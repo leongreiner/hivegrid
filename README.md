@@ -56,7 +56,7 @@ cd hivegrid
 ./install.sh [--tools]     # --tools also downloads yazi, ya and lazygit into ~/.local/bin
 ```
 
-The installer copies the WezTerm config to `~/.config/wezterm/`, the programs in `bin/` to `~/.local/bin/`, the omp extension that reports agent states, the icon and a `Hivegrid` launcher, and downloads the DejaVu Sans Mono Nerd Font. Differing existing files are saved once as `*.bak.<timestamp>`; no sudo is used. Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
+The installer copies the WezTerm config to `~/.config/wezterm/`, the programs in `bin/` to `~/.local/bin/`, the omp extension that reports agent states, the icon and a `Hivegrid` launcher, and downloads the DejaVu Sans Mono Nerd Font. Differing existing files are saved once as `*.bak.<timestamp>`; no sudo is used. The `hivegrid` command comes from the [custom WezTerm build](#custom-wezterm-build); without that build the application menu entry starts stock `wezterm` (reduced features). Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
 
 For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
 
@@ -115,7 +115,25 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 
 ## Custom WezTerm build
 
-`wezterm/` is a submodule pointing at the [WezTerm fork](https://github.com/leongreiner/wezterm) (branch `hivegrid`). It adds clickable header segments, an overlay action for the panels, the drawn header mark, hover for unfocused panes, full-height sidebar panes and the web pane. The config also runs on stock WezTerm 20240203 with reduced features: clicks are ignored, the panels open in a new tab, the bar and dock stay plain, and there is no web pane. To build the fork without sudo, run `git submodule update --init` and then `wezterm/build-hivegrid.sh`. Details: [docs/wezterm-build.md](docs/wezterm-build.md) and `wezterm/HIVEGRID.md`.
+`wezterm/` is a submodule pointing at the [WezTerm fork](https://github.com/leongreiner/wezterm) (branch `hivegrid`). It adds clickable header segments, an overlay action for the panels, the drawn header mark, hover for unfocused panes, full-height sidebar panes and the web pane. The config also runs on stock WezTerm 20240203 with reduced features: clicks are ignored, the panels open in a new tab, the bar and dock stay plain, and there is no web pane.
+
+Building the fork needs a Rust toolchain and the X11 development headers. `build-hivegrid.sh` writes the `hivegrid` launcher, which `install.sh` then uses.
+
+```sh
+# 1. Rust, into your home directory (no sudo)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. ~/.cargo/env
+
+# 2. X11 development headers (Debian/Ubuntu; this one needs sudo)
+sudo apt install libxcb-util-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-icccm4-dev \
+  libxcb-shm0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+
+# 3. Build and deploy to ~/.local/opt/hivegrid-wezterm and ~/.local/bin/hivegrid
+git submodule update --init
+CARGO_BUILD_JOBS=8 wezterm/build-hivegrid.sh
+```
+
+A release build takes 20 to 40 minutes; `CARGO_BUILD_JOBS` caps the parallel compiler jobs so the machine stays usable. If it stops with `Could not find xcb-util` or another `pkg-config` error, a development package from step 2 is missing; cargo keeps what it compiled, so re-running continues where it stopped. Without sudo, `build-hivegrid.sh` also reads headers and libraries from `~/.local/sysroot` (unpack the `.deb` files there with `dpkg -x`). Details: [docs/wezterm-build.md](docs/wezterm-build.md) and `wezterm/HIVEGRID.md`.
 
 ## More documentation
 
