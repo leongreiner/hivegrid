@@ -13,7 +13,8 @@ build, no Chrome). It drives the real GUI (Xvfb, front_end=Software) and checks,
   4 a dialog and window.open do not hang or leak a window (policy: alert accepted, http(s)
     popups loaded in the pane, other schemes ignored), killing Chrome shows the placeholder, Enter restarts it
   5 kill-pane, killing the GUI with SIGKILL and a clean exit leave no Chrome behind
-  6 tabs: the strip takes a row above the header from the second tab, Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1 /
+  6 tabs: the strip takes a row above the header (also for a lone tab, for its + button; a collapsed header
+    with one tab has none), Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1 /
     Ctrl+T / Ctrl+W (real X11 keys), a hidden tab's animation runs again when shown, the last tab stays
 
   dev/qa/web-smoke [--keep]     --keep leaves slot 12 running for a look (hgq down 12 stops it)
@@ -491,12 +492,16 @@ def run():
     waitfor(lambda: tab_title(tb) == "ta" and page_dims(tb), "first tab", 15)
     cli("zoom-pane", "--pane-id", tb)
     waitfor(lambda: pane(tb)["is_zoomed"], "zoomed", 5)
-    check("6 one tab: the header row is the only row above the page", waitfor(lambda: rows_above(tb) == 1, "header row", 6) is not None, f"{title(tb)} {pane(tb)['size']}")
+    check("6 one tab: the strip and the header row are the two rows above the page", waitfor(lambda: rows_above(tb) == 2, "strip and header row", 6) is not None, f"{title(tb)} {pane(tb)['size']}")
+    apc(tb, "header;hide")
+    check("6 one tab, header collapsed: no strip, a bare page", waitfor(lambda: rows_above(tb) == 0, "bare page", 6) is not None, f"{title(tb)} {pane(tb)['size']}")
+    apc(tb, "header;show")
+    check("6 showing the header brings the strip back", waitfor(lambda: rows_above(tb) == 2, "strip again", 6) is not None, f"{title(tb)} {pane(tb)['size']}")
     apc(tb, "tab;new;" + tab_page("tb", "#00ff00"))
     waitfor(lambda: tab_title(tb) == "tb", "second tab", 15)
     check("6 a new tab is the active one and shows its title", tab_title(tb) == "tb", title(tb))
     ok = waitfor(lambda: rows_above(tb) == 2, "strip row", 6)
-    check("6 from the second tab the strip takes a row above the header", bool(ok), f"{title(tb)} {pane(tb)['size']}")
+    check("6 with the second tab the strip and the header stay the two rows above the page", bool(ok), f"{title(tb)} {pane(tb)['size']}")
     time.sleep(0.5)
     check("6 the active tab's page is drawn", bool(bbox(shot("tab-b"), "#00ff00")))
     row0 = cli("get-text", "--pane-id", tb).splitlines()[0]
@@ -531,7 +536,7 @@ def run():
     b = raf(tb)
     check("6 the animation tab runs again after it was hidden and shown", a is not None and b is not None and b > a, f"{a} -> {b}")
 
-    # Close: Ctrl+W closes the active tab, the strip goes with the second to last, the last tab stays.
+    # Close: Ctrl+W closes the active tab, the strip stays with the last tab (no close button), the last tab stays.
     hgq("x", SLOT, "key", "ctrl+w")
     ok = waitfor(lambda: tab_title(tb) in ("ta", "tb") and rows_above(tb) == 2, "ctrl+w", 8)
     check("6 Ctrl+W closes the active tab; the neighbour takes over", bool(ok), title(tb))
@@ -540,8 +545,8 @@ def run():
     hgq("x", SLOT, "key", "ctrl+w")
     time.sleep(1)
     hgq("x", SLOT, "key", "ctrl+w")
-    ok = waitfor(lambda: rows_above(tb) == 1, "strip gone", 8)
-    check("6 with one tab left the strip is gone", bool(ok), f"{title(tb)} {pane(tb)['size']}")
+    ok = waitfor(lambda: rows_above(tb) == 2, "lone tab keeps its strip", 8)
+    check("6 with one tab left the strip stays (its + button)", bool(ok), f"{title(tb)} {pane(tb)['size']}")
     hgq("x", SLOT, "key", "ctrl+w")
     time.sleep(1)
     check("6 Ctrl+W never closes the last tab or the pane", pane(tb) is not None and bool(page_dims(tb)), title(tb))
