@@ -400,8 +400,12 @@ return function(config, wezterm)
         for _, x in ipairs(pane_dividers(cur, p, a)) do
           inner[x] = true
         end
-        -- AdjustPaneSize acts on the active pane, whatever --pane-id says.
-        cli('activate-pane', '--pane-id', id)
+        -- Stock WezTerm's AdjustPaneSize acts on the active pane, whatever --pane-id says, so
+        -- the pane is activated first (the keyboard hops through the grid meanwhile). The
+        -- Hivegrid build resizes the given pane: the focus is never touched there.
+        if not require('theme').has_click then
+          cli('activate-pane', '--pane-id', id)
+        end
         -- Probe by one cell to learn which divider this pane's resize actually moves. One
         -- against the sidebar or the overview dock: undo it.
         local moved
@@ -486,8 +490,11 @@ return function(config, wezterm)
         break
       end
     end
-    -- equalize_axis activates the panes it resizes; the keyboard goes back where it was.
-    cli('activate-pane', '--pane-id', pane:pane_id())
+    -- Stock WezTerm: equalize_axis activated the panes it resized; the keyboard goes back
+    -- where it was.
+    if not require('theme').has_click then
+      cli('activate-pane', '--pane-id', pane:pane_id())
+    end
     local final = snap()
     local want = final and targets(plan, final)
     if want and (#misaligned(final, AXES[1], want) > 0

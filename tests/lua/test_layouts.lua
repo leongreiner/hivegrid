@@ -314,6 +314,20 @@ test('equalize still moves dividers when asked for', function(wz)
   T.ok(spread(field(ordered, 'width')) <= 1, 'widths even: ' .. T.show(field(ordered, 'width')))
 end)
 
+test('equalize on the fork resizes by pane id and never moves the focus', function(wz)
+  wz.stub.fork = true
+  local mux, api = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3 }, 250) })
+  mux:split(3, 'h', 50)
+  mux:sync()
+  mux.log = {}
+  local before = mux.tabs[1].active
+  api.equalize(mux.window, wz.mux.get_pane(2))
+  T.eq(mux:commands('activate-pane'), {}, 'no pane is activated')
+  T.eq(mux.tabs[1].active, before)
+  local _, _, ordered = reading(mux)
+  T.ok(spread(field(ordered, 'width')) <= 1, 'widths even: ' .. T.show(field(ordered, 'width')))
+end)
+
 test('arrange still re-tiles when asked for', function(wz)
   local mux, api = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3, 4, 5 }, 250) })
   mux.log = {}

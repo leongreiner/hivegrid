@@ -207,7 +207,8 @@ function Mux:adjust(pane_id, dir, amount)
   local axis = (dir == 'Left' or dir == 'Right') and 'h' or 'v'
   local delta = (dir == 'Right' or dir == 'Down') and amount or -amount
   self:panes(t) -- refresh node sizes
-  local chain = path_to(t.root, t.active)
+  -- The Hivegrid build resizes the pane it is given; stock WezTerm the tab's active one.
+  local chain = path_to(t.root, self.wz.stub.fork and pane_id or t.active)
   for i = #chain, 1, -1 do
     local node = chain[i]
     if node.dir == axis then
