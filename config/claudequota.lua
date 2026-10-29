@@ -575,6 +575,36 @@ return function(config, wezterm)
   end
   api.start_omp = start_omp
 
+  -- Claude Code (settings "agent": "claude"): `claude` typed into a shell prompt, with the
+  -- account's CLAUDE_CONFIG_DIR unless it is the default ~/.claude. Claude Code has no
+  -- per-profile files to move a chat between, so a running claude is never touched.
+  local function start_claude(window, pane, label)
+    local target = target_pane(window, pane)
+    local info = target and target:get_foreground_process_info()
+    if not info then return toast(window, 'Cannot tell what is running in the pane') end
+    local name = basename(info.name or (info.argv or {})[1])
+    if name == 'claude' then
+      return toast(window, 'Claude Code is already running in this pane; quit it to start another account')
+    end
+    if not SHELLS[name] then
+      return toast(window, string.format('%s is running in this pane, not a shell prompt', name))
+    end
+    local dir
+    for _, a in ipairs(S.accounts()) do
+      if a.label == label then dir = a.dir end
+    end
+    local cmd = 'claude'
+    if dir and dir ~= HOME .. '/.claude' then cmd = 'CLAUDE_CONFIG_DIR=' .. shquote(dir) .. ' claude' end
+    target:send_text(cmd .. '\r')
+  end
+
+  -- What an account pill, Alt+q and LEADER+u do: start the agent of the settings (omp or Claude
+  -- Code) with the account in the pane.
+  function api.start_agent(window, pane, label)
+    if S.agent == 'claude' then return start_claude(window, pane, label) end
+    return start_omp(window, pane, label)
+  end
+
   -- The parent hands over agentstatus' per-pane state lookup (as.pane_kind) so a switch can
   -- ask before interrupting a working agent.
   function api.set_pane_kind(fn) api.pane_kind = fn end
@@ -599,7 +629,7 @@ return function(config, wezterm)
   end
 
   -- Alt+q: the picker doubles as the account list; Enter, a click or the account's digit (the
-  -- LEADER+u one) starts omp with it in the pane, or moves the running omp over.
+  -- LEADER+u one) starts the agent with it in the pane (omp: or moves the running omp over).
   api.select = wezterm.action_callback(function(window, pane)
     local now = os.time()
     local active = api.active(window)
@@ -612,10 +642,11 @@ return function(config, wezterm)
     end
     require('picker').open(window, pane, {
       title = 'Claude quota', crumb = #rows .. (#rows == 1 and ' account' or ' accounts'),
-      description = 'Starts omp with the account in this pane, or moves the omp running here to it.',
+      description = S.agent == 'claude' and 'Starts Claude Code with the account in this pane.'
+        or 'Starts omp with the account in this pane, or moves the omp running here to it.',
       verb = 'start', rows = rows, empty = 'No quota data cached yet',
     }, function(win, p, id)
-      start_omp(win, p, id)
+      api.start_agent(win, p, id)
     end)
   end)
 
@@ -635,7 +666,7 @@ return function(config, wezterm)
       key = tostring(i),
       action = wezterm.action_callback(function(w, p)
         local a = S.accounts()[i]
-        if a then start_omp(w, p, a.label) else toast(w, 'No account number ' .. i) end
+        if a then api.start_agent(w, p, a.label) else toast(w, 'No account number ' .. i) end
       end),
     }
   end

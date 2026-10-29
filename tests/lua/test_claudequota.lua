@@ -10,7 +10,8 @@ local ACCOUNTS = {
 }
 
 -- Builds the module over a temp cache dir. opts.accounts (default ACCOUNTS), opts.files
--- { name = doc table | raw text }, opts.creds { dir names under HOME }, opts.no_cache_dir.
+-- { name = doc table | raw text }, opts.creds { dir names under HOME }, opts.no_cache_dir,
+-- opts.agent (the settings "agent": 'claude', or nothing for omp).
 local function setup(wz, opts)
   opts = opts or {}
   T.clock(T0)
@@ -23,7 +24,7 @@ local function setup(wz, opts)
   T.setenv('OMP_SWITCH_BIN', '/fake/bin/omp-switch')
   local settings = T.tmpdir() .. '/settings.json'
   T.setenv('HIVEGRID_SETTINGS', settings)
-  T.write(settings, wz.json_encode { accounts = opts.accounts or ACCOUNTS })
+  T.write(settings, wz.json_encode { accounts = opts.accounts or ACCOUNTS, agent = opts.agent })
   for _, d in ipairs(opts.creds or {}) do T.write(home .. '/' .. d .. '/.credentials.json', '{}') end
   for name, doc in pairs(opts.files or {}) do
     T.write(cache .. '/' .. name .. '.json', type(doc) == 'string' and doc or wz.json_encode(doc))
@@ -373,6 +374,63 @@ T.test('from the sidebar the account starts in the grid pane used last', functio
   wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 1, last = 3 } }
   cq.start_omp(win, bar, 'main')
   T.eq({ bar.sent, a.sent, b.sent }, { {}, {}, { 'omp --profile=alpha\r' } })
+end)
+
+-- Claude Code as the agent (settings "agent": "claude") ----------------------------------------
+
+local function claude_setup(wz)
+  local cq, config = setup(wz, { agent = 'claude', accounts = {
+    { label = 'main', dir = '~/.claude', profile = 'alpha' },
+    { label = 'work', dir = '~/.claude-work' },
+    { label = 'odd', dir = "~/.claude-it's" },
+  } })
+  return cq, config, os.getenv('HOME')
+end
+
+T.test('an account pill starts claude: the default account bare, the others with their config dir', function(wz)
+  local cq, _, home = claude_setup(wz)
+  local p = shell_pane(wz, 1)
+  local win = wz.fake.grid { { pane = p } }
+  cq.start_agent(win, p, 'main')
+  cq.start_agent(win, p, 'work')
+  cq.start_agent(win, p, 'odd')
+  T.eq(p.sent, {
+    'claude\r',
+    "CLAUDE_CONFIG_DIR='" .. home .. "/.claude-work' claude\r",
+    "CLAUDE_CONFIG_DIR='" .. home .. "/.claude-it'\\''s' claude\r",
+  })
+  T.eq(#win.toasts, 0)
+  T.eq(#wz.stub.children, 0, 'omp-switch is for omp only')
+end)
+
+T.test('claude is never started over a running claude, omp or another program', function(wz)
+  local cq = claude_setup(wz)
+  local running = shell_pane(wz, 1, { process_info = { name = 'claude', argv = { 'claude' }, pid = 7 } })
+  local omp = shell_pane(wz, 2, { process_info = omp_info(8, 'alpha') })
+  local vim = shell_pane(wz, 3, { process_info = { name = 'vim', argv = { 'vim' }, pid = 9 } })
+  local win = wz.fake.grid { { pane = running, active = true }, { pane = omp, left = 41 }, { pane = vim, left = 81 } }
+  for _, p in ipairs { running, omp, vim } do cq.start_agent(win, p, 'work') end
+  T.eq({ running.sent, omp.sent, vim.sent }, { {}, {}, {} })
+  T.eq(#win.toasts, 3)
+  T.eq(#wz.stub.children, 0, 'a running omp is not moved either')
+end)
+
+T.test('LEADER+u then a digit and the Alt+q picker follow the agent of the settings', function(wz)
+  local _, config = claude_setup(wz)
+  local p = shell_pane(wz, 1)
+  local win = wz.fake.grid { { pane = p } }
+  wz.stub.perform(config.key_tables.omp_account[1].action, win, p)
+  T.eq(p.sent, { 'claude\r' })
+  wz.stub.perform(key(config, 'q', 'ALT'), win, p)
+  T.ok(wz.stub.picker(win).spec.description:find('Claude Code', 1, true), 'the picker says what it starts')
+end)
+
+T.test('without the setting, start_agent is the omp start', function(wz)
+  local cq = setup(wz)
+  local p = shell_pane(wz, 1)
+  local win = wz.fake.grid { { pane = p } }
+  cq.start_agent(win, p, 'private')
+  T.eq(p.sent, { 'omp --profile=private\r' })
 end)
 
 -- Active account ----------------------------------------------------------------------------

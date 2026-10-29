@@ -501,7 +501,7 @@ class SettingsLayoutTest(Env):
     def test_narrow_keeps_the_section_strip(self):
         _, rows = self.draw(U.WIDE_COLS - 1)
         self.assertFalse(self.page.two_pane)
-        self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+Web\s+About\s*$")
+        self.assertRegex(rows[2], r"^\s+Theme\s+Keys\s+Accounts\s+Web\s+Agent\s+About\s*$")
 
     def test_theme_page_keeps_the_accent_row_with_every_preset_at_120x30(self):
         _, rows = self.draw(120, 30, sub=0)
@@ -529,7 +529,7 @@ class SettingsLayoutTest(Env):
         about = self.page.SUBS.index("About")
         self.page.sub = about
         self.page.key(None, set(), "UpArrow")
-        self.assertEqual(self.page.SUBS[self.page.sub], "Web")
+        self.assertEqual(self.page.SUBS[self.page.sub], "Agent")
         self.page.sub = about
         self.page.key(None, set(), "DownArrow")
         self.assertEqual(self.page.SUBS[self.page.sub], "About", "stays on the last section")
@@ -563,6 +563,78 @@ class SettingsLayoutTest(Env):
         self.page.change_binding = lambda ui_, n: modal.append(n)
         ui.cv.hit_at(x + 2, y)("left")
         self.assertEqual(modal, ["overview_toggle"])
+
+
+class AgentSettingsTest(Env):
+    """The Agent section: omp or Claude Code for new tabs, grids and the account pills, saved as
+    settings.json "agent"."""
+
+    def setUp(self):
+        super().setUp()
+        import hivegrid_settings_core as S
+        self.path = os.path.join(self.tmp, "settings.json")
+        self.model = S.Model(S.Settings(self.path))
+        self.page = P.SettingsPage(self.model)
+        self.page.about = SettingsLayoutTest.ABOUT
+        self.page.sub = self.page.SUBS.index("Agent")
+        self.ui = mock.Mock()
+
+    def draw(self, w=120, h=40):
+        ui = U.UI(self.model, [self.page])
+        ui.size, ui.out = (w, h), io.StringIO()
+        ui.draw()
+        return ui, ["".join(c[0] for c in row) for row in ui.cv.cells]
+
+    def test_omp_is_the_default_and_the_cursor_starts_on_the_saved_choice(self):
+        self.assertEqual(self.model.agent, "omp")
+        self.assertFalse(self.model.dirty)
+        self.assertEqual(self.page.section_meta(self.page.sub), ("omp", "dim"))
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"agent": "claude"}, f)
+        import hivegrid_settings_core as S
+        page = P.SettingsPage(S.Model(S.Settings(self.path)))
+        self.assertEqual(page.cursor[4], 1, "Claude Code is selected when it is the saved choice")
+
+    def test_enter_chooses_the_selected_agent_and_r_goes_back_to_omp(self):
+        self.page.key(self.ui, set(), "DownArrow")
+        self.page.key(self.ui, set(), "Enter")
+        self.assertEqual(self.model.agent, "claude")
+        self.assertTrue(self.model.dirty)
+        self.assertEqual(self.page.section_meta(self.page.sub), ("● Claude Code", "amber"))
+        self.page.key(self.ui, set(), "r")
+        self.assertEqual(self.model.agent, "omp")
+        self.assertFalse(self.model.dirty, "choosing the saved agent again is no change")
+
+    def test_the_arrows_stay_inside_the_two_rows(self):
+        for _ in range(3):
+            self.page.key(self.ui, set(), "DownArrow")
+        self.assertEqual(self.page.cursor[4], 1)
+        for _ in range(3):
+            self.page.key(self.ui, set(), "UpArrow")
+        self.assertEqual(self.page.cursor[4], 0)
+
+    def test_a_click_on_use_chooses_that_agent_and_the_current_one_is_marked(self):
+        ui, rows = self.draw()
+        self.assertEqual(sum("● in use" in r for r in rows), 1)
+        use = next(i for i, r in enumerate(rows) if " Use " in r)
+        self.assertIn("Claude Code", rows[use])
+        ui.cv.hit_at(rows[use].index(" Use ") + 2, use)("left")
+        self.assertEqual(self.model.agent, "claude")
+        _, rows = self.draw()
+        in_use = next(r for r in rows if "● in use" in r)
+        self.assertIn("Claude Code", in_use)
+
+    def test_save_writes_the_choice_and_omp_leaves_the_file_without_it(self):
+        self.page.key(self.ui, set(), "DownArrow")
+        self.page.key(self.ui, set(), "Enter")
+        self.assertTrue(self.model.save()[0])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["agent"], "claude")
+        self.page.key(self.ui, set(), "r")
+        self.assertTrue(self.model.save()[0])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertNotIn("agent", json.load(f))
+
 
 
 class WebSettingsTest(Env):

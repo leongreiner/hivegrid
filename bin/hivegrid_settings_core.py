@@ -136,6 +136,20 @@ FIXED_BINDINGS = [
     ("LEADER+e", "equalize panes"), ("LEADER+p", "pane mode"), ("LEADER+b", "broadcast"),
 ]
 
+# ---- agent -------------------------------------------------------------------------
+
+# settings.json "agent": the coding agent Hivegrid starts in new tabs, grids and for an account
+# pill: "omp" (default) or "claude" (Claude Code). Mirrors config/settings.lua.
+AGENTS = ("omp", "claude")
+AGENT_DEFAULT = "omp"
+AGENT_NAMES = {"omp": "omp", "claude": "Claude Code"}
+
+
+def agent_setting(stored):
+    """The effective agent of the stored `agent` value: the default for anything but a known name."""
+    return stored if stored in AGENTS else AGENT_DEFAULT
+
+
 # ---- web pane ----------------------------------------------------------------------
 
 # settings.json "web": links "pane" (an http(s) link clicked in a terminal opens in a web pane)
@@ -620,16 +634,25 @@ class Settings:
     def web(self):
         return web_settings(self.data.get("web"))
 
+    def agent(self):
+        return agent_setting(self.data.get("agent"))
+
     def effective(self):
         return {"version": SCHEMA, "theme": self.theme(), "keys": self.keys(), "accounts": self.accounts(),
-                "web": self.web()}
+                "web": self.web(), "agent": self.agent()}
 
-    def write(self, theme, keys, accounts, web):
+    def write(self, theme, keys, accounts, web, agent):
         data = dict(self.data)
         data["version"] = SCHEMA
         data["theme"] = theme
         data["keys"] = {n: v for n, v in keys.items() if v != normalize(BINDINGS[n][1])}
         data["accounts"] = accounts
+        # Like keys and web, only a non-default value is written; a name that is no agent never is
+        # (the readers would take it for omp anyway).
+        if agent_setting(agent) == AGENT_DEFAULT:
+            data.pop("agent", None)
+        else:
+            data["agent"] = agent
         # Only non-default web values are written (like keys); entries this version does not know stay.
         web_data = dict(data["web"]) if isinstance(data.get("web"), dict) else {}
         for k, v in web.items():
@@ -724,10 +747,11 @@ class Model:
         self.keys = settings.keys()
         self.accounts = settings.accounts()
         self.web = settings.web()
+        self.agent = settings.agent()
         self.baseline = self.snapshot()
 
     def snapshot(self):
-        return json.dumps([self.theme, self.keys, self.accounts, self.web], sort_keys=True)
+        return json.dumps([self.theme, self.keys, self.accounts, self.web, self.agent], sort_keys=True)
 
     @property
     def dirty(self):
@@ -741,7 +765,7 @@ class Model:
         if self.settings.newer:
             return False, "settings.json was written by a newer version; not overwriting it"
         try:
-            self.settings.write(self.current_theme(), self.keys, self.accounts, self.web)
+            self.settings.write(self.current_theme(), self.keys, self.accounts, self.web, self.agent)
         except OSError as exc:
             return False, f"save failed: {exc.strerror or exc}"
         self.baseline = self.snapshot()

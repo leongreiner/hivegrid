@@ -1,5 +1,7 @@
 # Installation details
 
+An AI coding agent that installs Hivegrid for someone reads [SETUP.md](../SETUP.md): it runs the installer and then asks for the theme, the agent (omp or Claude Code), the accounts to log in and a browser for web panes. What it applies is the Settings panel's data (`LEADER+,`), so every choice can be changed there afterwards.
+
 ## Running the installer
 
 ```sh

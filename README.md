@@ -34,10 +34,10 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 
 ## Features
 
-- **Agent grid**: `omp-grid` starts one agent per pane; panes stay where you put them and are arranged, equalized, rotated, swapped and zoomed only when you ask, and can all be typed into at once (broadcast).
+- **Agent grid**: `omp-grid` starts one agent per pane (omp or Claude Code, chosen in the settings); panes stay where you put them and are arranged, equalized, rotated, swapped and zoomed only when you ask, and can all be typed into at once (broadcast).
 - **Overview dock**: every pane with its number, state (working, busy, needs you, done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
 - **Accounts and usage**: Claude Code usage (5 h and 7 d) of every account in the header; switch an account from a running chat without losing it.
-- **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings and accounts.
+- **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings, accounts, the web browser and the agent (omp or Claude Code).
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, with a header row (back, forward, reload, address and search field, Google by default) that `LEADER+w h` collapses, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
 - **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes), answer approvals and plan reviews with buttons, change an agent's model and thinking level, start a new session on any of your accounts, and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
@@ -47,6 +47,8 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 [docs/features.md](docs/features.md) describes each in detail.
 
 ## Install
+
+Asking an AI coding agent to install it? Point it at [SETUP.md](SETUP.md): it installs, asks you for the theme, the agent (omp or Claude Code), your accounts and a browser, and tells you what you still have to do yourself (log in).
 
 Needs Linux on x86_64, `curl`, `tar`, Python 3 and `unzip`. You do not need WezTerm, Rust or a compiler: the installer downloads a pre-built Hivegrid WezTerm. The optional web pane needs a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
 
@@ -62,7 +64,7 @@ cd hivegrid
 ./install.sh [--tools]
 ```
 
-Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
+Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an agent. Three things are yours to set: the colour theme and the agent (omp, the default, or Claude Code) in the settings (`LEADER+,`), and each account must log in once.
 
 What gets installed:
 
@@ -72,7 +74,7 @@ What gets installed:
 
 If the WezTerm download fails (no network, not x86_64, or no release published yet) the installer says so and carries on with the stock `wezterm` if you have one; build the fork yourself then ([below](#custom-wezterm-build)). A missing `curl` or `tar` stops the installer with the command that installs it.
 
-For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
+For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). Web panes need a Chromium-family browser installed (the left bar's browser button appears when one is found). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
 
 ## Keys
 
@@ -80,7 +82,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 
 | Keys | Action |
 | --- | --- |
-| `LEADER+1` / `2` / `3` | new tab with one `omp` / a 2x2 grid / a 3x3 grid |
+| `LEADER+1` / `2` / `3` | new tab with one agent (omp, or Claude Code when the settings say so) / a 2x2 grid / a 3x3 grid |
 | `Shift+Arrow` | split the pane in that direction (the new pane stays where the split puts it; nothing re-tiles the grid) |
 | `Alt+Arrow`, `Alt+h/j/k/l` | focus a pane |
 | `Alt+z` | zoom a pane |
@@ -155,6 +157,7 @@ Releases are published by hand: Actions, "Release", "Run workflow" with a tag su
 
 | | |
 | --- | --- |
+| [SETUP.md](SETUP.md) | step by step install for an AI coding agent: theme, agent, account login, browser |
 | [docs/install.md](docs/install.md) | what the installer does, fonts, account login |
 | [docs/keys.md](docs/keys.md) | every key binding |
 | [docs/accounts-and-quota.md](docs/accounts-and-quota.md) | how usage is read, account precedence, moving a chat between accounts |

@@ -14,7 +14,8 @@ import hivegrid_ui as U
 from hivegrid_agents import (AGENT_PROCS, SHELLS, format_cost, format_tokens, is_chrome, is_web, parse_usage, state_dir,
                              totals_text, usage_totals, web_build_cached, web_label)
 from hivegrid_settings_core import (
-    BINDINGS, BROWSER_AUTO, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm, cache_dir, check_binding,
+    AGENT_DEFAULT, AGENT_NAMES, AGENTS, BINDINGS, BROWSER_AUTO, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm,
+    cache_dir, check_binding,
     check_browser, current_entry, detect_browsers, discover_accounts, effective_keys, format_combo, merge_accounts,
     normalize, normalize_home, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
     valid_label, valid_profile, valid_search, wezterm_defaults,
@@ -103,12 +104,12 @@ CONFINED_SHORT = "their sandbox hides the profile directory and their launcher d
 
 class SettingsPage(U.Page):
     title = "Settings"
-    SUBS = ["Theme", "Keys", "Accounts", "Web", "About"]
+    SUBS = ["Theme", "Keys", "Accounts", "Web", "Agent", "About"]
 
     def __init__(self, model):
         self.model = model
         self.sub = 0
-        self.cursor = [list(PRESETS).index(model.theme["preset"]), 0, 0, 0]
+        self.cursor = [list(PRESETS).index(model.theme["preset"]), 0, 0, 0, AGENTS.index(model.agent)]
         self.profiles = omp_profiles()
         self.wez_defaults = None
         self.about = None
@@ -165,7 +166,8 @@ class SettingsPage(U.Page):
             1: "↑↓ choose  Enter change  r reset  R reset all  s save  ←→ section  q close",
             2: "↑↓ choose  Space show/hide  e rename  p profile  d remove  a add  c rescan  s save  ←→ section  q close",
             3: "↑↓ choose  Enter change  r reset  s save  ←→ section  q close",
-            4: "↑↓/←→ section  F1-F5 panels  q close",
+            4: "↑↓ choose  Enter use  r reset  s save  ←→ section  q close",
+            5: "↑↓/←→ section  F1-F5 panels  q close",
         }[self.sub]
 
     def changed(self, ui, text):
@@ -219,13 +221,16 @@ class SettingsPage(U.Page):
             self.accounts_key(ui, key)
         elif self.sub == 3:
             self.web_key(ui, key)
+        elif self.sub == 4:
+            self.agent_key(ui, key)
         elif key in ("UpArrow", "DownArrow"):
             # About has no list of its own: ↑↓ walk the sections, so the keyboard never dead-ends.
             self.sub = max(0, min(len(self.SUBS) - 1, self.sub + (1 if key == "DownArrow" else -1)))
 
     def wheel(self, ui, dy):
-        if self.sub in (0, 1, 2, 3):
-            limit = {0: len(PRESETS), 1: len(BINDINGS), 2: len(self.model.accounts), 3: len(WEB_ROWS)}[self.sub] - 1
+        if self.sub in (0, 1, 2, 3, 4):
+            limit = {0: len(PRESETS), 1: len(BINDINGS), 2: len(self.model.accounts), 3: len(WEB_ROWS),
+                     4: len(AGENTS)}[self.sub] - 1
             self.cursor[self.sub] = max(0, min(max(limit, 0), self.cursor[self.sub] + dy))
 
     # actions ------------------------------------------------------------------
@@ -423,6 +428,8 @@ class SettingsPage(U.Page):
             dirty = self.model.accounts != saved[2]
         elif name == "Web":
             text, dirty = f"{self.model.web['links']} · {self.model.web['profile']}", self.model.web != saved[3]
+        elif name == "Agent":
+            text, dirty = AGENT_NAMES[self.model.agent], self.model.agent != saved[4]
         else:
             text, dirty = f"v{VERSION}", False
         return ("● " + text, "amber") if dirty else (text, "dim")
@@ -870,6 +877,59 @@ class SettingsPage(U.Page):
             cv.put(x + 2, ny,
                    fit("This WezTerm has no web pane (the Hivegrid build with the web feature adds it): these settings "
                        "apply once it does.", max(w - 4, 20)), p["amber"])
+
+    # agent ----------------------------------------------------------------------
+    AGENT_NOTES = [
+        "omp: accounts are omp profiles (Accounts, p), agent states are exact through the omp extension, and a "
+        "running chat can move to another account from the header.",
+        "Claude Code: starts claude; an account pill starts it with that account's CLAUDE_CONFIG_DIR. Its states "
+        "are read from the screen and the process, not exact, and a chat does not move between accounts or come "
+        "back after a restart (the pane returns as a shell in its directory).",
+        "The choice applies to new tabs (LEADER+1, 2, 3), the + menu and the account pills in the header; panes "
+        "that already run an agent are not touched. Save writes settings.json and WezTerm reloads it.",
+    ]
+
+    def agent_key(self, ui, key):
+        c = self.cursor[4]
+        if key == "UpArrow":
+            self.cursor[4] = max(0, c - 1)
+        elif key == "DownArrow":
+            self.cursor[4] = min(len(AGENTS) - 1, c + 1)
+        elif key in ("Enter", "Space"):
+            self.set_agent(ui, AGENTS[c])
+        elif key == "r":
+            self.set_agent(ui, AGENT_DEFAULT)
+
+    def set_agent(self, ui, name):
+        if self.model.agent == name:
+            ui.say(f"{AGENT_NAMES[name]} is already the agent")
+            return
+        self.model.agent = name
+        self.changed(ui, f"agent: {AGENT_NAMES[name]}")
+
+    def draw_agent(self, ui, cv, x, y, w, h):
+        p = ui.pal
+        cur = self.cursor[4] = max(0, min(self.cursor[4], len(AGENTS) - 1))
+        tw = self.WEB_TW
+        self.table_head(ui, cv, x, y, tw, ((2, "Agent for new panes"), (36, "Command")))
+        for i, name in enumerate(AGENTS):
+            row = y + 2 + i
+            sel = i == cur
+            used = self.model.agent == name
+            r = U.list_row(cv, p, row, x=x, w=tw, selected=sel, bg=p["base"], name=AGENT_NAMES[name],
+                           hit=lambda b, i=i, n=name: (self.cursor.__setitem__(4, i), self.set_agent(ui, n)))
+            cv.put(x + 36, row, "omp" if name == "omp" else "claude", p["bright"] if sel else p["text"], r.bg)
+            bx = x + tw + 2
+            if used:
+                cv.put(bx, row, "● in use", p["green"], None)
+            else:
+                ui.button(cv, bx, row, "Use", lambda b, n=name: self.set_agent(ui, n), accent=sel)
+        ny = y + 3 + len(AGENTS)
+        for note in self.AGENT_NOTES:
+            for line in textwrap.wrap(note, max(tw - 2, 20)):
+                cv.put(x + 2, ny, line, p["muted"])
+                ny += 1
+            ny += 1
 
     def draw_about(self, ui, cv, x, y, w, h):
         p = ui.pal

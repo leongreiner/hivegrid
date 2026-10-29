@@ -9,6 +9,8 @@
 --                          "new web pane" open on an empty answer, browser = 'auto' or the absolute
 --                          path of a Chromium-family binary } (see below)
 --   S.session           -> { enabled = false only when the file says "session": { "enabled": false } }
+--   S.agent             -> 'omp' (default) or 'claude': the coding agent new tabs, grids and the account
+--                          pills start (key "agent"; any other value is omp)
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
 --                          list plus any ~/.claude[-X] directory holding a .credentials.json that
 --                          the list does not mention (main first, then by label). An account pairs
@@ -117,6 +119,10 @@ local function build(wezterm)
   -- restart. Only "session": { "enabled": false } turns it off; the panel does not edit it.
   local session = type(data.session) == 'table' and data.session or {}
   S.session = { enabled = session.enabled ~= false }
+
+  -- The agent started in new tabs, grids and for an account pill (key "agent"): 'omp' or
+  -- 'claude' (Claude Code); anything else is omp. Mirrors bin/hivegrid_settings_core.py.
+  S.agent = data.agent == 'claude' and 'claude' or 'omp'
 
   -- Accounts ------------------------------------------------------------------
 

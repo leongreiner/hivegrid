@@ -106,7 +106,7 @@ class SettingsFileNormalisation(TempHome):
         path = self.settings_file({"custom": {"x": 1}, "keys": {"equalize": "CTRL+ALT+e"}})
         s = S.Settings(path)
         keys = s.keys()
-        s.write(s.theme(), keys, [], s.web())
+        s.write(s.theme(), keys, [], s.web(), s.agent())
         data = json.loads(path.read_text())
         self.assertEqual(data["custom"], {"x": 1})
         self.assertEqual(data["keys"], {"equalize": "CTRL+ALT+e"})
@@ -148,10 +148,44 @@ class SettingsFileNormalisation(TempHome):
         path = self.settings_file({})
         s = S.Settings(path)
         web = dict(s.web(), browser="/usr/bin/vivaldi", home="https://start.test/")
-        s.write(s.theme(), s.keys(), [], web)
+        s.write(s.theme(), s.keys(), [], web, s.agent())
         self.assertEqual(json.loads(path.read_text())["web"], {"browser": "/usr/bin/vivaldi", "home": "https://start.test/"})
-        s.write(s.theme(), s.keys(), [], dict(web, browser="auto", home="about:blank"))
+        s.write(s.theme(), s.keys(), [], dict(web, browser="auto", home="about:blank"), s.agent())
         self.assertNotIn("web", json.loads(path.read_text()))
+
+    def test_the_agent_is_omp_unless_the_file_names_a_known_one(self):
+        self.assertEqual(S.Settings(self.settings_file({})).agent(), "omp")
+        self.assertEqual(S.Settings(self.settings_file({"agent": "claude"})).agent(), "claude")
+        for bad in ("Claude", "codex", "", 3, None, ["claude"], {"command": "claude"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(S.Settings(self.settings_file({"agent": bad})).agent(), "omp")
+
+    def test_the_agent_is_written_only_when_it_is_not_omp_and_survives_a_save_of_other_settings(self):
+        path = self.settings_file({})
+        s = S.Settings(path)
+        s.write(s.theme(), s.keys(), [], s.web(), "claude")
+        self.assertEqual(json.loads(path.read_text())["agent"], "claude")
+        s = S.Settings(path)
+        self.assertEqual(s.effective()["agent"], "claude")
+        s.write(s.theme(), s.keys(), [], s.web(), s.agent())
+        self.assertEqual(json.loads(path.read_text())["agent"], "claude", "saving again keeps the choice")
+        s.write(s.theme(), s.keys(), [], s.web(), "omp")
+        self.assertNotIn("agent", json.loads(path.read_text()))
+        s.write(s.theme(), s.keys(), [], s.web(), "claude")
+        for bad in ("codex", "Claude", "", None):
+            with self.subTest(bad=bad):
+                s.write(s.theme(), s.keys(), [], s.web(), bad)
+                self.assertNotIn("agent", json.loads(path.read_text()), "a name that is no agent is not stored")
+
+    def test_the_model_is_dirty_after_the_agent_changes_and_saves_it(self):
+        path = self.settings_file({})
+        model = S.Model(S.Settings(path))
+        self.assertFalse(model.dirty)
+        model.agent = "claude"
+        self.assertTrue(model.dirty)
+        self.assertTrue(model.save()[0])
+        self.assertFalse(model.dirty)
+        self.assertEqual(json.loads(path.read_text())["agent"], "claude")
 
     def test_a_stored_search_template_must_pass_valid_search(self):
         for bad in ("javascript:alert(%s)", "chrome://settings/?q=%s", "ftp://x.test/%s", "x.test/?q=%s"):

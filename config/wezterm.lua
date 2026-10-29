@@ -372,7 +372,7 @@ local function hive_action() return panel_action('hive') end
 
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
--- Left click: start/switch omp (quota pill). Right click on a quota pill or a click on the
+-- Left click: start/switch the agent (quota pill). Right click on a quota pill or a click on the
 -- system group opens the matching panel; a click on the agent counts opens the pane picker; the
 -- logo (id 'brand') opens the agent hive; the ZOOM pill unzooms.
 wezterm.on('status-click', function(window, pane, id, button)
@@ -380,7 +380,7 @@ wezterm.on('status-click', function(window, pane, id, button)
   local account = id:match('^quota:(.+)$')
   if account then
     if button == 'Left' then
-      cq.start_omp(window, pane, account)
+      cq.start_agent(window, pane, account)
     else
       window:perform_action(panel_action('usage', { '--account', account }), pane)
     end
@@ -395,15 +395,20 @@ wezterm.on('status-click', function(window, pane, id, button)
   end
 end)
 
--- New tabs with agents: LEADER (Ctrl+Space) then 1/2/3, and the first rows of the "+" menu.
+-- New tabs with agents: LEADER (Ctrl+Space) then 1/2/3, and the first rows of the "+" menu. The
+-- agent is omp or Claude Code, chosen in the settings (S.agent).
 local grid = os.getenv('HOME') .. '/.local/bin/omp-grid'
+local claude = S.agent == 'claude'
 local function grid_args(rows, cols)
-  return { 'bash', '-ic', string.format('%s %d %d "$PWD"; exec bash', grid, rows, cols) }
+  -- omp-grid runs omp unless given another command as its fourth argument.
+  return { 'bash', '-ic', string.format('%s %d %d "$PWD"%s; exec bash', grid, rows, cols, claude and ' claude' or '') }
 end
+local agent_label = claude and 'a Claude Code' or 'an omp'
 local new_tabs = {
-  { label = 'New tab with omp', args = { 'bash', '-ic', 'omp; exec bash' } },
-  { label = 'New tab with an omp grid 2x2', args = grid_args(2, 2) },
-  { label = 'New tab with an omp grid 3x3', args = grid_args(3, 3) },
+  { label = claude and 'New tab with Claude Code' or 'New tab with omp',
+    args = { 'bash', '-ic', (claude and 'claude' or 'omp') .. '; exec bash' } },
+  { label = 'New tab with ' .. agent_label .. ' grid 2x2', args = grid_args(2, 2) },
+  { label = 'New tab with ' .. agent_label .. ' grid 3x3', args = grid_args(3, 3) },
 }
 local leader = S.key('leader', 'CTRL+Space')
 config.leader = { key = leader.key, mods = leader.mods, timeout_milliseconds = 1000 }

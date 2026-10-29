@@ -937,6 +937,25 @@ T.test('the main config on the fork: web table, header pill, link handler and "+
   T.ok(win.status.right:find('WEB', 1, true), 'a pill shows while the web table is active')
 end)
 
+T.test('the main config with agent "claude": new tabs and grids start Claude Code, digits unchanged', function(wz)
+  T.setenv('HIVEGRID_SETTINGS', T.write(T.tmpdir() .. '/s.json', wz.json_encode { agent = 'claude' }))
+  local config, win = main_config(wz, true)
+  local rows = menu_rows(wz, win)
+  T.eq(rows[1], { 'New tab with Claude Code', 'LEADER+1' })
+  T.eq(rows[2], { 'New tab with a Claude Code grid 2x2', 'LEADER+2' })
+  T.eq(rows[3], { 'New tab with a Claude Code grid 3x3', 'LEADER+3' })
+  T.eq(wz.stub.key(config.keys, '1', 'LEADER').args.args[3], 'claude; exec bash')
+  local grid = wz.stub.key(config.keys, '3', 'LEADER').args.args[3]
+  T.ok(grid:find('omp-grid 3 3 "$PWD" claude; exec bash', 1, true), grid)
+end)
+
+T.test('the main config without an agent setting starts omp in new tabs and grids', function(wz)
+  local config = main_config(wz, true)
+  T.eq(wz.stub.key(config.keys, '1', 'LEADER').args.args[3], 'omp; exec bash')
+  local grid = wz.stub.key(config.keys, '2', 'LEADER').args.args[3]
+  T.ok(grid:find('omp-grid 2 2 "$PWD"; exec bash', 1, true), grid)
+end)
+
 T.test('the main config on stock WezTerm: no web rows, table, handler or pill', function(wz)
   local config, win = main_config(wz, false)
   T.eq(config.key_tables.web, nil)
@@ -987,6 +1006,19 @@ T.test('S.web: defaults, valid values, and invalid ones falling back', function(
   T.eq(web_settings(w6, { web = { search = 'javascript:alert(%s)' } }).search, '', 'a search template must be http(s)')
   T.fresh()
   T.eq(web_settings(require 'wezterm', { web = { search = '' } }).search, '', 'an explicit empty string is no search')
+end)
+
+T.test('S.agent: omp unless the file says claude', function(wz)
+  local function agent(doc)
+    T.fresh()
+    local w = require 'wezterm'
+    T.setenv('HIVEGRID_SETTINGS', T.write(T.tmpdir() .. '/s.json', type(doc) == 'string' and doc or w.json_encode(doc)))
+    return require('settings')(nil, w).agent
+  end
+  T.eq(agent({}), 'omp')
+  T.eq(agent({ agent = 'claude' }), 'claude')
+  for _, bad in ipairs { 'Claude', 'codex', '', 3, true } do T.eq(agent({ agent = bad }), 'omp', tostring(bad)) end
+  T.eq(agent('not json'), 'omp')
 end)
 
 T.test('g opens the sign-in helper in a new tab', function(wz)

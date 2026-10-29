@@ -6,7 +6,7 @@ The accounts are, in order of precedence: `CLAUDE_QUOTA_DIRS` (or `--dirs`), a c
 
 ## Switching accounts without losing the chat
 
-Clicking an account pill (or `Alt+q`, or `LEADER+u <n>`) in a pane that runs a shell starts `omp --profile=<profile>` (a bare `omp` for an account without a profile). In a pane that already runs omp under another profile it moves the chat over (a chat moves only between omp profiles: an account without a profile starts a bare `omp`, but a running omp is not moved to or from it):
+Clicking an account pill (or `Alt+q`, or `LEADER+u <n>`) in a pane that runs a shell starts `omp --profile=<profile>` (a bare `omp` for an account without a profile); with the Agent setting on Claude Code it starts `claude` instead, with `CLAUDE_CONFIG_DIR=<the account's directory>` unless that is `~/.claude`, and it is refused in a pane that already runs claude (a chat moves between accounts only with omp). In a pane that already runs omp under another profile it moves the chat over (a chat moves only between omp profiles: an account without a profile starts a bare `omp`, but a running omp is not moved to or from it):
 
 1. `omp-switch locate` finds the session (omp records each terminal's session in `<profile>/agent/terminal-sessions/pts-N`; only paths are read, never the conversation);
 2. omp is asked to quit with `Ctrl+D` and has five seconds; with unsent text in its prompt it stays, the switch is abandoned and a toast says so (never `kill`);

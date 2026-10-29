@@ -195,6 +195,15 @@ class OmpGridTest(unittest.TestCase):
         # the current pane's shell must end up in the directory despite the space
         self.assertEqual(self.landed(calls), [(BASE, d)])
 
+    def test_positional_command_is_what_the_agent_choice_passes_to_the_grid(self):
+        # LEADER+2 / LEADER+3 run `omp-grid 2 2 "$PWD" claude` when the settings choose Claude Code
+        r, calls = self.run_grid("2", "2", self.work, "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = self.sent(calls)
+        self.assertEqual(len(sent), 4)
+        self.assertTrue(all(text.endswith("claude\n") for _, text in sent), sent)
+        self.assertFalse(any("omp" in text for _, text in sent))
+
     def test_name_panes_titles_each_pane_in_order(self):
         r, calls = self.run_grid("--name-panes", "1", "2")
         self.assertEqual(r.returncode, 0, r.stderr)
