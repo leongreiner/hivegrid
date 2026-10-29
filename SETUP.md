@@ -102,7 +102,7 @@ Then tell the user, in this order: Hivegrid is installed; start it from the appl
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `hivegrid: command not found` | `~/.local/bin` is not on `PATH`, or the WezTerm download failed (then `wezterm` is the command, with reduced features). Re-run the installer with `--wezterm` once the release exists. |
+| `hivegrid: command not found` | `~/.local/bin` is not on `PATH`, or the WezTerm download failed (then `wezterm` is the command, with reduced features). Re-run the installer with `--wezterm` once the network works. |
 | The window shows no clickable header or no web pane | A stock WezTerm is running, not the Hivegrid build: start `hivegrid`, not `wezterm`. |
 | Icons show as boxes | The Nerd Font download failed (no `unzip` or no network): install `unzip` and run the installer again. |
 | A `login` chip stays | That account is not logged in yet (see Accounts). |

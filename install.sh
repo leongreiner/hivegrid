@@ -91,7 +91,7 @@ install_wezterm() {
   echo "downloading the Hivegrid WezTerm build ($wezterm_url)"
   if ! curl -fsSL "$wezterm_url" -o "$tmp/$wezterm_asset" \
       || ! curl -fsSL "$wezterm_url.sha256" -o "$tmp/$wezterm_asset.sha256"; then
-    echo "download failed (no release published yet, or no network)" >&2
+    echo "download failed (no network, or the release asset is missing)" >&2
     rm -rf "$tmp"
     return 1
   fi

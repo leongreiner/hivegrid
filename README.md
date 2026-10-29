@@ -72,7 +72,7 @@ What gets installed:
 - The WezTerm config in `~/.config/wezterm/`, the programs of `bin/` in `~/.local/bin/`, the omp extension that reports agent states, the icon, an application menu entry, and the DejaVu Sans Mono Nerd Font.
 - Differing existing files are saved once as `*.bak.<timestamp>`.
 
-If the WezTerm download fails (no network, not x86_64, or no release published yet) the installer says so and carries on with the stock `wezterm` if you have one; build the fork yourself then ([below](#custom-wezterm-build)). A missing `curl` or `tar` stops the installer with the command that installs it.
+If the WezTerm download fails (no network, or not x86_64) the installer says so and carries on with the stock `wezterm` if you have one; build the fork yourself then ([below](#custom-wezterm-build)). A missing `curl` or `tar` stops the installer with the command that installs it.
 
 For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). Web panes need a Chromium-family browser installed (the left bar's browser button appears when one is found). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
 
