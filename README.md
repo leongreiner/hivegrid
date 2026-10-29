@@ -48,15 +48,29 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 
 ## Install
 
-Requires Linux (x86_64 for the pre-built WezTerm), Python 3, curl and unzip; no WezTerm, Rust or compiler is needed, because the installer downloads the Hivegrid WezTerm build. The optional web pane needs a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
+Needs Linux on x86_64, `curl`, `tar`, Python 3 and `unzip`. You do not need WezTerm, Rust or a compiler: the installer downloads a pre-built Hivegrid WezTerm. The optional web pane needs a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
 
 ```sh
-git clone --recurse-submodules https://github.com/leongreiner/hivegrid.git
-cd hivegrid
-./install.sh [--tools]     # --tools also downloads yazi, ya and lazygit into ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/leongreiner/hivegrid/main/install.sh | bash
 ```
 
-The installer downloads the Hivegrid WezTerm build to `~/.local/opt/hivegrid-wezterm` (checked against its SHA-256; `./install.sh --wezterm` fetches the latest again, `--no-wezterm` skips it and uses the stock `wezterm` you have, with reduced features), writes the `hivegrid` launcher, copies the WezTerm config to `~/.config/wezterm/`, the programs in `bin/` to `~/.local/bin/`, the omp extension that reports agent states, the icon and a `Hivegrid` launcher, and downloads the DejaVu Sans Mono Nerd Font. Differing existing files are saved once as `*.bak.<timestamp>`; no sudo is used. If the download fails (no release yet, no network, not x86_64) the installer says so and carries on with the stock `wezterm`; build the fork yourself then ([below](#custom-wezterm-build)). Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
+That fetches the repository, installs everything into your home directory (no sudo) and removes the download. Arguments go after `-s --`, for example `... | bash -s -- --tools` (also downloads yazi, ya and lazygit into `~/.local/bin`). To read the installer first, or to work on Hivegrid, clone it and run it from there; the submodule is only needed to build the WezTerm fork yourself:
+
+```sh
+git clone https://github.com/leongreiner/hivegrid.git
+cd hivegrid
+./install.sh [--tools]
+```
+
+Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
+
+What gets installed:
+
+- The Hivegrid WezTerm build in `~/.local/opt/hivegrid-wezterm` (checked against its SHA-256) and the `hivegrid` command. `./install.sh --wezterm` fetches the latest build again, `--no-wezterm` skips it and uses the stock `wezterm` you have, with reduced features.
+- The WezTerm config in `~/.config/wezterm/`, the programs of `bin/` in `~/.local/bin/`, the omp extension that reports agent states, the icon, an application menu entry, and the DejaVu Sans Mono Nerd Font.
+- Differing existing files are saved once as `*.bak.<timestamp>`.
+
+If the WezTerm download fails (no network, not x86_64, or no release published yet) the installer says so and carries on with the stock `wezterm` if you have one; build the fork yourself then ([below](#custom-wezterm-build)). A missing `curl` or `tar` stops the installer with the command that installs it.
 
 For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
 

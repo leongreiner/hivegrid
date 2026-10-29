@@ -65,3 +65,5 @@ A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/c
 ## The WezTerm fork
 
 `wezterm/` is a separate repository (branch `hivegrid`) and a Rust build (`wezterm/build-hivegrid.sh`). CI does not build it. Build a test fork only into `/tmp` (`OPT=/tmp/x WRAPPER=/tmp/x/hivegrid wezterm/build-hivegrid.sh`) and run the sandbox against it with `HG_WEZTERM_DIR=/tmp/x dev/qa/hgq restart N`. Commit fork changes in the fork first; the main repository only records the submodule pointer.
+
+`install.sh` downloads the pre-built fork from the latest GitHub release (`.github/workflows/release.yml`, started by hand only; `dev/package-wezterm` makes the same archive from a local build). Test installer changes in a throwaway `HOME` with `HIVEGRID_WEZTERM_URL=file://...` and `HIVEGRID_SRC_URL=file://...` pointing at local archives; never run it against the real home (see the safety rules).

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Install Hivegrid into the current user's HOME. Never uses sudo.
+# From a checkout: ./install.sh. Without one: curl -fsSL <raw install.sh URL> | bash
+# (see the README); it then fetches the repository itself and runs the installer from there.
 set -euo pipefail
 
-repo=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# The checkout this script sits in; empty when it is piped into bash (no file to sit in).
+src=${BASH_SOURCE[0]:-}
+repo=
+[ -f "$src" ] && repo=$(cd "$(dirname "$src")" && pwd)
 cfg=$HOME/.config/wezterm
 yazi_dst=$HOME/.config/hivegrid/yazi
 bindir=$HOME/.local/bin
@@ -14,6 +19,7 @@ wezterm_mode=auto # auto: download the Hivegrid WezTerm build when none is insta
 opt=$HOME/.local/opt/hivegrid-wezterm
 wezterm_asset=hivegrid-wezterm-x86_64-linux.tar.gz
 wezterm_url=${HIVEGRID_WEZTERM_URL:-https://github.com/leongreiner/hivegrid/releases/latest/download/$wezterm_asset}
+src_url=${HIVEGRID_SRC_URL:-https://github.com/leongreiner/hivegrid/archive/refs/heads/main.tar.gz}
 
 usage() {
   cat <<'EOF'
@@ -33,6 +39,43 @@ for arg in "$@"; do
     *) usage >&2; exit 2 ;;
   esac
 done
+
+# Tools the installer needs; missing ones are named with the command that installs them.
+# curl and tar are fatal (every download goes through them); python3 runs the panels and
+# unzip unpacks the font, so Hivegrid installs without them but not usefully.
+check_tools() {
+  local fatal='' soft='' c
+  for c in curl tar; do command -v "$c" >/dev/null 2>&1 || fatal="$fatal $c"; done
+  for c in python3 unzip; do command -v "$c" >/dev/null 2>&1 || soft="$soft $c"; done
+  if [ -n "$soft" ]; then
+    echo "warning: missing$soft; Hivegrid needs python3 to run its panels and unzip to install its font" >&2
+  fi
+  if [ -n "$fatal" ]; then
+    echo "missing$fatal. Debian/Ubuntu: sudo apt install curl tar; Fedora: sudo dnf install curl tar; Arch: sudo pacman -S curl tar" >&2
+    exit 1
+  fi
+}
+check_tools
+
+# Piped into bash (or copied away from its checkout): fetch the repository, run its
+# installer with the same arguments, then remove the copy. Everything is copied into HOME,
+# so nothing refers to the download afterwards.
+if [ -z "$repo" ] || [ ! -f "$repo/config/wezterm.lua" ]; then
+  tmp=$(mktemp -d)
+  echo "downloading Hivegrid ($src_url)"
+  curl -fsSL "$src_url" | tar -xz -C "$tmp" || true
+  inner=
+  for f in "$tmp"/*/install.sh; do [ -f "$f" ] && inner=$f; done
+  if [ -z "$inner" ]; then
+    echo "could not download Hivegrid; clone https://github.com/leongreiner/hivegrid and run ./install.sh" >&2
+    rm -rf "$tmp"
+    exit 1
+  fi
+  rc=0
+  bash "$inner" "$@" || rc=$?
+  rm -rf "$tmp"
+  exit "$rc"
+fi
 
 # install_wezterm: unpacks the pre-built Hivegrid WezTerm (a GitHub release asset, see
 # dev/package-wezterm) into $opt and writes the `hivegrid` launcher. Files are renamed into
