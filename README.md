@@ -48,7 +48,7 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 
 ## Install
 
-Requires Linux with WezTerm 20240203 or newer, Python 3, curl and unzip. The optional web pane also needs the Hivegrid WezTerm build ([below](#custom-wezterm-build)) and a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
+Requires Linux (x86_64 for the pre-built WezTerm), Python 3, curl and unzip; no WezTerm, Rust or compiler is needed, because the installer downloads the Hivegrid WezTerm build. The optional web pane needs a Chromium-family browser (Google Chrome, Chromium, Brave, Edge or Vivaldi; chosen in the settings panel).
 
 ```sh
 git clone --recurse-submodules https://github.com/leongreiner/hivegrid.git
@@ -56,7 +56,7 @@ cd hivegrid
 ./install.sh [--tools]     # --tools also downloads yazi, ya and lazygit into ~/.local/bin
 ```
 
-The installer copies the WezTerm config to `~/.config/wezterm/`, the programs in `bin/` to `~/.local/bin/`, the omp extension that reports agent states, the icon and a `Hivegrid` launcher, and downloads the DejaVu Sans Mono Nerd Font. Differing existing files are saved once as `*.bak.<timestamp>`; no sudo is used. The `hivegrid` command comes from the [custom WezTerm build](#custom-wezterm-build); without that build the application menu entry starts stock `wezterm` (reduced features). Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
+The installer downloads the Hivegrid WezTerm build to `~/.local/opt/hivegrid-wezterm` (checked against its SHA-256; `./install.sh --wezterm` fetches the latest again, `--no-wezterm` skips it and uses the stock `wezterm` you have, with reduced features), writes the `hivegrid` launcher, copies the WezTerm config to `~/.config/wezterm/`, the programs in `bin/` to `~/.local/bin/`, the omp extension that reports agent states, the icon and a `Hivegrid` launcher, and downloads the DejaVu Sans Mono Nerd Font. Differing existing files are saved once as `*.bak.<timestamp>`; no sudo is used. If the download fails (no release yet, no network, not x86_64) the installer says so and carries on with the stock `wezterm`; build the fork yourself then ([below](#custom-wezterm-build)). Then start Hivegrid from your application menu or run `hivegrid`, and open `LEADER+1` (`LEADER` is `Ctrl+Space`) for a tab with an omp agent.
 
 For the usage chips each account must be logged in once (`omp --profile=<name>` then `/login`, and/or `claude`). What the installer does exactly, fonts, and account setup: [docs/install.md](docs/install.md).
 
@@ -117,7 +117,7 @@ The header shows the Claude Code usage (5 h and 7 d windows) of every account; `
 
 `wezterm/` is a submodule pointing at the [WezTerm fork](https://github.com/leongreiner/wezterm) (branch `hivegrid`). It adds clickable header segments, an overlay action for the panels, the drawn header mark, hover for unfocused panes, full-height sidebar panes and the web pane. The config also runs on stock WezTerm 20240203 with reduced features: clicks are ignored, the panels open in a new tab, the bar and dock stay plain, and there is no web pane.
 
-Building the fork needs a Rust toolchain and the X11 development headers. `build-hivegrid.sh` writes the `hivegrid` launcher, which `install.sh` then uses.
+`./install.sh` downloads a pre-built Hivegrid WezTerm (x86_64 Linux, glibc 2.35 or newer) from the latest [release](https://github.com/leongreiner/hivegrid/releases), so Rust and the X11 headers are not needed. Build the fork yourself only on another architecture, an older system, or to change the fork. `build-hivegrid.sh` writes the same `hivegrid` launcher, which `install.sh` then uses.
 
 ```sh
 # 1. Rust, into your home directory (no sudo)
@@ -134,6 +134,8 @@ CARGO_BUILD_JOBS=8 wezterm/build-hivegrid.sh
 ```
 
 A release build takes 20 to 40 minutes; `CARGO_BUILD_JOBS` caps the parallel compiler jobs so the machine stays usable. If it stops with `Could not find xcb-util` or another `pkg-config` error, a development package from step 2 is missing; cargo keeps what it compiled, so re-running continues where it stopped. Without sudo, `build-hivegrid.sh` also reads headers and libraries from `~/.local/sysroot` (unpack the `.deb` files there with `dpkg -x`). Details: [docs/wezterm-build.md](docs/wezterm-build.md) and `wezterm/HIVEGRID.md`.
+
+Releases are published by hand: Actions, "Release", "Run workflow" with a tag such as `v0.1.0` (or `gh workflow run release.yml -f tag=v0.1.0`). Nothing publishes on a push.
 
 ## More documentation
 

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Packs the built Hivegrid WezTerm fork into the release asset install.sh downloads:
+#   dev/package-wezterm [OUT_DIR]     (default: ./dist)
+# writes OUT_DIR/hivegrid-wezterm-x86_64-linux.tar.gz and its .sha256.
+# Needs the fork built (wezterm/build-hivegrid.sh, or `cargo build --release -p wezterm-gui
+# -p wezterm` in wezterm/); TARGET_DIR points at another directory holding the two binaries.
+# The release workflow (.github/workflows/release.yml) is the only caller that publishes.
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+target=${TARGET_DIR:-$root/wezterm/target/release}
+out=${1:-$PWD/dist}
+name=hivegrid-wezterm-x86_64-linux
+asset=$name.tar.gz
+
+for b in wezterm wezterm-gui; do
+  [ -x "$target/$b" ] || { echo "missing $target/$b: build the fork first" >&2; exit 1; }
+done
+
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+pkg=$stage/hivegrid-wezterm
+mkdir -p "$pkg/lib" "$out"
+install -m 755 "$target/wezterm" "$target/wezterm-gui" "$pkg/"
+
+# The libraries stock distros often lack travel with the binaries; the rest (libc, X11,
+# OpenSSL, fontconfig, ...) come from the system.
+ldd "$pkg/wezterm-gui" "$pkg/wezterm" |
+  awk '$3 ~ /^\// { print $3 }' | sort -u |
+  grep -E '/(libxcb-(image|shm|util|xkb|icccm|keysyms)|libxkbcommon-x11)[.]so' |
+  while read -r lib; do cp -L "$lib" "$pkg/lib/"; done
+
+# The sidebar bar draws its buttons from this icon font; install.sh installs it from here
+# when the repository was cloned without the submodule.
+install -m 644 "$root/wezterm/assets/fonts/SymbolsNerdFontMono-Regular.ttf" "$pkg/"
+
+{
+  echo "fork: $(git -C "$root/wezterm" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "hivegrid: $(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "glibc: $(ldd --version | head -n1)"
+} >"$pkg/VERSION"
+
+tar -C "$stage" -czf "$out/$asset" hivegrid-wezterm
+(cd "$out" && sha256sum "$asset" >"$asset.sha256")
+echo "wrote $out/$asset"
+ls "$pkg/lib" | sed 's/^/  bundled /'

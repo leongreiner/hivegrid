@@ -1,5 +1,11 @@
 # Installation details
 
+## The WezTerm build
+
+Unless `~/.local/bin/hivegrid` exists, `install.sh` downloads `hivegrid-wezterm-x86_64-linux.tar.gz` and its `.sha256` from the latest GitHub release of this repository, verifies it, unpacks `wezterm`, `wezterm-gui` and the few `libxcb`/`xkbcommon-x11` libraries the build ships into `~/.local/opt/hivegrid-wezterm/` and writes the `hivegrid` launcher. `--wezterm` does it again (an update), `--no-wezterm` never. It warns when the system lacks a library the binary needs. `HIVEGRID_WEZTERM_URL` points the download at another file (a mirror, or a local `file://` archive from `dev/package-wezterm`).
+
+The release is built by `.github/workflows/release.yml` on Ubuntu 22.04 and runs only when started by hand (`gh workflow run release.yml -f tag=v0.1.0`); it builds the fork commit the `wezterm/` submodule points at and creates the release with the archive. `dev/package-wezterm [OUT_DIR]` makes the same archive from a local build.
+
 The installer copies `config/*.lua` to `~/.config/wezterm/`, `config/yazi/` to `~/.config/hivegrid/yazi/` (the explorer's own yazi config; a global `~/.config/yazi` is never read or changed; the explorer runs from `~/.cache/hivegrid/yazi/`, which links that config and adds a theme generated from the current Hivegrid colour theme), `bin/` to `~/.local/bin/`, the icon, and a `Hivegrid` launcher that overrides the `org.wezfurlong.wezterm` desktop entry. Differing existing files are saved once as `*.bak.<timestamp>`. `--tools` also downloads the latest `yazi`, `ya` and `lazygit` into `~/.local/bin`. No sudo is used. `./sync.sh` copies the live setup back into the repo for maintenance.
 
 The installer also downloads [DejaVu Sans Mono Nerd Font](https://github.com/ryanoasis/nerd-fonts) (the `DejaVuSansM Nerd Font Mono` family, DejaVu Sans Mono patched with Nerd Font icons and with the same cell width) into `~/.local/share/fonts/DejaVuSansMNerdFont/` and refreshes the font cache. WezTerm uses it for the terminal text and the header, and the charts draw with it; without it, plain DejaVu Sans Mono is used and Nerd Font icons show as boxes. To have omp draw its icons with Nerd Font glyphs, set `symbolPreset: nerd` in omp's settings.

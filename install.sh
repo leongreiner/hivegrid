@@ -10,23 +10,106 @@ icon_dst=$HOME/.local/share/wezterm/hivegrid-icon-2.png
 desktop_dst=$HOME/.local/share/applications/org.wezfurlong.wezterm.desktop
 stamp=$(date +%Y%m%d-%H%M%S)
 want_tools=0
+wezterm_mode=auto # auto: download the Hivegrid WezTerm build when none is installed; force; skip
+opt=$HOME/.local/opt/hivegrid-wezterm
+wezterm_asset=hivegrid-wezterm-x86_64-linux.tar.gz
+wezterm_url=${HIVEGRID_WEZTERM_URL:-https://github.com/leongreiner/hivegrid/releases/latest/download/$wezterm_asset}
 
-usage() { echo "Usage: $0 [--tools]   (--tools also downloads yazi and lazygit into ~/.local/bin)"; }
-case "${1:-}" in
-  "") ;;
-  --tools) want_tools=1 ;;
-  -h | --help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+usage() {
+  cat <<'EOF'
+Usage: ./install.sh [--tools] [--wezterm | --no-wezterm]
+  --tools        also download yazi, ya and lazygit into ~/.local/bin
+  --wezterm      download the Hivegrid WezTerm build again (update it)
+  --no-wezterm   never download it; use the stock wezterm already installed
+Without either WezTerm flag the build is downloaded only when `hivegrid` is not installed yet.
+EOF
+}
+for arg in "$@"; do
+  case "$arg" in
+    --tools) want_tools=1 ;;
+    --wezterm) wezterm_mode=force ;;
+    --no-wezterm) wezterm_mode=skip ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+# install_wezterm: unpacks the pre-built Hivegrid WezTerm (a GitHub release asset, see
+# dev/package-wezterm) into $opt and writes the `hivegrid` launcher. Files are renamed into
+# place, so a running copy keeps its old inode.
+install_wezterm() {
+  local tmp pkg f dest
+  command -v curl >/dev/null || { echo "curl is required to download the Hivegrid WezTerm build" >&2; return 1; }
+  case "$(uname -m)" in
+    x86_64 | amd64) ;;
+    *) echo "there is no pre-built Hivegrid WezTerm for $(uname -m)" >&2; return 1 ;;
+  esac
+  tmp=$(mktemp -d)
+  echo "downloading the Hivegrid WezTerm build ($wezterm_url)"
+  if ! curl -fsSL "$wezterm_url" -o "$tmp/$wezterm_asset" \
+      || ! curl -fsSL "$wezterm_url.sha256" -o "$tmp/$wezterm_asset.sha256"; then
+    echo "download failed (no release published yet, or no network)" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! (cd "$tmp" && sha256sum -c --status "$wezterm_asset.sha256") || ! tar -xzf "$tmp/$wezterm_asset" -C "$tmp"; then
+    echo "the downloaded archive is corrupt" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  pkg=$tmp/hivegrid-wezterm
+  mkdir -p "$opt/lib" "$bindir"
+  for f in "$pkg"/*; do
+    [ -f "$f" ] || continue
+    dest=$opt/$(basename "$f")
+    install -m "$([ -x "$f" ] && echo 755 || echo 644)" "$f" "$dest.new"
+    mv -f "$dest.new" "$dest"
+  done
+  for f in "$pkg"/lib/*; do
+    [ -f "$f" ] || continue
+    dest=$opt/lib/$(basename "$f")
+    install -m 644 "$f" "$dest.new"
+    mv -f "$dest.new" "$dest"
+  done
+  # Libraries of an older build that this one no longer ships would shadow the system's.
+  for f in "$opt"/lib/*; do
+    [ -e "$pkg/lib/$(basename "$f")" ] || rm -f "$f"
+  done
+  cat >"$bindir/hivegrid.new" <<WRAP
+#!/usr/bin/env bash
+# Hivegrid WezTerm fork. Put its directory first on PATH so \`wezterm cli\` inside
+# panes finds the matching binary.
+D="$opt"
+export LD_LIBRARY_PATH="\$D/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export PATH="\$D:\$PATH"
+exec "\$D/wezterm-gui" "\$@"
+WRAP
+  chmod 755 "$bindir/hivegrid.new"
+  mv -f "$bindir/hivegrid.new" "$bindir/hivegrid"
+  rm -rf "$tmp"
+  echo "installed $opt (launcher $bindir/hivegrid)"
+  local missing
+  missing=$(LD_LIBRARY_PATH=$opt/lib ldd "$opt/wezterm-gui" 2>&1 | awk '/not found/ { print $1 }' | tr '\n' ' ')
+  if [ -n "$missing" ]; then
+    echo "warning: the Hivegrid WezTerm needs system libraries that are missing: $missing" >&2
+    echo "  (Debian/Ubuntu: sudo apt install libxcb1 libx11-xcb1 libxkbcommon0 libfontconfig1 libwayland-client0 libwayland-egl1 libssl3)" >&2
+  fi
+}
+
+if [ "$wezterm_mode" = force ] || { [ "$wezterm_mode" = auto ] && [ ! -x "$bindir/hivegrid" ]; }; then
+  if ! install_wezterm; then
+    [ "$wezterm_mode" = force ] && exit 1
+    echo "continuing without it; build it yourself: README, \"Custom WezTerm build\"" >&2
+  fi
+fi
 
 wezterm_bin=$(command -v wezterm || true)
-if [ -z "$wezterm_bin" ]; then
-  echo "wezterm not found. Install it first: https://wezterm.org/install/linux.html" >&2
-  echo "  Debian/Ubuntu: add the apt.fury.io/wez repository described there, then" >&2
-  echo "  sudo apt install wezterm" >&2
+if [ -z "$wezterm_bin" ] && [ ! -x "$bindir/hivegrid" ]; then
+  echo "no WezTerm to run Hivegrid with, and the Hivegrid build could not be downloaded." >&2
+  echo "Install stock WezTerm (reduced features): https://wezterm.org/install/linux.html" >&2
   exit 1
 fi
-# The custom build wrapper (wezterm/build-hivegrid.sh) takes precedence for the launcher.
+# The Hivegrid build's launcher takes precedence for the desktop entry.
 launcher_bin=$wezterm_bin
 [ -x "$bindir/hivegrid" ] && launcher_bin=$bindir/hivegrid
 # install_file SRC DST [MODE]: copies, keeping one backup of a differing existing file.
@@ -58,6 +141,7 @@ done
 install_file "$repo/assets/icon.png" "$icon_dst"
 # Icon font of the sidebar bar (hivegrid-bar draws its buttons from it; text glyphs without it).
 font_src=$repo/wezterm/assets/fonts/SymbolsNerdFontMono-Regular.ttf
+[ -f "$font_src" ] || font_src=$opt/SymbolsNerdFontMono-Regular.ttf # clone without the submodule
 [ -f "$font_src" ] && install_file "$font_src" "$HOME/.local/share/hivegrid/SymbolsNerdFontMono-Regular.ttf" 644
 # Terminal text font: DejaVu Sans Mono patched with Nerd Font icons (family "DejaVuSansM Nerd Font Mono").
 # Without it WezTerm falls back to plain DejaVu Sans Mono and Nerd Font icons show as boxes.
