@@ -235,44 +235,71 @@ return function(config, wezterm)
     return from(1)
   end
 
-  -- The tree that reproduces the geometry of `slots` (rects with an id each). Every layout
-  -- made of splits can be cut in two by a straight line through dividers only; rows first.
-  local function carve(slots)
-    if #slots == 1 then
-      return slots[1].id
+  -- The first straight cut along axis a (`dir`: 'bottom' cuts rows, 'right' columns) that no
+  -- slot crosses: { e = where the first part ends, first, second, lo, hi }; nil when none.
+  local function find_cut(slots, a, dir)
+    local lo, hi = extent(slots, a)
+    local ends = {}
+    for _, s in ipairs(slots) do
+      if s[a.pos] + s[a.len] < hi then
+        ends[#ends + 1] = s[a.pos] + s[a.len]
+      end
     end
-    for _, ax in ipairs { { AXES[2], 'bottom' }, { AXES[1], 'right' } } do
-      local a, dir = ax[1], ax[2]
-      local lo, hi = extent(slots, a)
-      local ends = {}
+    table.sort(ends)
+    for _, e in ipairs(ends) do
+      local first, second, clean = {}, {}, true
       for _, s in ipairs(slots) do
-        if s[a.pos] + s[a.len] < hi then
-          ends[#ends + 1] = s[a.pos] + s[a.len]
+        if s[a.pos] + s[a.len] <= e then
+          first[#first + 1] = s
+        elseif s[a.pos] >= e then
+          second[#second + 1] = s
+        else
+          clean = false
+          break
         end
       end
-      table.sort(ends)
-      for _, e in ipairs(ends) do
-        local first, second, clean = {}, {}, true
-        for _, s in ipairs(slots) do
-          if s[a.pos] + s[a.len] <= e then
-            first[#first + 1] = s
-          elseif s[a.pos] >= e then
-            second[#second + 1] = s
-          else
-            clean = false
-            break
-          end
-        end
-        if clean and #first > 0 and #second > 0 then
-          local ta, tb = carve(first), carve(second)
-          if ta == nil or tb == nil then
-            return nil
-          end
-          return { dir = dir, a = ta, b = tb, frac = (hi - e) / (hi - lo + 1) }
-        end
+      if clean and #first > 0 and #second > 0 then
+        return { dir = dir, e = e, first = first, second = second, lo = lo, hi = hi }
       end
     end
     return nil
+  end
+
+  -- The tree that reproduces the geometry of `slots` (rects with an id each). Every layout
+  -- made of splits can be cut in two by a straight line through dividers only. When both a
+  -- row cut and a column cut are clean (a grid whose dividers happen to line up) the
+  -- geometry cannot say which one is the real root: rows first, unless
+  -- shared(p, q, axis) -- p and q lie on both sides of the row cut, both with their far
+  -- edge on the column cut -- says that one divider moves both, which makes it columns.
+  local function carve(slots, shared)
+    if #slots == 1 then
+      return slots[1].id
+    end
+    local rows, cols = find_cut(slots, AXES[2], 'bottom'), find_cut(slots, AXES[1], 'right')
+    local c = rows or cols
+    if rows and cols and shared then
+      local p, q
+      for _, s in ipairs(cols.first) do
+        if s.left + s.cols == cols.e then
+          if s.top + s.rows <= rows.e then
+            p = p or s.id
+          elseif s.top >= rows.e then
+            q = q or s.id
+          end
+        end
+      end
+      if p and q and shared(p, q, AXES[1]) then
+        c = cols
+      end
+    end
+    if not c then
+      return nil
+    end
+    local ta, tb = carve(c.first, shared), carve(c.second, shared)
+    if ta == nil or tb == nil then
+      return nil
+    end
+    return { dir = c.dir, a = ta, b = tb, frac = (c.hi - c.e) / (c.hi - c.lo + 1) }
   end
 
   -- Panes side by side along dir in tree t; a split the other way counts as one.
@@ -304,13 +331,13 @@ return function(config, wezterm)
 
   -- Where every pane goes when the grid is evened out; nil when the panes cannot be read
   -- as splits.
-  local function even_rects(panes)
+  local function even_rects(panes, shared)
     local slots = {}
     for _, p in pairs(panes) do
       slots[#slots + 1] = p
     end
     table.sort(slots, function(p, q) return p.id < q.id end)
-    local tree = carve(slots)
+    local tree = carve(slots, shared)
     if not tree then
       return nil
     end
@@ -364,11 +391,11 @@ return function(config, wezterm)
   -- resize (the dock or the sidebar changing the room does the same) while equalize runs,
   -- and every step of it is a `wezterm cli` process, would leave them pointing past the new
   -- edge: a divider was pushed to the far end and the panes behind it kept a row or two.
-  -- `plan` is { area, want }; the targets are recomputed when the area is another.
+  -- `plan` is { area, want, shared }; the targets are recomputed when the area is another.
   local function targets(plan, panes)
     local area = area_of(panes)
     if not same_area(plan.area, area, 0) then
-      plan.area, plan.want = area, even_rects(panes)
+      plan.area, plan.want = area, even_rects(panes, plan.shared)
     end
     return plan.want
   end
@@ -479,7 +506,36 @@ return function(config, wezterm)
         break
       end
     end
-    local plan = { area = area_of(start), want = even_rects(start) }
+    -- Whether one divider moves two panes at once is only visible by moving it: a cell
+    -- through pane p, then look at pane q, then put it back. nil when p's far divider
+    -- does not move.
+    local function shared(p, q, a)
+      local before = snap()
+      if not (before and before[p]) then
+        return nil
+      end
+      if not require('theme').has_click then
+        cli('activate-pane', '--pane-id', p)
+      end
+      for _, dir in ipairs { a.inc, a.dec } do
+        cli('adjust-pane-size', '--pane-id', p, '--amount', 1, dir)
+        local after = snap()
+        local pp, qq = after and after[p], after and after[q]
+        if not (pp and qq) then
+          return nil
+        end
+        local far = pp[a.pos] + pp[a.len] ~= before[p][a.pos] + before[p][a.len]
+        if far or pp[a.pos] ~= before[p][a.pos] then
+          cli('adjust-pane-size', '--pane-id', p, '--amount', 1, dir == a.inc and a.dec or a.inc)
+          if far then
+            return qq[a.pos] + qq[a.len] ~= before[q][a.pos] + before[q][a.len]
+          end
+        end
+      end
+      return nil
+    end
+    local plan = { area = area_of(start), shared = shared }
+    plan.want = even_rects(start, shared)
     if not plan.want then
       toast(window, 'equalize: this layout cannot be read as splits; nothing was moved')
       return

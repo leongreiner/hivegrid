@@ -391,6 +391,22 @@ test('equalize: a row of 2 beside a row of 3 gets halves and thirds', function(w
   T.eq(#mux.window.toasts, 0, T.show(mux.window.toasts))
 end)
 
+-- Two columns whose rows happen to line up read as rows or as columns alike; the tree is
+-- columns here, so one divider moves both panes of a column and rows with 2 and 3 panes
+-- cannot be evened out. Equalize finds out by moving a divider, and splits the columns.
+test('equalize: a layout of two columns is evened as columns, not as rows', function(wz)
+  local root = FM.h(75, FM.v(43, FM.leaf(1), FM.leaf(2)),
+    FM.v(43, FM.leaf(3), FM.h(76, FM.leaf(4), FM.leaf(5))))
+  local mux, api = setup(wz, { cols = 228, rows = 87, root = root })
+  api.equalize(mux.window, wz.mux.get_pane(5))
+  T.eq(#mux.window.toasts, 0, T.show(mux.window.toasts))
+  local left, right = mux:geometry(1), mux:geometry(3)
+  T.ok(math.abs(left.width - right.width) <= 1, 'columns: ' .. left.width .. ' / ' .. right.width)
+  T.eq(mux:geometry(2).width, left.width, 'the column stays one divider')
+  T.ok(math.abs(mux:geometry(4).width - mux:geometry(5).width) <= 1, 'the split column halves')
+  T.eq(mux:geometry(1).height, mux:geometry(2).height)
+end)
+
 -- A window resize that lands while equalize runs (the run takes seconds: every step is a
 -- `wezterm cli` process) used to leave its targets, computed for the old area, pointing past
 -- the new edge: the row divider was pushed to the far end and the panes behind it kept a
