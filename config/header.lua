@@ -1,6 +1,6 @@
 -- The header's right side as a hierarchy: what you work on first and strongest, the rest quiet.
 -- Wire: local hd = require('header')(config, wezterm, as)   (as = agentstatus)
---   hd.context(window)  -> the lead chip's model { workspace, project, branch, counts }, or nil
+--   hd.context(window)  -> the lead chip's model { workspace, project, branch, counts = { working, busy, attention, limit } }, or nil
 --   hd.tiers(model)     -> the chip richest first as { items, w }: project (and workspace) in
 --                          bright bold, the git branch of the active pane, and the agents that
 --                          run or want you, in the state vocabulary (theme.STATES): glyph in the
@@ -133,7 +133,7 @@ return function(_config, wezterm, as)
     local ok, workspace = pcall(window.active_workspace, window)
     if not ok or workspace == 'default' or workspace == '' then workspace = nil end
     local counts = as.running(window)
-    local any = counts.attention + counts.working + counts.busy > 0
+    local any = counts.attention + (counts.limit or 0) + counts.working + counts.busy > 0
     if not (project or workspace or any) then return nil end
     return { workspace = workspace, project = project, branch = branch, counts = counts }
   end
@@ -149,8 +149,8 @@ return function(_config, wezterm, as)
     return s:sub(1, (utf8.offset(s, n) or n + 1) - 1) .. '…'
   end
 
-  -- Most urgent first: needs you, then working, then busy.
-  local KINDS = { 'attention', 'working', 'busy' }
+  -- Most urgent first: needs you, then a usage limit, then working, then busy.
+  local KINDS = { 'attention', 'limit', 'working', 'busy' }
 
   local function agents_items(counts, verbose)
     local items = {}

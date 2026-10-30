@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import sys
@@ -787,6 +788,111 @@ class TestModelFiles(Base):
         self.write_state(3, state="idle")
         self.assertEqual(A.read_state(3)["state"], "idle")
         self.assertIsNone(A.read_state(4))
+
+
+# Shaped like the entries of a real omp session file (ids, usage and request controls left out).
+LIMIT_TEXT = ('429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed '
+              'your account\'s rate limit. Please try again later."},"request_id":"req_x"} retry-after-ms=14523000')
+
+
+def limit_entry(**over):
+    msg = {"role": "assistant", "content": [], "stopReason": "error", "errorStatus": 429, "errorMessage": LIMIT_TEXT,
+           "timestamp": 1793086676483, "completedAt": 1793086676845}
+    msg.update(over)
+    return {"type": "message", "timestamp": "2026-10-28T09:41:04.054Z", "message": msg}
+
+
+class TestLimit(Base):
+    def test_limit_state_passes_through_with_its_times(self):
+        self.write_state(3, state="limit", reason="usage limit", limit={"hit_at": NOW - 100, "reset_at": NOW + 3600})
+        a = self.collect([pane(3, "π > t")])[3]
+        self.assertEqual((a.state, a.source, a.reason), ("limit", "ext", "usage limit"))
+        self.assertEqual(a.limit, {"hit_at": NOW - 100, "reset_at": NOW + 3600})
+
+    def test_malformed_limit_fields_read_as_unknown(self):
+        self.write_state(3, state="limit", limit={"hit_at": "x", "reset_at": -1})
+        self.assertEqual(self.collect([pane(3)])[3].limit, {"hit_at": None, "reset_at": None})
+        self.write_state(4, state="limit", limit="soon")
+        a = self.collect([pane(4)])[4]
+        self.assertEqual((a.state, a.limit), ("limit", None))
+
+    def test_limit_is_dropped_when_the_state_is_not_limit(self):
+        self.write_state(3, state="done", limit={"hit_at": 1, "reset_at": 2})
+        self.assertIsNone(self.collect([pane(3)])[3].limit)
+        self.write_state(4, state="limit", updated=NOW - 60, limit={"hit_at": 1, "reset_at": 2})   # heartbeat stopped
+        a = self.collect([pane(4, "π > t")])[4]
+        self.assertEqual((a.state, a.limit), ("idle", None))
+
+    def test_a_limit_agent_is_not_acknowledged_before_its_reset_but_takes_a_prompt(self):
+        self.write_state(3, state="limit", limit={"hit_at": NOW - 60, "reset_at": NOW + 3600})
+        a = self.collect([pane(3)])[3]
+        A.ack(a, now=NOW)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "acks.json")))
+        m = FakeMux([])
+        self.assertTrue(A.send_prompt(a, "go on", run=m)[0])
+
+    def test_a_limit_whose_reset_has_passed_can_be_acknowledged_until_it_hits_again(self):
+        self.write_state(3, state="limit", since=NOW - 7000, limit={"hit_at": NOW - 7000, "reset_at": NOW - 100})
+        a = self.collect([pane(3)])[3]
+        self.assertTrue(A.limit_expired(a, NOW))
+        self.assertFalse(A.limit_expired(a, NOW - 200))
+        for unknown in (None, {"hit_at": 1}, {"reset_at": True}, {"reset_at": float("inf")}):
+            self.assertFalse(A.limit_expired(dataclasses.replace(a, limit=unknown), NOW), unknown)
+        A.ack(a, now=NOW)
+        self.assertEqual(get(os.path.join(self.dir, "acks.json")), {"3": NOW - 7000})
+        b = self.collect([pane(3)])[3]
+        self.assertEqual((b.state, b.limit), ("idle", None))
+        self.write_state(3, state="limit", since=NOW + 50, limit={"hit_at": NOW + 50, "reset_at": NOW + 9000})   # hit again
+        self.assertEqual(self.collect([pane(3)], now=NOW + 60)[3].state, "limit")
+
+    def test_a_refused_request_is_a_limit(self):
+        self.assertEqual(A.limit_of_entry(limit_entry()), {"hit_at": 1793086676.845, "reset_at": 1793101199.845})
+
+    def test_what_is_not_a_limit(self):
+        for entry in (
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}], "stopReason": "stop"}},
+            {"type": "message", "message": {"role": "user", "content": "go on"}},
+            limit_entry(stopReason="aborted"),
+            limit_entry(errorStatus=500, errorMessage="500 internal error"),
+            limit_entry(errorStatus=None, errorMessage="The socket connection was closed unexpectedly before the response completed"),
+            limit_entry(errorMessage='429 {"error":{"type":"rate_limit_error"}} retry-after-ms=8000'),   # a burst limit omp retries
+            limit_entry(errorMessage="429 too many open files"),
+            {"type": "custom", "customType": "session_exit"}, None, "x", [],
+        ):
+            self.assertIsNone(A.limit_of_entry(entry), entry)
+
+    def test_no_retry_after_is_a_limit_without_a_reset(self):
+        e = limit_entry(errorMessage='429 {"error":{"type":"rate_limit_error"}}')
+        self.assertEqual(A.limit_of_entry(e), {"hit_at": 1793086676.845, "reset_at": None})
+        self.assertEqual(A.limit_of_entry(limit_entry(completedAt=None))["hit_at"], 1793086676.483)
+        self.assertEqual(A.limit_of_entry(limit_entry(completedAt=None, timestamp=None))["hit_at"], 1793180464.054)
+        gone = limit_entry(completedAt=None, timestamp=None)
+        gone["timestamp"] = "not a time"
+        self.assertIsNone(A.limit_of_entry(gone))
+
+    def test_an_absurd_retry_after_is_a_limit_without_a_reset_and_never_raises(self):
+        for digits in ("9" * 5000, "9" * 13, "1" + "0" * 11):  # beyond int(), beyond 12 digits, beyond the 400-day maximum
+            e = limit_entry(errorMessage='429 {"error":{"type":"rate_limit_error"}} retry-after-ms=' + digits)
+            self.assertEqual(A.limit_of_entry(e), {"hit_at": 1793086676.845, "reset_at": None})
+
+    def test_which_window_hit(self):
+        reset = NOW + 4 * 3600
+        limit = {"hit_at": NOW, "reset_at": reset}
+        both = {"five_hour": {"pct": 100.0, "reset_at": reset + 1}, "seven_day": {"pct": 30.0, "reset_at": reset + 4 * 86400}}
+        self.assertEqual(A.limit_window(limit, both), "five_hour")
+        weekly = {"five_hour": {"pct": 2.0, "reset_at": reset + 3 * 3600}, "seven_day": {"pct": 100.0, "reset_at": reset - 2}}
+        self.assertEqual(A.limit_window(limit, weekly), "seven_day")
+        # nothing known: a reset within five hours could be either window, so it is not guessed
+        self.assertIsNone(A.limit_window(limit, None))
+        self.assertIsNone(A.limit_window(limit, {"five_hour": None, "seven_day": {"pct": 1, "reset_at": None}}))
+        # later than a 5-hour window can reopen: weekly, with or without a cache
+        far = {"hit_at": NOW, "reset_at": NOW + 3 * 86400}
+        self.assertEqual(A.limit_window(far, None), "seven_day")
+        # both windows reopen together: the horizon decides
+        same = {"five_hour": {"reset_at": reset}, "seven_day": {"reset_at": reset}}
+        self.assertIsNone(A.limit_window(limit, same))
+        self.assertIsNone(A.limit_window({"hit_at": NOW, "reset_at": None}, both))
+        self.assertIsNone(A.limit_window(None, both))
 
 
 if __name__ == "__main__":

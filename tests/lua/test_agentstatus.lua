@@ -155,6 +155,19 @@ T.test('extension state is exact: it beats title, bell and prompt text, and idle
   T.eq(step(st, ctx(111, { proc = 'omp', ext = 'done' })), 'done')
 end)
 
+T.test('extension limit is exact and idle-like: not working, never done, no bell or screen guess on top', function()
+  local as = load()
+  local step = as.internals.step
+  local st = { changed_at = 100, run_start = 100, bell = true }
+  local hit = { working = true, ask = true }
+  T.eq(step(st, ctx(101, { proc = 'omp', title_state = 'working', hit = hit, ext = 'limit' })), 'limit')
+  T.ok(not st.was_working, 'a limit pane has not worked: stopping at the limit is not a finish')
+  T.eq(step(st, ctx(150, { proc = 'omp', ext = 'limit' })), 'limit', 'stays until the extension says otherwise')
+  T.eq(step(st, ctx(151, { proc = 'omp', ext = 'working' })), 'working', 'a new turn clears it')
+  T.eq(step({ changed_at = 0, run_start = 0 }, ctx(152, { proc = 'bash', ext = 'limit' })), 'exited',
+    'a quit agent is not kept alive by a fresh heartbeat')
+end)
+
 T.test('omp loader markers, once learned, decide working; long continuous change still counts', function(wz)
   local as = load()
   local step = as.internals.step
@@ -198,6 +211,37 @@ T.test('a fresh extension record beats the title and supplies title, reason, cwd
   local r = rows(as, win, tab)[31]
   T.eq({ r.kind, r.title, r.reason, r.name, r.since },
     { 'attention', 'Plan: parser', 'plan review', 'parser', T0 - 42 })
+end)
+
+T.test('an extension record with state limit shows kind limit, reason and since; the limit field is optional', function(wz)
+  local as = load()
+  write_ext(wz, 151, {
+    state = 'limit', updated = T0 - 3, since = T0 - 90, reason = 'usage limit', title = 'Port parser',
+    limit = { hit_at = T0 - 90, reset_at = T0 + 3600 },
+  })
+  write_ext(wz, 152, { state = 'limit', updated = T0 - 3, since = T0 - 60, limit = { hit_at = T0 - 60 } })
+  write_ext(wz, 153, { state = 'limit', updated = T0 - 3, since = T0 - 30, limit = 'unexpected' })
+  local win, tab = grid2x2(wz, {
+    omp(wz, 151, 'π ⠋ title says working'), omp(wz, 152, 'π > x'), omp(wz, 153, 'π > y'), omp(wz, 154, 'π > z'),
+  }, 4, { focused = false })
+  local r = rows(as, win, tab)
+  T.eq({ r[151].kind, r[151].glyph, r[151].text, r[151].reason, r[151].title, r[151].since },
+    { 'limit', '⊘', 'limit', 'usage limit', 'Port parser', T0 - 90 })
+  T.eq(r[151].color, require('theme').STATES.limit.color)
+  T.eq({ r[152].kind, r[153].kind }, { 'limit', 'limit' })
+  T.eq(as.pane_kind(151), 'limit')
+end)
+
+T.test('a stale limit record falls back to the title like the other states', function(wz)
+  local as = load()
+  write_ext(wz, 155, { state = 'limit', updated = T0 - 21, since = T0 - 300, limit = { hit_at = T0 - 300 } })
+  write_ext(wz, 156, { state = 'limit', updated = T0, since = T0 })
+  local win, tab = grid2x2(wz, { omp(wz, 155, 'π ⠋ a'), omp(wz, 156, 'π > b'), omp(wz, 157, 'π > c') }, 3,
+    { focused = false })
+  T.eq(rows(as, win, tab)[155].kind, 'working', 'the title decides')
+  T.eq(rows(as, win, tab)[156].kind, 'limit')
+  advance(21)
+  T.eq(rows(as, win, tab)[156].kind, 'idle', 'the heartbeat went stale while the pane kept running')
 end)
 
 T.test('stale, malformed or unknown-state extension files fall back to the title', function(wz)
@@ -250,6 +294,21 @@ T.test('a done acknowledged elsewhere reads idle; a later done shows again', fun
   T.eq(wz.json_parse(T.read(ext_dir() .. '/acks.json')), { ['43'] = 900 }, 'unfocused: nothing written')
 end)
 
+T.test('a limit acknowledged from the hive or the phone reads idle; a later limit shows again; looking never acknowledges it', function(wz)
+  local as = load()
+  T.write(ext_dir() .. '/acks.json', '{"45": 900}')
+  write_ext(wz, 45, { state = 'limit', updated = T0, since = 900 })
+  write_ext(wz, 46, { state = 'limit', updated = T0, since = 905 })
+  local win, tab = grid2x2(wz, { omp(wz, 45, 'π > a'), omp(wz, 46, 'π > b') }, 2) -- 46 focused
+  local r = rows(as, win, tab)
+  T.eq(r[45].kind, 'idle')
+  T.eq(r[46].kind, 'limit', 'a focused limit stays a limit')
+  write_ext(wz, 45, { state = 'limit', updated = T0 + 1, since = 950 })
+  advance(1)
+  T.eq(rows(as, win, tab)[45].kind, 'limit')
+  T.eq(wz.json_parse(T.read(ext_dir() .. '/acks.json')), { ['45'] = 900 }, 'nothing written by looking')
+end)
+
 -- Numbering and navigation --------------------------------------------------------------
 
 T.test('agents are numbered in reading order with the sidebar and overview dock left out', function(wz)
@@ -274,13 +333,14 @@ T.test('agents are numbered in reading order with the sidebar and overview dock 
   T.eq({ as.agent_number(51), as.agent_number(54), as.agent_number(55), as.agent_number(56) }, { 1, 4, nil, nil })
 end)
 
-T.test('running counts the panes that work, are busy or need you, across tabs; the rest is not counted', function(wz)
+T.test('running counts the panes that work, are busy, need you or hit a limit, across tabs; the rest is not counted', function(wz)
   local as = load()
   write_ext(wz, 51, { state = 'busy', updated = T0 - 1, since = T0 - 4 })
+  write_ext(wz, 53, { state = 'limit', updated = T0 - 1, since = T0 - 4 })
   local win = grid2x2(wz, {
     omp(wz, 50, 'π ⠋ a'), omp(wz, 51, 'π > b'), omp(wz, 52, 'π ! c'), omp(wz, 53, 'π > d'),
   }, 1, { focused = false })
-  T.eq(as.running(win), { working = 1, busy = 1, attention = 1 })
+  T.eq(as.running(win), { working = 1, busy = 1, attention = 1, limit = 1 })
   T.eq(as.running(win), as.running(win), 'a second call in the same tick agrees')
 end)
 
@@ -306,6 +366,17 @@ T.test('Alt+n skips idle and done agents and goes to the pane that needs you', f
   }, 1)
   wz.stub.perform(binding(config, 'n', 'ALT'), win, wz.mux.get_pane(61))
   T.eq(wz.stub.activations, { 63 })
+  T.eq(#win.toasts, 0)
+end)
+
+T.test('Alt+n jumps to a pane that hit its usage limit', function(wz)
+  local _, config = load()
+  write_ext(wz, 161, { state = 'limit', updated = T0, since = T0 - 5, reason = 'usage limit' })
+  local win = grid2x2(wz, {
+    omp(wz, 160, 'π > me'), omp(wz, 161, 'π > limit'), omp(wz, 162, 'π > idle'), omp(wz, 163, 'π ⠋ busy'),
+  }, 1)
+  wz.stub.perform(binding(config, 'n', 'ALT'), win, wz.mux.get_pane(160))
+  T.eq(wz.stub.activations, { 161 })
   T.eq(#win.toasts, 0)
 end)
 
@@ -403,6 +474,20 @@ T.test('the picker lists panes in reading order and activates the chosen one', f
   wz.stub.perform(binding(config, 'g', 'LEADER'), win, wz.mux.get_pane(91))
   wz.stub.picker(win).answer('93')
   T.eq(wz.stub.activations, { 93 })
+end)
+
+T.test('the picker starts on a pane that hit its limit rather than an idle or working one', function(wz)
+  local _, config = load()
+  write_ext(wz, 171, { state = 'limit', updated = T0, since = T0 - 5 })
+  local win = grid2x2(wz, { omp(wz, 170, 'π > me'), omp(wz, 171, 'π > l'), omp(wz, 172, 'π ⠋ w'), omp(wz, 173, 'π > i') }, 1)
+  wz.stub.perform(binding(config, 'g', 'LEADER'), win, wz.mux.get_pane(170))
+  local pick = wz.stub.picker(win)
+  T.eq(pick.spec.selected, '171', 'a limit pane is picked over idle and working ones')
+  local row
+  for _, r in ipairs(pick.spec.rows) do
+    if r.id == '171' then row = r end
+  end
+  T.eq({ row.glyph, row.color, row.cols[2].text, row.cols[2].color }, { '⊘', 'red', 'limit', 'red' })
 end)
 
 -- Rows, bell, reload, tab titles --------------------------------------------------------

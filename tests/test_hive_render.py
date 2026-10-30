@@ -38,6 +38,7 @@ class Agent:
     error: str = None
     num: int = 0
     tab_index: int = 1
+    limit: dict = None
 
 
 class FakeCore:
@@ -48,6 +49,7 @@ class FakeCore:
     def __init__(self, agents=()):
         self.agents = list(agents)
         self.calls = []
+        self.limit_expired = A.limit_expired
         self.screen = {}
         self.spawn_result = 99
         self.web_result = 98
@@ -377,6 +379,61 @@ class Popover(Base):
         self.assertIn("! boom", body)
         self.assertIn("Prompt off: the agent has exited", body)
         self.assertFalse(self.page.focus)
+
+    def limit_agent(self, **kw):
+        return Agent(pane=1, state="limit", reason="usage limit", since=NOW - 90, **kw)
+
+    def test_limit_popover_says_when_the_limit_resets(self):
+        self.make(agents=[self.limit_agent(limit={"hit_at": NOW - 90, "reset_at": NOW + 2 * 3600 + 300})])
+        self.page.select(1)
+        body = "\n".join(self.draw())
+        self.assertIn("⊘ limit", body)
+        self.assertIn("resets in 2h05m", body)
+        self.assertIn("Limit hit: switch account, then send", body)
+        self.assertTrue(self.page.prompt_enabled(self.page.by_pane[1]), "a prompt may be sent after switching account")
+
+    def test_limit_popover_survives_a_missing_or_malformed_reset(self):
+        for info in (None, {}, {"hit_at": NOW}, {"reset_at": None}, {"reset_at": "soon"}, {"reset_at": float("nan")},
+                     {"reset_at": float("inf")}, {"reset_at": NOW - 5}, {"reset_at": True}, [1, 2], "x"):
+            self.make(agents=[self.limit_agent(limit=info)])
+            self.page.select(1)
+            body = "\n".join(self.draw())
+            self.assertIn("⊘ limit", body, info)
+            self.assertNotIn("resets in", body, info)
+
+    def test_limit_agent_is_drawn_red_with_its_glyph_and_counted_in_the_legend(self):
+        agents = seven() + [Agent(pane=17, state="limit", cwd="/home/u/work/proj7")]
+        self.make(agents=agents, size=(100, 30))
+        p = FakeModel().current_theme()["palette"]
+        c = self.cell(17)
+        mid = len(c["rows"]) // 2
+        fill = self.ui.cv.cells[c["y"] + mid][c["x"] + c["rows"][mid][0] + 1][2]
+        self.assertEqual(fill, p["red"])
+        self.assertIn("⊘", "\n".join(self.draw()))
+        self.assertIn("⊘ limit 1", self.draw()[2])
+        fills = {st: self.ui.cv.cells[self.cell(pane)["y"] + len(self.cell(pane)["rows"]) // 2]
+                 [self.cell(pane)["x"] + self.cell(pane)["rows"][len(self.cell(pane)["rows"]) // 2][0] + 1][2]
+                 for pane, st in zip(range(10, 18), STATES + ["limit"])}
+        self.assertEqual(len(set(fills.values())), 7)
+
+    def test_a_limit_agent_cannot_be_acknowledged_and_deleting_it_confirms(self):
+        self.make(agents=[self.limit_agent(limit={"hit_at": NOW, "reset_at": None})])
+        self.page.select(1)
+        self.page.focus = False
+        self.send(key("a"))
+        self.assertEqual([c for c in self.core.calls if c[0] == "ack"], [])
+        self.assertEqual(self.ui.message_error, True)
+        self.send(key("d"))
+        self.assertIsInstance(self.ui.modal, U.ConfirmModal)
+        self.assertEqual([c for c in self.core.calls if c[0] == "delete"], [])
+
+    def test_a_limit_whose_reset_has_passed_can_be_acknowledged(self):
+        self.make(agents=[self.limit_agent(limit={"hit_at": NOW - 7200, "reset_at": NOW - 5})])
+        self.page.select(1)
+        self.page.focus = False
+        self.send(key("a"))
+        self.assertIn(("ack", 1), self.core.calls)
+        self.assertFalse(self.ui.message_error)
 
     def test_place_popover(self):
         area = (0, 2, 100, 20)

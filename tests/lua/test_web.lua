@@ -777,7 +777,7 @@ end)
 
 T.test('state tables: web sits between exited and the plain-program states', function()
   local S = require('theme').STATES
-  T.eq({ S.web.glyph, S.web.text, S.web.key, S.web.rank }, { '◍', 'web', 'cyan', 8 })
+  T.eq({ S.web.glyph, S.web.text, S.web.key, S.web.rank }, { '◍', 'web', 'cyan', 9 })
   T.ok(S.exited.rank < S.web.rank and S.web.rank < S.other.rank and S.other.rank < S.shell.rank)
   T.eq(S.web.color, require('theme').P.cyan)
 end)

@@ -44,7 +44,7 @@ Every surface with the scenarios that found real bugs before. Run each at 1280x7
 ## Overview dock
 
 - 1, 4, 9, 16 and 20 panes: scrolling, keeping the active row visible, two-digit numbers.
-- States, with real omp sessions: working, busy, needs you, done, idle, exited. A shell at its prompt shows as `shell`. Timers update live and survive a config reload.
+- States, with real omp sessions: working, busy, needs you, limit, done, idle, exited. A shell at its prompt shows as `shell`. Timers update live and survive a config reload.
 - Jump by click, digits, and the keyboard selection with Enter; `▦` equalize and `⊞` arrange.
 - Closing panes and tabs from the dock: the confirmation rule, re-tiling afterwards, where focus lands.
 - Hover, pointer shape, footer hints at narrow widths.

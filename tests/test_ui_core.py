@@ -503,13 +503,17 @@ class StateTableTest(unittest.TestCase):
     def test_states_match_the_design_table(self):
         want = {"working": ("↻", "accent"), "busy": ("◔", "amber"), "attention": ("?", "violet"),
                 "done": ("✓", "green"), "idle": ("·", "grey"), "exited": ("○", "muted"), "bell": ("!", "red"),
-                "web": ("◍", "cyan"), "shell": ("›", "dim")}
+                "web": ("◍", "cyan"), "shell": ("›", "dim"), "limit": ("⊘", "red")}
         for kind, (glyph, color) in want.items():
             self.assertEqual((U.STATES[kind].glyph, U.STATES[kind].color), (glyph, color), kind)
         self.assertEqual(U.STATES["attention"].label, "needs you")
         self.assertEqual(U.STATES["web"].label, "web")
         ranks = [U.STATES[k].rank for k in ("exited", "web", "other", "shell")]
         self.assertEqual(ranks, sorted(ranks), "web sorts after exited and before the plain-program states")
+        order = sorted(U.STATES, key=lambda k: U.STATES[k].rank)
+        self.assertEqual(order, ["attention", "limit", "bell", "done", "busy", "working", "idle", "exited", "web", "other", "shell"])
+        self.assertEqual([U.STATES[k].rank for k in order], list(range(1, 12)))
+        self.assertEqual(U.STATES["limit"].label, "limit")
         self.assertEqual(U.state_style(PAL, "nonsense")[0], "·")
         self.assertIn(U.state_style(PAL, "working", now=0.0)[0], U.SPINNER)
 

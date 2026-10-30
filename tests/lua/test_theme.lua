@@ -55,6 +55,29 @@ T.test('width counts code points of Text items only', function()
   T.eq(th.width {}, 0)
 end)
 
+-- State table -----------------------------------------------------------------------
+
+T.test('STATES: the shared agent vocabulary; limit sits right after needs you', function()
+  local th = require 'theme'
+  local want = {
+    attention = { '?', 'needs you', 'violet', 1 }, limit = { '⊘', 'limit', 'red', 2 },
+    bell = { '!', 'bell', 'red', 3 }, done = { '✓', 'done', 'green', 4 },
+    busy = { '◔', 'busy', 'amber', 5 }, working = { '↻', 'working', 'accent', 6 },
+    idle = { '·', 'idle', 'grey', 7 }, exited = { '○', 'exited', 'muted', 8 },
+    web = { '◍', 'web', 'cyan', 9 }, other = { '›', 'running', 'dim', 10 },
+    shell = { '›', 'shell', 'dim', 11 },
+  }
+  local n = 0
+  for kind, s in pairs(th.STATES) do
+    n = n + 1
+    local w = want[kind]
+    T.ok(w, 'unexpected state ' .. kind)
+    T.eq({ s.glyph, s.text, s.key, s.rank }, w, kind)
+    T.eq(s.color, th.P[w[3]], kind .. ' colour follows the palette')
+  end
+  T.eq(n, 11)
+end)
+
 -- Meter -----------------------------------------------------------------------------
 
 local function meter_cells(pct, cells)

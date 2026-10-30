@@ -20,6 +20,7 @@ dev/qa/hgq help            # isolated Hivegrid on its own Xvfb display: up, x (s
 dev/smoke                  # end-to-end smoke test in sandbox slot 11 (needs Xvfb and the fork build)
 dev/qa/web-smoke           # web pane end to end in slot 12 (needs Chrome and a fork build with the web pane)
 dev/qa/remote-smoke        # hivegrid-remote against fake agents in slot 14 (needs a fork build; a Chromium-family browser is optional)
+dev/qa/remote-term-smoke   # the phone terminal through a real hivegrid-remote in a throwaway HOME (no fork build, no sandbox slot)
 ```
 
 A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/check` before calling a change done. The QA workflow (scenarios, screenshots, parallel rounds) is in [.claude/skills/hivegrid-qa/SKILL.md](.claude/skills/hivegrid-qa/SKILL.md) with a surface checklist (`checklist.md`) and the design language (`design.md`); a screenshot that breaks `design.md` is a bug.
@@ -36,7 +37,8 @@ A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/c
 | `bin/hivegrid_ui.py` | Terminal UI toolkit (cell canvas, click regions, design components); every TUI uses it. |
 | `bin/hivegrid_panels.py`, `hivegrid_hive.py`, `hivegrid_picker.py`, `hivegrid-bar`, `hivegrid-overview`, `hivegrid-git` | The panels, hive, picker, bar, dock and git view programs. |
 | `bin/hivegrid_agents.py`, `hivegrid_repos.py`, `hivegrid_settings_core.py`, `hivegrid_hex.py` | Logic without UI: agent discovery and states, git scanning and CI, settings and accounts, hex geometry. |
-| `bin/hivegrid-remote`, `hivegrid_remote.py`, `hivegrid_remote_data.py`, `hivegrid_remote_ui.py` | Phone remote over Tailscale: HTTP API and token handling (`hivegrid_remote.py`), session-file chat parser, accounts, system metrics and new-session options (`hivegrid_remote_data.py`), the web page as Python string constants (`hivegrid_remote_ui.py`), the entry shim. See `docs/remote.md`. |
+| `bin/hivegrid-remote`, `hivegrid_remote.py`, `hivegrid_remote_data.py`, `hivegrid_remote_ui.py`, `hivegrid_remote_term.py`, `hivegrid_remote_termjs.py` | Phone remote over Tailscale: HTTP API and token handling (`hivegrid_remote.py`), session-file chat parser, usage-limit detection, accounts, system metrics, new-session options and account switching (`hivegrid_remote_data.py`), the web page as Python string constants (`hivegrid_remote_ui.py`), the opt-in phone terminal: pty shells (`hivegrid_remote_term.py`) and the in-page emulator and view (`hivegrid_remote_termjs.py`), the entry shim. See `docs/remote.md`. |
+| `bin/hivegrid-autostart`, `hivegrid_autostart.py` | Crash and reboot recovery: user services for Hivegrid and hivegrid-remote, and the sudo-only kernel panic reboot, hardware watchdog and auto-login. Changes `/etc` only when the user passes the flag. See `docs/autostart.md`. |
 | `bin/claude-quota`, `omp-switch`, `omp-grid` | Usage fetcher and history, chat transfer between omp profiles, grid launcher. |
 | `ext/hivegrid-agent-state.ts` | omp extension that writes exact agent states for the hive and dock. |
 | `tests/` | Python `unittest` in `tests/test_*.py`; Lua in `tests/lua/` (own runner, fake `wezterm` and mux); bun tests in `tests/ext/`. |
@@ -47,7 +49,7 @@ A missing tool skips its `dev/check` step locally and fails it in CI. Run `dev/c
 ## Conventions
 
 - Follow the neighbouring code before adding a pattern. Python is standard library only (PIL is optional); Lua targets 5.4 and WezTerm's API; shell passes `shellcheck --severity=warning`.
-- One vocabulary for agent states (`working`, `busy`, `needs you`, `done`, `idle`, `exited`, plus `shell` for a plain shell and `web` for a web pane), glyphs and colours, shared by the dock, hive, picker and header.
+- One vocabulary for agent states (`working`, `busy`, `needs you`, `limit`, `done`, `idle`, `exited`, plus `shell` for a plain shell and `web` for a web pane), glyphs and colours, shared by the dock, hive, picker and header.
 - Users see dock numbers (`3`, `tab·number`), never internal pane ids.
 - Every feature degrades on stock WezTerm: gate on `theme.has_click` / `theme.has_web`, register nothing and raise no Lua error when the fork is missing.
 - Settings live in `~/.config/hivegrid/settings.json` (a missing file means the defaults). Lua and Python read the same file and must agree (account pairing, the web URL allowlist); change both sides and their tests together.

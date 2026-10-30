@@ -1,8 +1,10 @@
 -- Per-pane agent state for grids of omp panes, in the hive panel's vocabulary
--- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), done, idle, exited, plus
+-- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), limit (the account hit its usage
+-- limit; you must switch account or wait), done, idle, exited, plus
 -- bell, shell (a shell prompt in a pane where no agent ran) and other (any other program).
 -- Shown in the overview dock (overview.lua), the pane picker (LEADER+g) and, as a count of the
--- agents that run or wait for you, in the header (api.running); Alt+n jumps to the next agent that needs you.
+-- agents that run or wait for you, in the header (api.running); Alt+n jumps to the next agent that needs you
+-- (needs you, limit or bell).
 --
 -- Wiring (parent): `local as = require('agentstatus')(config, wezterm)`.
 -- `as` is { tab_parts, bell, pane_kind, pane_label, agent_number, overview, picker }.
@@ -63,7 +65,7 @@ local STATES = theme.STATES
 -- the same ones).
 local STATE_DIR = (os.getenv('XDG_RUNTIME_DIR') or '/tmp') .. '/hivegrid-agents'
 local STALE_SECS = 20 -- mirrors hivegrid_agents.STALE_SECS: older heartbeat => use the title
-local EXT_STATES = { working = true, busy = true, done = true, idle = true, attention = true }
+local EXT_STATES = { working = true, busy = true, done = true, idle = true, attention = true, limit = true }
 
 -- Keyed by pane_id; pruned per window on every scan.
 local panes = {}
@@ -150,7 +152,7 @@ end
 
 -- One state transition. st is the pane's persistent record (bell, finished, was_working,
 -- agent, changed_at, run_start); c = { now, focused, proc, hit, title_state, ext } with ext
--- the extension's state ('working', 'busy', 'attention', 'done', 'idle') when it is fresh.
+-- the extension's state ('working', 'busy', 'attention', 'limit', 'done', 'idle') when it is fresh.
 -- Returns the pane's state key.
 local function step(st, c)
   local quiet = c.now - st.changed_at >= QUIET_SECS
@@ -400,6 +402,10 @@ local function scan(window, force)
           acks[tostring(id)] = ext.since
           ext_state = 'idle'
         end
+      elseif ext_state == 'limit' and ext.since ~= nil then
+        -- a limit whose reset has passed is acknowledged from the hive or the phone; never by looking at it
+        acks = acks or read_json(STATE_DIR .. '/acks.json') or {}
+        if acks[tostring(id)] == ext.since then ext_state = 'idle' end
       end
       st.reason = ext and type(ext.reason) == 'string' and ext.reason or nil
       -- tokens and cost as omp reported them; the dock formats them (bin/hivegrid_agents.py parse_usage)
@@ -506,9 +512,9 @@ function api.agent_number(pane_id)
 end
 
 -- How many panes of the window are in each state that wants a look: { working, busy,
--- attention }, every tab, in the one state vocabulary (STATES). The header's agent chip.
+-- attention, limit }, every tab, in the one state vocabulary (STATES). The header's agent chip.
 function api.running(window)
-  local n = { working = 0, busy = 0, attention = 0 }
+  local n = { working = 0, busy = 0, attention = 0, limit = 0 }
   for _, t in ipairs(scan(window)) do
     for _, e in ipairs(t.entries) do
       local k = e.st.kind
@@ -588,11 +594,11 @@ end
 -- The Hivegrid picker over every pane in the window (picker.lua): glyph, number, directory,
 -- state, omp's session title, age. In one tab the digits are the dock's; across tabs a row
 -- names its tab (cyan, the secondary identifier) and the digits pick the n-th row shown.
--- The most urgent other pane (needs you, bell, done) starts selected, else this one.
+-- The most urgent other pane (needs you, limit, bell, done) starts selected, else this one.
 local function pick(window, pane)
   local list = scan(window, true)
   local multi = #list > 1
-  local rows, count, best, best_rank, here_id = {}, 0, nil, 4, nil
+  local rows, count, best, best_rank, here_id = {}, 0, nil, STATES.busy.rank, nil
   for ti, t in ipairs(list) do
     local entries = {}
     for _, e in ipairs(t.entries) do entries[#entries + 1] = e end
@@ -628,7 +634,7 @@ local function pick(window, pane)
 end
 api.picker = wezterm.action_callback(pick)
 
--- Next pane that needs you (`needs you`, or a bell), after the active one in tab and reading
+-- Next pane that needs you (`needs you`, a usage limit, or a bell), after the active one in tab and reading
 -- order, wrapping across the tabs of the window; repeated presses cycle through them.
 -- Pane:activate() also brings its tab to the front. No such pane: a toast, nothing else.
 local function jump_next(window, pane)
@@ -643,7 +649,8 @@ local function jump_next(window, pane)
   end
   for i = 1, #flat do
     local e = flat[(start + i - 1) % #flat + 1]
-    if e.pane:pane_id() ~= cur and (e.st.state == 'attention' or e.st.state == 'bell') then
+    local s = e.st.state
+    if e.pane:pane_id() ~= cur and (s == 'attention' or s == 'limit' or s == 'bell') then
       e.pane:activate()
       return
     end

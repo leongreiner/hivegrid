@@ -56,15 +56,16 @@ end
 M.STATES = {}
 for kind, s in pairs {
   attention = { '?', 'needs you', 'violet', 1 },
-  bell = { '!', 'bell', 'red', 2 },
-  done = { '✓', 'done', 'green', 3 },
-  busy = { '◔', 'busy', 'amber', 4 },
-  working = { '↻', 'working', 'accent', 5 },
-  idle = { '·', 'idle', 'grey', 6 },
-  exited = { '○', 'exited', 'muted', 7 },
-  web = { '◍', 'web', 'cyan', 8 },
-  other = { '›', 'running', 'dim', 9 },
-  shell = { '›', 'shell', 'dim', 10 },
+  limit = { '⊘', 'limit', 'red', 2 },
+  bell = { '!', 'bell', 'red', 3 },
+  done = { '✓', 'done', 'green', 4 },
+  busy = { '◔', 'busy', 'amber', 5 },
+  working = { '↻', 'working', 'accent', 6 },
+  idle = { '·', 'idle', 'grey', 7 },
+  exited = { '○', 'exited', 'muted', 8 },
+  web = { '◍', 'web', 'cyan', 9 },
+  other = { '›', 'running', 'dim', 10 },
+  shell = { '›', 'shell', 'dim', 11 },
 } do
   M.STATES[kind] = { glyph = s[1], text = s[2], key = s[3], color = M.P[s[3]], rank = s[4] }
 end

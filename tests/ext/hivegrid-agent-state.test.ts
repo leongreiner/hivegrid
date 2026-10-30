@@ -7,6 +7,8 @@ import factory, {
 	costKindOf,
 	findModel,
 	type HiveEvent,
+	limitFromEntries,
+	limitOfEntry,
 	handleCommand,
 	initialModel,
 	isCmdFile,
@@ -218,7 +220,7 @@ describe("helpers", () => {
 		);
 		expect(Object.keys(doc).sort()).toEqual(
 			[
-				"context", "cwd", "error", "model", "pane", "pending", "pid", "profile", "reason", "sessionFile", "sessionId", "since", "state",
+				"context", "cwd", "error", "limit", "model", "pane", "pending", "pid", "profile", "reason", "sessionFile", "sessionId", "since", "state",
 				"thinking", "title", "updated", "usage", "v",
 			].sort(),
 		);
@@ -596,6 +598,148 @@ describe("extension wiring: models and commands", () => {
 
 			await handlers.session_shutdown({}, ctx);
 			expect(fs.existsSync(modelsFile)).toBe(false);
+		} finally {
+			process.env.XDG_RUNTIME_DIR = oldEnv.x;
+			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = oldEnv.p;
+			if (oldEnv.x === undefined) delete process.env.XDG_RUNTIME_DIR;
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+// Shaped like the entries of a real omp session file (ids, usage and request controls left out).
+const limitEntry = (over: Record<string, unknown> = {}) => ({
+	type: "message",
+	timestamp: "2026-10-28T09:41:04.054Z",
+	message: {
+		role: "assistant",
+		content: [],
+		stopReason: "error",
+		errorStatus: 429,
+		errorMessage:
+			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."},"request_id":"req_x"} retry-after-ms=14523000',
+		timestamp: 1793086676483,
+		completedAt: 1793086676845,
+		...over,
+	},
+});
+const userEntry = { type: "message", message: { role: "user", content: [{ type: "text", text: "go on" }] } };
+const okEntry = { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } };
+
+describe("usage limit", () => {
+	test("a refused request with a long retry-after is the account's limit, reset = completion + retry-after", () => {
+		expect(limitOfEntry(limitEntry())).toEqual({ hit_at: 1793086676.845, reset_at: 1793101199.845 });
+	});
+
+	test("what is not a limit stop", () => {
+		expect(limitOfEntry(okEntry)).toBeNull();
+		expect(limitOfEntry(userEntry)).toBeNull();
+		expect(limitOfEntry(limitEntry({ stopReason: "aborted" }))).toBeNull();
+		// another provider error and other 4xx/5xx
+		expect(limitOfEntry(limitEntry({ errorStatus: 500, errorMessage: "500 internal" }))).toBeNull();
+		expect(limitOfEntry(limitEntry({ errorStatus: undefined, errorMessage: "The socket connection was closed unexpectedly before the response completed" }))).toBeNull();
+		// a 429 that reopens within seconds is a burst limit omp retries itself
+		expect(limitOfEntry(limitEntry({ errorMessage: '429 {"error":{"type":"rate_limit_error"}} retry-after-ms=8000' }))).toBeNull();
+		// a 429 that is not a rate or usage limit
+		expect(limitOfEntry(limitEntry({ errorMessage: "429 too many open files" }))).toBeNull();
+		expect(limitOfEntry(null)).toBeNull();
+		expect(limitOfEntry({ type: "message", message: "text" })).toBeNull();
+	});
+
+	test("no retry-after: still a limit, without a reset time", () => {
+		const e = limitEntry({ errorMessage: '429 {"error":{"type":"rate_limit_error"}}' });
+		expect(limitOfEntry(e)).toEqual({ hit_at: 1793086676.845, reset_at: null });
+		// the hit time falls back to the message, then the entry
+		expect(limitOfEntry(limitEntry({ completedAt: undefined }))?.hit_at).toBe(1793086676.483);
+		const bare = limitEntry({ completedAt: undefined, timestamp: undefined });
+		expect(limitOfEntry(bare)?.hit_at).toBe(1793180464.054);
+		expect(limitOfEntry({ ...bare, timestamp: undefined, message: { ...bare.message, timestamp: undefined } })).toBeNull();
+	});
+
+	test("an absurd retry-after is a limit without a reset time", () => {
+		for (const digits of ["9".repeat(5000), "9".repeat(13), "1" + "0".repeat(11)]) {
+			const e = limitEntry({ errorMessage: '429 {"error":{"type":"rate_limit_error"}} retry-after-ms=' + digits });
+			expect(limitOfEntry(e)).toEqual({ hit_at: 1793086676.845, reset_at: null });
+		}
+	});
+
+	test("only the last message decides; non-message entries are skipped", () => {
+		const note = { type: "model_usage", usage: {} };
+		expect(limitFromEntries([okEntry, limitEntry(), note])).toMatchObject({ reset_at: 1793101199.845 });
+		expect(limitFromEntries([limitEntry(), userEntry])).toBeNull(); // the chat went on after the refusal
+		expect(limitFromEntries([limitEntry(), okEntry])).toBeNull();
+		expect(limitFromEntries([])).toBeNull();
+		expect(limitFromEntries(undefined)).toBeNull();
+	});
+
+	test("the loop ends in `limit`, not `done`; precedence, and a new loop clears it", () => {
+		const limit = { hit_at: 1000, reset_at: 5000 };
+		const { m, seen } = run([
+			[{ type: "agent_start" }, 1001],
+			[{ type: "session_stop", jobs: 0, limit }, 1002],
+			[{ type: "agent_end", jobs: 0, limit }, 1002],
+			[{ type: "tick", jobs: 0 }, 1010],
+			[{ type: "agent_start" }, 1020],
+		]);
+		expect(seen).toEqual(["working|", "limit|usage limit", "limit|usage limit", "limit|usage limit", "working|"]);
+		expect(m.limit).toBeNull();
+		// since stays at the first limit event
+		expect(run([[{ type: "agent_start" }, 1001], [{ type: "agent_end", limit }, 1002], [{ type: "agent_end", limit }, 1009]]).m.since).toBe(1002);
+		// background jobs still running: busy; a plan review waiting: attention
+		expect(run([[{ type: "agent_start" }, 1001], [{ type: "agent_end", jobs: 1, limit }, 1002]]).seen[1]).toBe("busy|1 background job");
+		const review = { reviewId: "r", title: "P" };
+		expect(run([[{ type: "agent_start" }, 1001], [{ type: "plan_review_requested", review }, 1002], [{ type: "agent_end", limit }, 1003]]).seen[2]).toBe("attention|plan review");
+		// an ordinary end after a limited one is done again
+		expect(run([[{ type: "agent_start" }, 1001], [{ type: "agent_end", limit }, 1002], [{ type: "agent_start" }, 1003], [{ type: "agent_end", jobs: 0 }, 1004]]).seen[3]).toBe("done|");
+	});
+
+	test("the state file carries the limit only while the state is `limit`", () => {
+		const limit = { hit_at: 1000, reset_at: 5000 };
+		const meta = { pane: 1, pid: 2, sessionId: null, sessionFile: null, cwd: "/w", title: null, profile: null };
+		const limited = run([[{ type: "agent_start" }, 1001], [{ type: "agent_end", limit }, 1002]]).m;
+		expect(toDoc(limited, meta, 1003)).toMatchObject({ state: "limit", reason: "usage limit", limit });
+		const busy = run([[{ type: "agent_start" }, 1001], [{ type: "agent_end", limit, jobs: 1 }, 1002]]).m;
+		expect(toDoc(busy, meta, 1003).limit).toBeNull();
+		expect(toDoc(initialModel(1), meta, 2).limit).toBeNull();
+	});
+
+	test("wiring: agent_end reads the session and writes state `limit`; the next prompt clears it", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hg-ext-"));
+		const oldEnv = { x: process.env.XDG_RUNTIME_DIR, p: process.env.WEZTERM_PANE };
+		process.env.XDG_RUNTIME_DIR = dir;
+		process.env.WEZTERM_PANE = "4251";
+		try {
+			const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+			factory({ on: (n: string, h: (e: unknown, ctx: unknown) => unknown) => (handlers[n] = h), pi: {} });
+			let entries: unknown[] = [userEntry];
+			const ctx = {
+				agent: { kind: "main" },
+				cwd: "/work",
+				sessionManager: { getSessionId: () => "sid", getSessionName: () => "T", getEntries: () => entries },
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				getPendingPlanReview: () => undefined,
+				setInterval: () => 1,
+				clearTimer: () => {},
+			};
+			const read = () => JSON.parse(fs.readFileSync(path.join(dir, "hivegrid-agents", "4251.json"), "utf8"));
+			await handlers.session_start({}, ctx);
+			await handlers.agent_start({}, ctx);
+			entries = [userEntry, limitEntry()];
+			await handlers.session_stop({}, ctx);
+			await handlers.agent_end({}, ctx);
+			expect(read()).toMatchObject({ state: "limit", reason: "usage limit", limit: { hit_at: 1793086676.845, reset_at: 1793101199.845 } });
+			await handlers.agent_start({}, ctx);
+			expect(read()).toMatchObject({ state: "working", limit: null });
+			entries = [userEntry, limitEntry(), userEntry, okEntry];
+			await handlers.agent_end({}, ctx);
+			expect(read()).toMatchObject({ state: "done", limit: null });
+			// an omp without getEntries ends in done
+			await handlers.agent_start({}, ctx);
+			entries = undefined as unknown as unknown[];
+			await handlers.agent_end({}, ctx);
+			expect(read().state).toBe("done");
+			await handlers.session_shutdown({}, ctx);
 		} finally {
 			process.env.XDG_RUNTIME_DIR = oldEnv.x;
 			if (oldEnv.p === undefined) delete process.env.WEZTERM_PANE;

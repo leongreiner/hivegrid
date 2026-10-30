@@ -14,7 +14,7 @@
 | | `Ctrl+Shift+A` | arrange the panes into the best grid (also the `⊞` button) |
 | | `Alt` + drag a pane | move a pane (Hivegrid build only): hold `Alt`, press and move the pointer, and the target lights up; the drop happens when you let go of `Alt`, not the button, so a touchpad finger can be lifted and set down again to go further (the button's own release and further clicks are ignored). Let go over the middle of another pane to swap them, over its outer quarter to put the dragged pane beside it, taking half of it; over no other pane it cancels. Panes are moved, never restarted; the bar and dock never take part. A program that grabs the mouse does not get `Alt`+left press, and WezTerm's `Alt`+drag block selection is replaced |
 | | `LEADER+1` / `2` / `3` | new tab with one agent / 2x2 grid / 3x3 grid; the agent is `omp`, or `claude` when the settings (Agent) say so (also in the `+` right-click menu, which lists these, the panels and their keys; Enter, a click or the row number opens an entry) |
-| Agents | `Alt+n`, `LEADER+n` | jump to the next agent that needs you (state `needs you`, or a bell), across the tabs of the window; press again for the next one. A toast says when none does |
+| Agents | `Alt+n`, `LEADER+n` | jump to the next agent that needs you (state `needs you`, `limit` or a bell), across the tabs of the window; press again for the next one. A toast says when none does |
 | | `LEADER+o` | show or hide the overview dock (right edge) |
 | | `Alt+]`, `Alt+[` | next / previous agent pane |
 | | `LEADER+g` | agent picker (every pane of the window; the most urgent one starts selected) |

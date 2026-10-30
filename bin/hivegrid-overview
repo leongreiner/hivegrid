@@ -117,7 +117,7 @@ def hints(n, digits="", asking=False):
 # Closing a pane from the dock loses nothing in these states: a shell at its prompt or the one an
 # agent left behind, an agent between turns (omp saves its session as it goes; `omp --resume`
 # brings it back), a web pane (a page; cookies and logins live in its profile). Any other state
-# (working, busy, needs you, a bell, another program in the foreground, a pane not scanned yet)
+# (working, busy, needs you, limit, a bell, another program in the foreground, a pane not scanned yet)
 # asks first, and the answer defaults to no. Closing the whole tab always asks: it takes every
 # pane at once.
 SAFE_TO_CLOSE = frozenset(("shell", "exited", "done", "idle", "web"))

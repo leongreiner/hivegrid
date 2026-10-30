@@ -318,7 +318,7 @@ class TestAgentModel(unittest.TestCase):
         a = self.ag(title="📂 fix \x1b[1mlogin", cwd=os.path.expanduser("~") + "/proj/", since=NOW - 125, reason="ok\nline",
                     usage=A.Usage(1_300_000, 4.82, "reported"), profile="alpha", active=True)
         j = R.agent_json(a, [a], NOW)
-        self.assertEqual((j["id"], j["label"], j["num"], j["tab"], j["rank"]), (3, "2", 2, 1, 6))
+        self.assertEqual((j["id"], j["label"], j["num"], j["tab"], j["rank"]), (3, "2", 2, 1, 7))
         self.assertEqual((j["title"], j["cwd"], j["age"], j["reason"]), ("fix login", "~/proj", "2m", "ok line"))
         self.assertEqual(j["usage"], {"text": "1.3M tok · $4.82", "tokens": 1_300_000, "cost": 4.82, "cost_kind": "reported"})
         self.assertEqual((j["state_label"], j["active"], j["profile"]), ("idle", True, "alpha"))
@@ -977,6 +977,22 @@ class TestWrites(AppCase):
             self.assertEqual((r.status, data["error"]), (409, "agent_not_ready"), state)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "acks.json")))
 
+    def test_a_limit_can_be_acknowledged_only_after_its_reset(self):
+        self.write_state(3, state="limit", since=NOW - 7000, limit={"hit_at": NOW - 7000, "reset_at": NOW + 600})
+        row = self.call("GET", "/api/agents")[1]["agents"][0]
+        self.assertEqual((row["state"], row["can"]["ack"]), ("limit", False))
+        r, data = self.call("POST", "/api/agents/3/ack", {})
+        self.assertEqual((r.status, data["error"]), (409, "agent_not_ready"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "acks.json")))
+        self.write_state(3, state="limit", since=NOW - 7000, limit={"hit_at": NOW - 7000, "reset_at": NOW - 5})
+        self.clock.t += 2
+        self.assertTrue(self.call("GET", "/api/agents")[1]["agents"][0]["can"]["ack"])
+        self.assertEqual(self.call("POST", "/api/agents/3/ack", {})[0].status, 200)
+        with open(os.path.join(self.dir, "acks.json")) as f:
+            self.assertEqual(json.load(f), {"3": NOW - 7000})
+        self.clock.t += 2
+        self.assertEqual(self.call("GET", "/api/agents")[1]["agents"][0]["state"], "idle")
+
     def test_writes_run_under_the_mux_lock(self):
         held = []
         lock = self.app.mux._lock
@@ -984,7 +1000,7 @@ class TestWrites(AppCase):
         self.assertEqual(self.call("POST", "/api/agents/3/prompt", {"text": "x"})[0].status, 200)
         self.assertEqual(self.call("POST", "/api/agents/3/keys", {"keys": ["y"]})[0].status, 200)
         self.assertEqual(held, [True, True, True])
-        with unittest.mock.patch.object(R.A, "ack", side_effect=lambda agent: held.append(lock.locked())):
+        with unittest.mock.patch.object(R.A, "ack", side_effect=lambda agent, now=None: held.append(lock.locked())):
             self.assertEqual(self.call("POST", "/api/agents/3/ack", {})[0].status, 200)
         self.assertEqual(held[-1], True)
         with unittest.mock.patch.object(R.A, "answer_plan_review", side_effect=lambda *a: held.append(lock.locked()) or (True, "sent")):

@@ -4,8 +4,13 @@ A small HTTP server (standard library only) bound to loopback or a tailnet addre
 of the WezTerm mux, shows the tail of their screens and a chat built from their omp session files (long
 polls keep both live), sends them prompts, keys, plan-review answers and acknowledgements, switches their
 model and thinking level, starts a new omp session in a pane and reports accounts, quota and machine
-metrics. It never closes or focuses panes and never types into plain shells. The data behind the richer
-endpoints (session files, chat parser, accounts, metrics) is in hivegrid_remote_data.py.
+metrics. It never closes or focuses panes; it types only into agents, except that an account switch types
+one `cd … && omp …` line into the plain shell left after omp quit (appended to any text already typed at
+that prompt). The data behind the richer endpoints (session files, chat parser, accounts, metrics) is in
+hivegrid_remote_data.py.
+Only when the user switched it on (settings.json `remote.terminal` or `--terminal`, never with
+`--read-only`) it also gives the phone a terminal of its own: a login shell on a pty, which is not one of
+the window's panes (hivegrid_remote_term.py runs the shells, the page's emulator is hivegrid_remote_termjs.py).
 Every request to /api needs `Authorization: Bearer <token>` (the token file next to settings.json); the
 page itself (static, no data), the logos and the terminal's font are served without it. The UI lives in
 hivegrid_remote_ui.py as string constants.
@@ -41,9 +46,11 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import hivegrid_agents as A  # noqa: E402
 import hivegrid_hive as HV  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
+import hivegrid_remote_term as T  # noqa: E402
+import hivegrid_remote_termjs as TJ  # noqa: E402
 import hivegrid_remote_ui as UI  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
-from hivegrid_settings_core import HEX_RE, Settings, ThemeWatch, settings_path  # noqa: E402
+from hivegrid_settings_core import DEFAULT_PRESET, HEX_RE, PRESETS, Settings, ThemeWatch, settings_path  # noqa: E402
 
 API_VERSION = 1
 DEFAULT_PORT = 8787
@@ -78,6 +85,10 @@ MAX_FONT = 16 * 1024 * 1024
 TAIL_TTL = 1.0             # a pane's screen text is reused this long by the held tail requests that watch it
 SESSION_BURST, SESSION_EVERY = 3, 5.0     # starting a session: 3 at once, then one per 5 seconds
 SESSION_REPEAT = 10.0      # the same directory and account is not started twice within this many seconds
+ACCOUNT_BURST, ACCOUNT_EVERY = 2, 10.0   # moving a chat to another account: 2 at once, then one per 10 seconds
+TERM_IO_RATE, TERM_IO_BURST = 40.0, 80    # terminal requests per device: 40 a second, bursts of 80
+TERM_OPEN_EVERY, TERM_OPEN_BURST = 5.0, 3 # opening a terminal: 3 at once, then one every 5 seconds, per device
+TERM_KEYS = 64                            # devices whose terminal allowance is remembered
 
 # Quick keys: name -> bytes. Each is sent in its own `send-text --no-paste` call, never concatenated
 # (an ESC followed by a byte in one write reads as Alt+key).
@@ -90,7 +101,7 @@ SINGLE_KEY = re.compile(r"[A-Za-z0-9]")
 AGENT_ID = re.compile(r"(0|[1-9][0-9]{0,8})")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,256}")
 
-VOCAB = ("attention", "working", "busy", "done", "idle", "exited", "shell", "web")
+VOCAB = ("attention", "limit", "working", "busy", "done", "idle", "exited", "shell", "web")
 
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -105,9 +116,9 @@ SECURITY_HEADERS = {
 
 STATUS_TEXT = {
     "bad_request": 400, "unauthorized": 401, "forbidden_host": 403, "forbidden_origin": 403, "readonly": 403,
-    "not_found": 404, "method_not_allowed": 405, "confirm_required": 409, "agent_not_ready": 409, "conflict": 409,
-    "length_required": 411, "too_large": 413, "unsupported_media_type": 415, "rate_limited": 429,
-    "internal": 500, "mux_failed": 502, "no_mux": 503,
+    "terminal_disabled": 403, "not_found": 404, "method_not_allowed": 405, "confirm_required": 409,
+    "agent_not_ready": 409, "conflict": 409, "length_required": 411, "too_large": 413, "unsupported_media_type": 415,
+    "rate_limited": 429, "internal": 500, "mux_failed": 502, "no_mux": 503, "terminal_busy": 503,
 }
 
 THEME_VARS = ("deep", "base", "surface", "pill", "raised", "track", "border", "edge_hi", "text", "bright", "muted",
@@ -265,6 +276,15 @@ def read_token(path):
     return token
 
 
+def _token_digest(token):
+    return hashlib.sha256(token.encode("utf-8", "replace")).digest()
+
+
+def _fingerprint(digest):
+    """The short stable name of a token (a digest prefix, never the token) that ties a terminal to it."""
+    return digest.hex()[:16]
+
+
 class TokenStore:
     """The token file, re-read whenever it changes (so `token --rotate` takes effect without a
     restart and an invalid file locks everybody out). Only a SHA-256 digest is kept in memory."""
@@ -289,7 +309,7 @@ class TokenStore:
             return
         self._stamp = stamp
         try:
-            self._digest = hashlib.sha256(read_token(self.path).encode()).digest()
+            self._digest = _token_digest(read_token(self.path))
             self.error = None
         except TokenError as exc:
             self._digest = None
@@ -311,7 +331,14 @@ class TokenStore:
             digest = self._digest
         if digest is None:
             return False
-        return hmac.compare_digest(hashlib.sha256(presented.encode("utf-8", "replace")).digest(), digest)
+        return hmac.compare_digest(_token_digest(presented), digest)
+
+    def fingerprint(self):
+        """A short stable name of the valid token (a digest prefix, never the token), None when no token
+        file is valid. Terminals are tied to the token that opened them: a rotation ends them."""
+        with self._lock:
+            self._refresh()
+            return _fingerprint(self._digest) if self._digest is not None else None
 
 
 # ---------------------------------------------------------------- bind, host, origin
@@ -473,6 +500,24 @@ class Bucket:
                 self.tokens -= 1
                 return 0.0
             return (1 - self.tokens) / self.rate
+
+
+class KeyedBuckets:
+    """A Bucket per client key (the device behind `tailscale serve`); beyond `cap` keys the one unused longest is forgotten."""
+
+    def __init__(self, rate, burst, clock=time.monotonic, cap=TERM_KEYS):
+        self.rate, self.burst, self.clock, self.cap = rate, burst, clock, cap
+        self._buckets = {}
+        self._lock = threading.Lock()
+
+    def take(self, key):
+        """0 when `key` may go on, else the seconds until it may."""
+        with self._lock:
+            bucket = self._buckets.pop(key, None) or Bucket(self.rate, self.burst, self.clock)
+            self._buckets[key] = bucket
+            while len(self._buckets) > self.cap:
+                del self._buckets[next(iter(self._buckets))]
+        return bucket.take()
 
 
 # ---------------------------------------------------------------- the mux
@@ -701,14 +746,17 @@ def state_vocabulary():
 CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll")
 
 
-def meta_json(readonly):
+def meta_json(readonly, terminal=False):
+    """The server's limits and vocabulary. `terminal`: the page may open a terminal (never on a read-only server)."""
+    terminal = bool(terminal) and not readonly
+    capabilities = CAPABILITIES + (("terminal",) if terminal else ())
     states = state_vocabulary()
     limits = {"prompt": MAX_PROMPT, "keys": MAX_KEYS, "key_text": MAX_KEY_TEXT, "feedback": MAX_FEEDBACK,
               "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX}
-    return {"v": API_VERSION, "readonly": bool(readonly), "limits": limits,
+    return {"v": API_VERSION, "readonly": bool(readonly), "terminal": terminal, "limits": limits,
             "states": states, "keys": list(KEYS), "dangerous": list(DANGEROUS_KEYS),
-            "capabilities": list(CAPABILITIES),
-            "meta_rev": rev_of([states, bool(readonly), limits, CAPABILITIES])}
+            "capabilities": list(capabilities),
+            "meta_rev": rev_of([states, bool(readonly), limits, capabilities])}
 
 
 def pending_json(pend):
@@ -732,12 +780,14 @@ def pending_json(pend):
     return None
 
 
-def can_flags(agent, pending, readonly):
+def can_flags(agent, pending, readonly, switching=False, now=None):
     if readonly:
-        return {"prompt": False, "keys": False, "plan": False, "ack": False, "model": False}
+        return {"prompt": False, "keys": False, "plan": False, "ack": False, "model": False, "account": False}
     return {"prompt": agent.state not in ("attention", "exited"), "keys": agent.state != "exited",
-            "plan": bool(pending and pending["kind"] == "plan_review"), "ack": agent.state in ("done", "idle"),
-            "model": bool(agent.model) and agent.state != "exited"}
+            "plan": bool(pending and pending["kind"] == "plan_review"),
+            "ack": agent.state in ("done", "idle") or (now is not None and A.limit_expired(agent, now)),
+            "model": bool(agent.model) and agent.state != "exited",
+            "account": not switching and D.account_block(agent) is None}
 
 
 def model_json(model):
@@ -754,7 +804,7 @@ def context_json(ctx):
     return {"tokens": ctx["tokens"], "window": ctx["window"], "pct": ctx["pct"]}
 
 
-def agent_json(agent, agents, now, readonly=False, session=False):
+def agent_json(agent, agents, now, readonly=False, session=False, limit=None, switch=None):
     state = agent.state if agent.state in U.STATES else "idle"
     pending = pending_json(agent.pending)
     usage = None
@@ -768,29 +818,47 @@ def agent_json(agent, agents, now, readonly=False, session=False):
         "profile": sanitize_line(agent.profile, 80) if agent.profile else None,
         "since": agent.since, "age": HV.human_age(now - agent.since) if agent.since else None,
         "reason": sanitize_line(agent.reason, 200), "error": sanitize_line(agent.error, 200) if agent.error else None,
-        "active": bool(agent.active), "pending": pending, "usage": usage, "can": can_flags(agent, pending, readonly),
+        "active": bool(agent.active), "pending": pending, "usage": usage,
+        "can": can_flags(agent, pending, readonly, bool(switch and switch["state"] == "running"), now),
         "model": model_json(agent.model), "thinking": agent.thinking, "context": context_json(agent.context),
-        "session": bool(session),
+        "session": bool(session), "limit": limit, "switch": switch,
     }
 
 
-def agents_json(agents, now, readonly=False, sessions=None):
-    """The agent list. `sessions(agent) -> bool` says whether a chat is available (none: never).
+def agents_json(agents, now, readonly=False, sessions=None, terminal=False, limits=None, switches=None):
+    """The agent list. `sessions(agent) -> bool` says whether a chat is available (none: never);
+    `limits(agent)` and `switches(agent)` give an agent's limit and account-switch objects (None: none).
     The revision covers everything but the ages, which the page computes from `since`."""
     ordered = sorted(agents, key=lambda a: (a.tab_index, a.num, a.pane))
-    rows = [agent_json(a, agents, now, readonly, bool(sessions and sessions(a))) for a in ordered]
+    rows = [agent_json(a, agents, now, readonly, bool(sessions and sessions(a)), limits(a) if limits else None,
+                       switches(a) if switches else None) for a in ordered]
     by_state = {}
     for r in rows:
         by_state[r["state"]] = by_state.get(r["state"], 0) + 1
     totals = {"agents": len(rows), "by_state": by_state,
               "usage": A.totals_text(A.usage_totals(a.usage for a in agents))}
     rev = rev_of([{k: v for k, v in r.items() if k != "age"} for r in rows] + [totals])
-    return {"v": API_VERSION, "now": now, "meta_rev": meta_json(readonly)["meta_rev"], "rev": rev,
+    return {"v": API_VERSION, "now": now, "meta_rev": meta_json(readonly, terminal)["meta_rev"], "rev": rev,
             "totals": totals, "agents": rows}
 
 
-def theme_css(palette):
-    """:root custom properties of the saved palette; a missing or malformed colour falls back to the default."""
+def ansi_colors(terminal):
+    """The 16 terminal colours of a saved theme (`terminal` = its ansi and brights lists) as #rrggbb, any
+    missing or malformed one replaced by the default theme's."""
+    default = PRESETS[DEFAULT_PRESET]["terminal"]
+    terminal = terminal if isinstance(terminal, dict) else {}
+    out = []
+    for key in ("ansi", "brights"):
+        stored = terminal.get(key) if isinstance(terminal.get(key), list) else []
+        for i in range(8):
+            value = stored[i] if i < len(stored) else None
+            out.append(value if isinstance(value, str) and HEX_RE.match(value) else default[key][i])
+    return out
+
+
+def theme_css(palette, ansi=None):
+    """:root custom properties of the saved palette; a missing or malformed colour falls back to the default.
+    With `ansi` (16 colours, see ansi_colors) also --ansi0 .. --ansi15, the colours of the page's terminal."""
     palette = palette if isinstance(palette, dict) else {}
     lines = []
     for name in THEME_VARS:
@@ -798,6 +866,8 @@ def theme_css(palette):
         if not (isinstance(value, str) and HEX_RE.match(value)):
             value = U.DEFAULT_PAL[name]
         lines.append(f"  --{name.replace('_', '-')}: {value};")
+    for i, value in enumerate(ansi or ()):
+        lines.append(f"  --ansi{i}: {value};")
     return ":root {\n" + "\n".join(lines) + "\n  color-scheme: dark;\n}\n"
 
 
@@ -852,9 +922,11 @@ class App:
         "/app.css": ("text/css; charset=utf-8", "APP_CSS"),
         "/manifest.webmanifest": ("application/manifest+json", "MANIFEST"),
     }
+    TERM_STATIC = {"/term.js": ("text/javascript; charset=utf-8", "TERM_JS"), "/term.css": ("text/css; charset=utf-8", "TERM_CSS"),
+                   "/term-view.js": ("text/javascript; charset=utf-8", "TERM_VIEW_JS")}
     GET_ROUTES = ("/api/meta", "/api/agents", "/api/accounts", "/api/system", "/api/sessions/options")
     POST_ROUTES = ("/api/sessions",)
-    GET_ACTIONS = ("tail", "chat", "models")
+    GET_ACTIONS = ("tail", "chat", "models", "accounts")
 
     FONTS = {
         "/fonts/mono.ttf": ("~/.local/share/fonts/DejaVuSansMNerdFont/DejaVuSansMNerdFontMono-Regular.ttf",
@@ -864,7 +936,8 @@ class App:
     }
 
     def __init__(self, mux, tokens, readonly=False, allow_hosts=(), clock=time.monotonic, wall=time.time,
-                 log=None, theme_watch=None, sleep=None, fonts=None, home=None, sysstats=None, chat=None):
+                 log=None, theme_watch=None, sleep=None, fonts=None, home=None, sysstats=None, chat=None,
+                 terminal=False, terminals=None, switcher=None):
         self.mux, self.tokens, self.readonly = mux, tokens, bool(readonly)
         self.allow_hosts = tuple(h.lower() for h in allow_hosts)
         self.clock, self.wall = clock, wall
@@ -889,6 +962,17 @@ class App:
         self._font_cache = {}
         self._icon = None
         self._sessions_seen = {}
+        self.terminal_flag = bool(terminal)         # --terminal: the terminal is on whatever settings.json says
+        self.term_io = KeyedBuckets(TERM_IO_RATE, TERM_IO_BURST, clock)
+        self.term_open = KeyedBuckets(1.0 / TERM_OPEN_EVERY, TERM_OPEN_BURST, clock)
+        self.terminals = terminals or T.Manager(clock=clock, log=self.log)
+        self._remote = None                         # the `remote` settings and the file stamp they were read at
+        self._remote_stamp = None
+        self._remote_lock = threading.Lock()
+        self.probe = D.LimitProbe()
+        self.switcher = switcher or D.AccountSwitcher(self.mux, sanitize_line, home=self.home, clock=clock, wall=wall,
+                                                       sleep=self.sleep, foreground=_foreground)
+        self.account_bucket = Bucket(1.0 / ACCOUNT_EVERY, ACCOUNT_BURST, clock)
 
     # -- helpers
     def _error(self, err):
@@ -916,14 +1000,14 @@ class App:
         with self._theme_lock:
             palette = watch.poll()
             if palette is not None or self._theme is None:
-                if palette is None:
-                    palette = Settings(watch.path).theme()["palette"]
-                self._theme = theme_css(palette)
+                theme = Settings(watch.path).theme()
+                self._theme = theme_css(theme["palette"] if palette is None else palette, ansi_colors(theme["terminal"]))
             return self._theme
 
     def close(self):
-        """Wakes the held requests (they answer at once) when the server shuts down."""
+        """Wakes the held requests (they answer at once) and ends every terminal when the server shuts down."""
         self._stop.set()
+        self.terminals.shutdown()
 
     # -- pipeline
     def dispatch(self, req):
@@ -954,6 +1038,9 @@ class App:
         if path in self.STATIC:
             ctype, name = self.STATIC[path]
             return self._static(req, ctype, getattr(UI, name).encode("utf-8"))
+        if path in self.TERM_STATIC:
+            ctype, name = self.TERM_STATIC[path]
+            return self._static(req, ctype, getattr(TJ, name).encode("utf-8"))
         if path == "/logo.svg":
             return self._logo(req)
         if path == "/icon.png":
@@ -1038,11 +1125,16 @@ class App:
                 locked = self.auth_limit.fail(key)
                 self.log(f"auth failed key={key}" + (f" locked for {locked:.0f}s" if locked else ""))
             raise HttpError("unauthorized", "missing or wrong token", {"WWW-Authenticate": "Bearer"})
-        wait = (self.write_bucket if req.method == "POST" else self.read_bucket).take()
+        terminal = path == "/api/terminals" or path.startswith("/api/terminals/")
+        # Terminal traffic (a request per batch of keystrokes, a held poll per output) has its own allowance per
+        # device: it neither starves the agent calls nor is starved by them.
+        wait = self.term_io.take(key) if terminal else (self.write_bucket if req.method == "POST" else self.read_bucket).take()
         if wait > 0:
             raise HttpError("rate_limited", "slow down", {"Retry-After": str(max(math.ceil(wait), 1))})
+        if terminal:
+            return self._terminal(req, key, token, path, query)
 
-        m = re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|prompt|keys|plan|ack|model|thinking)", path)
+        m = re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account)", path)
         if path in self.GET_ROUTES or path in self.POST_ROUTES:
             action, ident = path, None
         elif m:
@@ -1104,11 +1196,30 @@ class App:
         if not AGENT_ID.fullmatch(ident):
             raise HttpError("not_found", "no such agent")
         pane = int(ident)
-        agents = self.mux.agents(fresh=fresh)
+        agents = self._agents(fresh)
         for a in agents:
             if a.pane == pane:
                 return a, agents
         raise HttpError("not_found", "no such agent")
+
+    def _agents(self, fresh=False):
+        """The agents of the mux; a `done` agent whose session file ends on a usage-limit refusal reads as
+        `limit` (an omp whose extension predates that state does not say so itself)."""
+        return D.with_limits(self.mux.agents(fresh=fresh), self.probe, lambda a: D.find_session_file(a, self.home))
+
+    def _limits(self, agents):
+        """{pane: the page's limit object} for the agents stopped on a limit; the settings are read only when there is one."""
+        limited = [a for a in agents if a.state == "limit"]
+        if not limited:
+            return {}
+        accounts, now = self.settings().accounts(), self.wall()
+        return {a.pane: D.limit_json(a, accounts, now, sanitize_line) for a in limited}
+
+    def _agents_doc(self):
+        agents = self._agents()
+        limits = self._limits(agents)
+        return agents_json(agents, self.wall(), self.readonly, self._has_session, self.terminal_enabled(),
+                           lambda a: limits.get(a.pane), lambda a: self.switcher.status(a.pane))
 
     # -- long polls
     @staticmethod
@@ -1163,7 +1274,7 @@ class App:
         path = D.find_session_file(agent, self.home)
         stamp = self.chat.stamp(path) if path else None
         pending = pending_json(agent.pending)
-        rev = rev_of([stamp if stamp else "screen", agent.state, agent.reason, pending, limit, before])
+        rev = rev_of([stamp if stamp else "screen", agent.state, agent.reason, pending, limit, before, self.switcher.status(agent.pane)])
         return agent, agents, path if stamp else None, rev
 
     def _chat(self, req, ident, q):
@@ -1183,16 +1294,17 @@ class App:
         got = self.chat.window(path, limit, before) if path else None
         if got is None:
             items, has_older, source, gen = [], False, "screen", 0
-            rev = rev_of(["screen", agent.state, agent.reason, pending_json(agent.pending), limit, before])
+            rev = rev_of(["screen", agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane)])
         else:
             items, has_older, stamp = got
             gen = stamp[0]
             source = "session"
-            rev = rev_of([stamp, agent.state, agent.reason, pending_json(agent.pending), limit, before])
+            rev = rev_of([stamp, agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane)])
         state = agent.state if agent.state in U.STATES else "idle"
         return Response(200, _json_body({
             "id": agent.pane, "label": A.agent_label(agent, agents), "source": source, "state": state,
             "state_label": U.STATES[state].label, "reason": sanitize_line(agent.reason, 200), "since": agent.since,
+            "limit": self._limits([agent]).get(agent.pane), "switch": self.switcher.status(agent.pane),
             "rev": rev, "gen": gen, "has_older": has_older, "older": before is not None, "items": items}))
 
     def _models(self, req, ident):
@@ -1211,7 +1323,7 @@ class App:
     def _agents_or_none(self):
         """The agents, or none when there is no Hivegrid window (accounts and options need no window)."""
         try:
-            return self.mux.agents()
+            return self._agents()
         except NoMux:
             return []
 
@@ -1233,12 +1345,12 @@ class App:
     def _get(self, req, action, ident, query):
         q = urllib.parse.parse_qs(query)
         if action == "/api/meta":
-            meta = meta_json(self.readonly)
+            meta = meta_json(self.readonly, self.terminal_enabled())
             return self._json(req, meta, meta["meta_rev"])
         if action == "/api/agents":
             etag = req.headers.get("if-none-match")
             data = self._hold(self._wait_param(q), LIST_POLL,
-                              lambda: agents_json(self.mux.agents(), self.wall(), self.readonly, self._has_session),
+                              self._agents_doc,
                               lambda d: _etag_match(etag, d["rev"]), req.alive)
             return self._json(req, data, data["rev"])
         if action == "/api/accounts":
@@ -1250,6 +1362,8 @@ class App:
             return self._json(req, {"profiles": profiles, "dirs": dirs})
         if action == "chat":
             return self._chat(req, ident, q)
+        if action == "accounts":
+            return self._agent_accounts(ident)
         if action == "models":
             return self._models(req, ident)
         n = min(max(self._int_param(q, "lines", TAIL_DEFAULT, 0, 1 << 30), TAIL_MIN), TAIL_MAX)
@@ -1324,6 +1438,54 @@ class App:
         self.mux.invalidate()
         return Response(200, _json_body({"ok": True, "confirmed": confirmed}))
 
+    def _agent_accounts(self, ident):
+        """`GET /api/agents/<id>/accounts`: the account the agent runs on, the accounts its chat can be moved to
+        (with their quota) and whether it can be moved now (`can`, else `why`)."""
+        agent, agents = self._find(ident, False)
+        current, offered = D.account_options(self.settings().accounts(), agent, self.wall(), sanitize_line)
+        switch = self.switcher.status(agent.pane)
+        why = D.account_block(agent)
+        if self.readonly:
+            why = "this server is read-only"
+        elif switch and switch["state"] == "running":
+            why = "a switch is already running for this agent"
+        elif why is None and not offered:
+            why = "no other account is paired with an omp profile"
+        return Response(200, _json_body({"id": agent.pane, "label": A.agent_label(agent, agents), "current": current,
+                                         "accounts": offered, "can": why is None, "why": why, "switch": switch}))
+
+    def _account(self, ident, body):
+        """`POST /api/agents/<id>/account {"profile", "confirm": true}`: moves the agent's chat to the omp
+        profile of one of the accounts `_agent_accounts` offers (docs/remote.md, "Switching account"). It
+        answers 202 once omp was asked to quit; the page follows the move in the agent's `switch` object."""
+        self._fields(body, ("profile", "confirm"))
+        profile, confirm = body.get("profile"), body.get("confirm", False)
+        if not isinstance(profile, str) or not profile or len(profile) > 64:
+            raise HttpError("bad_request", "profile must be the profile of an offered account")
+        if not isinstance(confirm, bool):
+            raise HttpError("bad_request", "confirm must be true or false")
+        agent, agents = self._find(ident, True)
+        current, offered = D.account_options(self.settings().accounts(), agent, self.wall(), sanitize_line)
+        target = next((o for o in offered if o["profile"] == profile), None)
+        if target is None:
+            raise HttpError("bad_request", "unknown account: choose one of the offered accounts")
+        why = D.account_block(agent)
+        if why:
+            raise HttpError("agent_not_ready", why)
+        if not confirm:
+            raise HttpError("confirm_required", f"confirm to move the chat to {target['label']}: omp quits and resumes there")
+        wait = self.account_bucket.take()
+        if wait > 0:
+            raise HttpError("rate_limited", "too many account switches: wait a few seconds",
+                            {"Retry-After": str(max(math.ceil(wait), 1))})
+        try:
+            self.switcher.begin(agent, profile, target["label"], current["label"] or agent.profile)
+        except D.SwitchRefused as exc:
+            raise HttpError(exc.code, exc.message) from None
+        self.mux.invalidate()
+        self._written("account", A.agent_label(agent, agents), 0)
+        return Response(202, _json_body({"ok": True, "switching": True, "to": target["label"]}))
+
     def _new_session(self, body):
         self._fields(body, ("profile", "dir"))
         profile, shown = body.get("profile"), body.get("dir")
@@ -1331,7 +1493,7 @@ class App:
             raise HttpError("bad_request", "profile must be a name or null")
         if not isinstance(shown, str) or not shown or len(shown) > 300:
             raise HttpError("bad_request", "dir must be one of the offered directories")
-        profiles, _dirs, real = D.session_options(self.settings().accounts(), self.mux.agents(), sanitize_line, self.home)
+        profiles, _dirs, real = D.session_options(self.settings().accounts(), self._agents(), sanitize_line, self.home)
         known = {p["profile"]: p["label"] for p in profiles if p["profile"]}
         if profile is not None and profile not in known:
             raise HttpError("bad_request", "unknown profile")
@@ -1369,6 +1531,8 @@ class App:
     def _post(self, action, ident, body):
         if action == "/api/sessions":
             return self._new_session(body)
+        if action == "account":
+            return self._account(ident, body)
         if action in ("model", "thinking"):
             return self._switch(ident, body, "model" if action == "model" else "level", action)
         if action == "prompt":
@@ -1407,9 +1571,9 @@ class App:
             return Response(200, _json_body({"ok": True, "message": "sent"}))
         self._fields(body, ())
         agent, agents = self._find(ident, True)
-        if agent.state not in ("done", "idle"):
-            raise HttpError("agent_not_ready", "nothing to acknowledge: the agent is not done or idle")
-        self.mux.act(lambda: A.ack(agent))
+        if agent.state not in ("done", "idle") and not A.limit_expired(agent, self.wall()):
+            raise HttpError("agent_not_ready", "nothing to acknowledge: the agent is not done or idle, and its limit has not reset")
+        self.mux.act(lambda: A.ack(agent, self.wall()))
         self.mux.invalidate()
         self._written("ack", A.agent_label(agent, agents), 0)
         return Response(200, _json_body({"ok": True}))
@@ -1441,6 +1605,141 @@ class App:
         sent = self.mux.act(lambda: self.mux.send_keys(agent.pane, [KEYS.get(k, k) for k in names], text))
         self._written("keys", A.agent_label(agent, agents), sum(len(k) for k in names) + len(text or ""))
         return Response(200, _json_body({"ok": True, "sent": sent}))
+
+    # -- terminal
+    def terminal_settings(self):
+        """The `remote` settings as the file says now: read again when the file changed, a missing or unreadable
+        file means the defaults (the terminal off)."""
+        path = self._watch().path
+        try:
+            st = os.stat(path)
+            stamp = (st.st_ino, st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        with self._remote_lock:
+            if self._remote is None or stamp != self._remote_stamp:
+                self._remote, self._remote_stamp = Settings(path).remote(), stamp
+            return self._remote
+
+    def terminal_enabled(self):
+        """True when the user asked for the terminal (--terminal, or remote.terminal in settings.json, read at
+        every call so deleting the key ends it at once) and the server is not read-only."""
+        return not self.readonly and (self.terminal_flag or self.terminal_settings()["terminal"])
+
+    def terminal_tick(self):
+        """Expiry and cleanup, on every terminal request and every few seconds: the shells go when the terminal
+        is off, and the ones nobody looks at, that got no keystroke for too long or whose token is gone."""
+        if self.terminal_enabled():
+            cfg = self.terminal_settings()
+            self.terminals.set_ttls(cfg["terminal_detached_minutes"] * 60.0, cfg["terminal_idle_minutes"] * 60.0)
+        else:
+            self.terminals.close_all("disabled")
+        self.terminals.sweep(self.tokens.fingerprint())
+
+    def start_janitor(self, every=5.0):
+        def run():
+            while not self._stop.wait(every):
+                try:
+                    self.terminal_tick()
+                except Exception as exc:  # noqa: BLE001 - the janitor never dies of one bad round
+                    self.log(f"terminal sweep failed: {type(exc).__name__}")
+        threading.Thread(target=run, name="terminal-janitor", daemon=True).start()
+
+    def _terminal_gate(self):
+        if self.readonly:
+            raise HttpError("readonly", "the terminal is off: this server is read-only")
+        if not self.terminal_enabled():
+            raise HttpError("terminal_disabled", "the terminal is off on this machine: it needs remote.terminal in settings.json or --terminal")
+
+    @staticmethod
+    def _term_error(exc):
+        code = {"limit": "conflict", "gone": "conflict", "busy": "terminal_busy", "spawn": "mux_failed"}.get(exc.code, "internal")
+        return HttpError(code, sanitize_line(exc.message, 120))
+
+    def _term_limits(self):
+        return {"input": T.MAX_INPUT, "cols": list(T.COLS_RANGE), "rows": list(T.ROWS_RANGE), "max": self.terminals.max_sessions,
+                "detached": int(self.terminals.detached_ttl), "idle": int(self.terminals.idle_ttl)}
+
+    def _terminal(self, req, key, token, path, query):
+        """/api/terminals: list (GET), open (POST), and per session out (GET), in, resize, close (POST). The token,
+        the Host and (for POST) the origin checks have passed; the terminal must be on and the server not read-only."""
+        m = re.fullmatch(r"/api/terminals(?:/([^/]+)/(out|in|resize|close))?", path)
+        if not m:
+            raise HttpError("not_found", "not found")
+        ident, action = m.groups()
+        if ident is None:
+            action = "list" if req.method == "GET" else "open"
+        elif (req.method == "GET") != (action == "out"):
+            raise HttpError("method_not_allowed", "method not allowed")
+        body = self._post_body(req) if req.method == "POST" else None
+        self.terminal_tick()
+        self._terminal_gate()
+        owner = _fingerprint(_token_digest(token))
+        if action == "list":
+            return Response(200, _json_body({"ok": True, "sessions": self.terminals.listing(owner), "limits": self._term_limits()}))
+        if action == "open":
+            return self._term_open(key, owner, body)
+        session = self.terminals.get(ident, owner)
+        if session is None:
+            raise HttpError("not_found", "no such terminal")
+        try:
+            if action == "out":
+                return self._term_out(req, session, urllib.parse.parse_qs(query))
+            if action == "in":
+                return self._term_in(session, body)
+            if action == "resize":
+                return self._term_resize(session, body)
+            self._fields(body, ())
+            self.terminals.close(session.id, owner, "client")
+            return Response(200, _json_body({"ok": True}))
+        except T.TermError as exc:
+            raise self._term_error(exc) from None
+
+    def _term_open(self, key, owner, body):
+        self._fields(body, ("cols", "rows"))
+        try:
+            cols, rows = T.valid_size(body.get("cols", T.DEFAULT_SIZE[0]), body.get("rows", T.DEFAULT_SIZE[1]))
+        except ValueError as exc:
+            raise HttpError("bad_request", str(exc)) from None
+        wait = self.term_open.take(key)
+        if wait > 0:
+            raise HttpError("rate_limited", "too many terminals opened: wait a few seconds",
+                            {"Retry-After": str(max(math.ceil(wait), 1))})
+        try:
+            session = self.terminals.open(cols, rows, owner)
+        except T.TermError as exc:
+            raise self._term_error(exc) from None
+        return Response(200, _json_body({"ok": True, **session.info(), "limits": self._term_limits()}))
+
+    def _term_out(self, req, session, q):
+        pos = self._int_param(q, "from", 0, 0, 1 << 62)
+        read = session.read(pos, self._wait_param(q), stop=self._stop, alive=req.alive)
+        if read is None:
+            raise ClientGone()
+        return Response(200, _json_body({**T.chunk_json(read), "in": session.in_seq, "cols": session.cols, "rows": session.rows}))
+
+    def _term_in(self, session, body):
+        self._fields(body, ("seq", "data"))
+        try:
+            seq, raw = T.parse_input(body)
+        except ValueError as exc:
+            raise HttpError("bad_request", str(exc)) from None
+        status, expected = session.send(seq, raw)
+        if status == "gap":
+            raise HttpError("conflict", "input out of sequence: carry the number given", None, **{"in": expected})
+        return Response(200, _json_body({"ok": True, "in": expected, "dup": status == "dup"}))
+
+    def _term_resize(self, session, body):
+        self._fields(body, ("cols", "rows", "redraw"))
+        redraw = body.get("redraw", False)
+        if not isinstance(redraw, bool):
+            raise HttpError("bad_request", "redraw must be true or false")
+        try:
+            cols, rows = T.valid_size(body.get("cols"), body.get("rows"))
+        except ValueError as exc:
+            raise HttpError("bad_request", str(exc)) from None
+        session.resize(cols, rows, redraw)
+        return Response(200, _json_body({"ok": True}))
 
 
 # ---------------------------------------------------------------- HTTP server
@@ -1544,6 +1843,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):
         method = sanitize_line(getattr(self, "command", "") or "", 16)
         path = sanitize_line(getattr(self, "path", "").split("?", 1)[0], 120)
+        if path.startswith("/api/terminals/"):
+            # A terminal's poll and keystroke requests would drown the log, and their paths hold session ids:
+            # only the ones that failed are logged, without the id (opening and closing log themselves).
+            if str(code) == "200":
+                return
+            path = "/api/terminals/*"
         self.app.log(f"{method} {path} {code}")
 
     def send_error(self, code, message=None, explain=None):
@@ -1746,6 +2051,8 @@ def build_parser():
     s.add_argument("--port", type=_port_arg, default=None, help=f"default {DEFAULT_PORT}, or HIVEGRID_REMOTE_PORT")
     s.add_argument("--token-file")
     s.add_argument("--read-only", action="store_true", default=_env_flag("HIVEGRID_REMOTE_READ_ONLY"))
+    s.add_argument("--terminal", action="store_true", default=_env_flag("HIVEGRID_REMOTE_TERMINAL"),
+                   help="allow a login shell on the phone page (or set remote.terminal in settings.json); never with --read-only")
     s.add_argument("--allow-host", action="append", default=[], metavar="HOST")
     s.add_argument("--socket", default=os.environ.get("HIVEGRID_REMOTE_SOCKET"))
     s.add_argument("--wezterm", default=os.environ.get("HIVEGRID_REMOTE_WEZTERM"))
@@ -1841,15 +2148,19 @@ def cmd_serve(args):
         return 1
     hosts = allowed_hosts(args)
     mux = Mux(locate=_locator(args), fg=_foreground)
-    app = App(mux, store, readonly=args.read_only, allow_hosts=hosts)
+    app = App(mux, store, readonly=args.read_only, allow_hosts=hosts, terminal=args.terminal)
     try:
         server = make_server((args.bind, args.port), app)
     except OSError as exc:
         print(f"hivegrid-remote: cannot listen on {args.bind}:{args.port}: {exc.strerror}", file=sys.stderr)
         return 1
     host, port = server.server_address[:2]
-    print(f"hivegrid-remote: listening on http://{f'[{host}]' if ':' in host else host}:{port}/"
-          + (" (read-only)" if args.read_only else ""), file=sys.stderr, flush=True)
+    note = " (read-only)" if args.read_only else (" (terminal on)" if app.terminal_enabled() else "")
+    print(f"hivegrid-remote: listening on http://{f'[{host}]' if ':' in host else host}:{port}/" + note,
+          file=sys.stderr, flush=True)
+    if args.read_only and args.terminal:
+        print("hivegrid-remote: --terminal is ignored: the server is read-only", file=sys.stderr, flush=True)
+    app.start_janitor()
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     try:
         server.serve_forever()

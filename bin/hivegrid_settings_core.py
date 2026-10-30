@@ -150,6 +150,29 @@ def agent_setting(stored):
     return stored if stored in AGENTS else AGENT_DEFAULT
 
 
+# ---- remote (hivegrid-remote, the phone page) --------------------------------------
+
+# settings.json "remote": terminal is true only when the user asked for a shell on the phone page
+# (hivegrid-remote reads it at every request, so deleting the key ends the terminals at once; nothing
+# but the literal true counts); terminal_detached_minutes and terminal_idle_minutes bound how long a shell
+# lives with nobody looking at it and without a keystroke. Only hivegrid-remote reads this; the Lua
+# config and the settings panel do not (the panel keeps the key when it saves other settings).
+REMOTE_DEFAULTS = {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60}
+REMOTE_MINUTES = (1, 24 * 60)
+
+
+def remote_settings(stored):
+    """The effective remote settings of the stored `remote` value: defaults for anything missing or invalid."""
+    stored = stored if isinstance(stored, dict) else {}
+    out = dict(REMOTE_DEFAULTS)
+    out["terminal"] = stored.get("terminal") is True
+    for key in ("terminal_detached_minutes", "terminal_idle_minutes"):
+        v = stored.get(key)
+        if type(v) is int and REMOTE_MINUTES[0] <= v <= REMOTE_MINUTES[1]:
+            out[key] = v
+    return out
+
+
 # ---- web pane ----------------------------------------------------------------------
 
 # settings.json "web": links "pane" (an http(s) link clicked in a terminal opens in a web pane)
@@ -636,6 +659,9 @@ class Settings:
 
     def agent(self):
         return agent_setting(self.data.get("agent"))
+
+    def remote(self):
+        return remote_settings(self.data.get("remote"))
 
     def effective(self):
         return {"version": SCHEMA, "theme": self.theme(), "keys": self.keys(), "accounts": self.accounts(),

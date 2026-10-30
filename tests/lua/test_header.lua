@@ -17,7 +17,7 @@ local function omp(wz, id, title, cwd)
 end
 
 local function module(wz, as)
-  as = as or { running = function() return { working = 0, busy = 0, attention = 0 } end, focus_dir = function() end }
+  as = as or { running = function() return { working = 0, busy = 0, attention = 0, limit = 0 } end, focus_dir = function() end }
   return require('header')({}, wz, as)
 end
 
@@ -92,6 +92,35 @@ T.test('the lead chip: project bold and bright, branch, then the agent states in
   T.ok(last:find('hivegrid-…', 1, true) and last:find('?1', 1, true) and not last:find('main', 1, true), last)
 end)
 
+T.test('a usage limit shows with the ⊘ glyph in the state colour, after needs you and before working', function(wz)
+  local hd = module(wz)
+  local theme = require 'theme'
+  local STATES = theme.STATES
+  T.eq({ STATES.limit.glyph, STATES.limit.text, STATES.limit.key }, { '⊘', 'limit', 'red' })
+  local counts = { working = 2, busy = 1, attention = 1, limit = 3 }
+  local tiers = hd.tiers { project = 'proj', counts = counts }
+  local text = plain(tiers[1].items)
+  T.ok(text:find('⊘ 3 limit', 1, true), text)
+  T.ok(text:find('needs you', 1, true) < text:find('limit', 1, true)
+    and text:find('limit', 1, true) < text:find('working', 1, true), 'order: needs you, limit, working: ' .. text)
+  for _, c in ipairs(T.render(tiers[1].items)) do
+    if c.ch == '⊘' then T.eq(c.fg, STATES.limit.color) end
+  end
+  local short = plain(tiers[4].items)
+  T.ok(short:find('⊘3', 1, true), short)
+  local alone = hd.tiers { project = 'p', counts = { working = 0, busy = 0, attention = 0, limit = 1 } }[1]
+  T.ok(plain(alone.items):find('⊘ 1 limit', 1, true) and not plain(alone.items):find('working', 1, true))
+end)
+
+T.test('the context model counts a limit as an agent that wants a look', function(wz)
+  local hd = module(wz, {
+    running = function() return { working = 0, busy = 0, attention = 0, limit = 1 } end,
+    focus_dir = function() end,
+  })
+  local m = hd.context({ active_workspace = function() return 'default' end })
+  T.eq(m and m.counts.limit, 1, 'no project and no workspace, but a limit: the chip still shows')
+end)
+
 T.test('the lead chip keeps the workspace, cuts long names, and shows nothing when there is nothing', function(wz)
   local hd = module(wz)
   local long = hd.tiers { workspace = 'review', project = string.rep('x', 40), counts = COUNTS }
@@ -99,7 +128,8 @@ T.test('the lead chip keeps the workspace, cuts long names, and shows nothing wh
   T.ok(plain(long[1].items):find('…', 1, true), 'a name past 28 characters is cut')
   T.ok(not plain(long[2].items):find('review', 1, true), 'the workspace is the first thing to go')
   T.eq(hd.tiers(nil), {})
-  T.eq(hd.tiers({ counts = { working = 0, busy = 0, attention = 0 } })[1].w, 0)
+  T.eq(hd.tiers({ counts = { working = 0, busy = 0, attention = 0, limit = 0 } })[1].w, 0)
+  T.eq(hd.tiers({ counts = { working = 0, busy = 0, attention = 0 } })[1].w, 0, 'a model without a limit count')
 end)
 
 T.test('the agent counts are one click target and name only states that want a look', function(wz)

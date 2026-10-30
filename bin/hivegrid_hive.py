@@ -24,10 +24,10 @@ except Exception:  # noqa: BLE001 - no PIL: block characters
     Image = ImageDraw = None
 
 # The hive's states in legend order; glyphs, words and colours come from the shared table.
-STATES = ("working", "busy", "attention", "done", "idle", "exited")
+STATES = ("working", "busy", "attention", "limit", "done", "idle", "exited")
 GLYPH = {s: U.STATES[s].glyph for s in STATES}
 WORD = {s: U.STATES[s].label for s in STATES}
-BUSY_STATES = ("working", "busy", "attention")
+BUSY_STATES = ("working", "busy", "attention", "limit")
 ADD = "add"
 PEEK_LINES = 10
 HOVER_LIGHT = 0.16  # a hovered cell's fill moves this far toward `bright`
@@ -185,6 +185,18 @@ def human_age(seconds):
     return f"{s // 86400}d"
 
 
+def limit_reset(agent, now):
+    """'resets in 2h05m' for a limit agent whose reset time is known; '' when it is unknown,
+    malformed or no longer ahead of `now`."""
+    if agent.state != "limit":
+        return ""
+    info = getattr(agent, "limit", None)
+    reset = info.get("reset_at") if isinstance(info, dict) else None
+    if isinstance(reset, bool) or not isinstance(reset, (int, float)) or not abs(reset) < 1e12 or reset <= now:
+        return ""
+    return "resets in " + human_age(reset - now)
+
+
 def short(text, w):
     """One line of at most w terminal cells (whitespace collapsed), with an ellipsis when cut."""
     return U.fit_cells(" ".join(str(text).split()), max(w, 0))
@@ -323,7 +335,7 @@ class HivePage(U.Page):
         except Exception as e:  # noqa: BLE001 - the page must survive a broken core
             agents, error = self.agents, f"agents: {e}"
         agents.sort(key=lambda a: a.pane)
-        sig = lambda lst: [(a.pane, a.tab, a.state, a.reason, a.cwd, a.title, a.active, a.error, repr(a.pending)) for a in lst]
+        sig = lambda lst: [(a.pane, a.tab, a.state, a.reason, a.cwd, a.title, a.active, a.error, repr(a.pending), repr(getattr(a, "limit", None))) for a in lst]
         changed = sig(agents) != sig(self.agents) or error != self.error
         if self.origin is None:
             try:
@@ -544,9 +556,13 @@ class HivePage(U.Page):
         else:
             ui.say(f"could not activate pane {agent.pane}", True)
 
+    def ackable(self, agent):
+        """done, or a limit whose reset has passed (the account answers again, nothing else clears it)."""
+        return agent.state == "done" or (agent.state == "limit" and self.core().limit_expired(agent, self.now()))
+
     def ack(self, ui, agent):
-        if agent.state != "done":
-            ui.say("only a done agent can be acknowledged", True)
+        if not self.ackable(agent):
+            ui.say("only a done agent, or one whose limit has reset, can be acknowledged", True)
             return
         self.core().ack(agent)
         self._force = True
@@ -870,14 +886,17 @@ class HivePage(U.Page):
         p = ui.pal
         counts = self.counts()
         cv.fill(x, y, w, 1, bg=p["base"])
-        full = "  ".join(f"{GLYPH[s]} {WORD[s]} {counts[s]}" for s in STATES)
+        # `limit` is rare: it takes a place in the legend only while an agent is stopped on a limit, so the
+        # other states keep their room (and the "+ web" chip its place) on a narrow panel.
+        shown = [s for s in STATES if s != "limit" or counts[s]]
+        full = "  ".join(f"{GLYPH[s]} {WORD[s]} {counts[s]}" for s in shown)
         away = sum(1 for a in self.agents if self.elsewhere(a))
         n = len(self.agents)
         right = (f"{n} agent{'' if n == 1 else 's'}" + (f" ({away} in other tabs · g gathers)" if away else "") + " · "
                  + ("tiles" if self.mode == "tile" or self.fallback else "hex"))
         use_full = len(full) + len(right) + 4 <= w
         cx = x + 1
-        for s in STATES:
+        for s in shown:
             text = f"{GLYPH[s]} {WORD[s]} {counts[s]}" if use_full else f"{GLYPH[s]}{counts[s]}"
             col = state_color(p, s) if counts[s] else p["dim"]
             cv.put(cx, y, text[0], col, None, BOLD)
@@ -1132,7 +1151,7 @@ class HivePage(U.Page):
         age = human_age(self.now() - agent.since) if agent.since else ""
         state_text = f"{GLYPH.get(agent.state, '·')} {WORD.get(agent.state, agent.state)}"
         cv.put(ix, row, state_text, edge, bg, BOLD)
-        rest = " · ".join(t for t in (age, agent.reason) if t)
+        rest = " · ".join(t for t in (age, None if agent.state == "limit" else agent.reason, limit_reset(agent, self.now())) if t)
         cv.put(ix + len(state_text), row, clip(" · " + " ".join(rest.split()) if rest else "", iw - len(state_text)), p["text"], bg)
         row += 1
         # The title names the agent by its number; the internal pane id would read as another one.
@@ -1169,11 +1188,13 @@ class HivePage(U.Page):
             note = "Answer it in the pane (j jumps there)"
         elif agent.state == "exited":
             note = "Prompt off: the agent has exited"
+        elif agent.state == "limit":
+            note = "Limit hit: switch account, then send"
         elif agent.state in ("working", "busy"):
             note = "Agent is busy: a message may be queued until it is done"
         else:
             note = "Enter sends the line to the agent"
-        cv.put(ix, note_y, short(note, iw), p["amber"] if agent.state in ("attention", "working", "busy") else p["dim"], bg)
+        cv.put(ix, note_y, short(note, iw), p["amber"] if agent.state in ("attention", "limit", "working", "busy") else p["dim"], bg)
         field = p["deep"] if enabled else bg
         cv.fill(ix, input_y, iw, 1, bg=field)
         text = self.drafts.get(agent.pane, "")
@@ -1191,6 +1212,6 @@ class HivePage(U.Page):
             cv.put(ix, input_y, "› " + short(text or "prompt disabled", iw - 2), p["dim"], field, DIM)
         bx = ix
         bx += U.chip(cv, p, bx, btn_y, "Jump", kind="primary", bg=bg, hit=lambda b: self.jump(ui, agent)) + 1
-        bx += U.chip(cv, p, bx, btn_y, "Ack", kind="button" if agent.state == "done" else "disabled", bg=bg,
+        bx += U.chip(cv, p, bx, btn_y, "Ack", kind="button" if self.ackable(agent) else "disabled", bg=bg,
                      hit=lambda b: self.ack(ui, agent)) + 1
         U.chip(cv, p, bx, btn_y, "Delete", kind="button", bg=bg, hit=lambda b: self.delete(ui, agent))

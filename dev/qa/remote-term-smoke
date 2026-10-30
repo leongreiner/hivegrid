@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""The remote terminal through the real hivegrid-remote server (no GUI, no fork build, no browser needed).
+
+The server runs from this repository in a throwaway HOME with a temp token and temp settings.json, bound
+to a random loopback port, with an empty XDG_RUNTIME_DIR (it cannot find the user's Hivegrid) and the
+WEZTERM_* variables removed. Nothing outside the temp directory is written and no installed copy is touched.
+Checks:
+
+  1 default (no settings, no flag): /api/meta says terminal false, every /api/terminals call is 403
+    terminal_disabled, /term.js is still public
+  2 settings.json `remote.terminal: true`: open, `echo hello-$((6*7))` prints hello-42, resize shows in
+    `stty size`, a dropped connection reattaches to the same shell with its variable, close
+  3 the shell is a login shell of the user in $HOME with TERM set, without the server's HIVEGRID_REMOTE_*
+  4 a fourth open within seconds is rate limited; the shells limit answers 409
+  5 removing the key from settings.json ends the terminals at once (403 and the shell process is gone)
+  6 `--terminal` alone turns it on; a token rotation ends the terminals opened with the old token
+  7 `--read-only` (with or without --terminal) refuses with 403 readonly and /api/meta says terminal false
+
+  dev/qa/remote-term-smoke [--keep]    --keep leaves the temp directory and prints it
+
+Exits 1 when a check fails. Never runs tailscale, install.sh or sync.sh.
+"""
+import base64
+import re
+import http.client
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SERVE = os.path.join(ROOT, "bin", "hivegrid-remote")
+KEEP = "--keep" in sys.argv
+
+TMP = tempfile.mkdtemp(prefix="hg-term-smoke-")
+HOME = os.path.join(TMP, "home")
+RUN = os.path.join(TMP, "run")
+TOKEN_FILE = os.path.join(TMP, "token")
+SETTINGS = os.path.join(HOME, ".config", "hivegrid", "settings.json")
+fails = []
+server = None
+port = 0
+token = ""
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  ({detail})" if not ok and detail else ""))
+    if not ok:
+        fails.append(name)
+    return ok
+
+
+def env():
+    e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME, "XDG_RUNTIME_DIR": RUN,
+         "SHELL": "/bin/bash", "LANG": "C.UTF-8", "HIVEGRID_REMOTE_SECRET_PROBE": "do-not-leak"}
+    return e
+
+
+def cli(*args):
+    return subprocess.run([sys.executable, SERVE, *args], env=env(), capture_output=True, text=True, timeout=30)
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def stop():
+    global server
+    if server and server.poll() is None:
+        server.send_signal(signal.SIGTERM)
+        try:
+            server.wait(8)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    server = None
+
+
+def start(*extra):
+    global server, port
+    stop()
+    port = free_port()
+    log = open(os.path.join(TMP, "server.log"), "ab")
+    server = subprocess.Popen([sys.executable, SERVE, "serve", "--port", str(port), "--token-file", TOKEN_FILE, *extra],
+                              env=env(), stdout=log, stderr=log)
+    end = time.time() + 10
+    while time.time() < end:
+        try:
+            if request("GET", "/healthz", tok=None)[0] == 200:
+                return True
+        except OSError:
+            pass
+        time.sleep(0.1)
+    return False
+
+
+def request(method, path, body=None, tok=True, headers=None, timeout=20):
+    h = dict(headers or {})
+    t = token if tok is True else tok
+    if t:
+        h["Authorization"] = "Bearer " + t
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+        h["X-Hivegrid-Remote"] = "1"
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        c.request(method, path, body=data, headers=h)
+        r = c.getresponse()
+        raw = r.read().decode("utf-8", "replace")
+    finally:
+        c.close()
+    try:
+        return r.status, json.loads(raw)
+    except ValueError:
+        return r.status, raw
+
+
+_NOISE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\r")
+
+
+def plain(text):
+    """The output without escape sequences (prompt marks, window titles) and carriage returns."""
+    return _NOISE.sub("", text)
+
+
+class Term:
+    """A client of one terminal, like the page: output from a position, numbered input."""
+
+    def __init__(self, doc):
+        self.id, self.pos, self.seq, self.text = doc["id"], 0, doc.get("in", 0), ""
+
+    def poll(self, wait=0):
+        st, d = request("GET", f"/api/terminals/{self.id}/out?from={self.pos}&wait={wait}")
+        if st == 200:
+            self.text += base64.b64decode(d["data"]).decode("utf-8", "replace")
+            self.pos = d["next"]
+        return st, d
+
+    def type(self, data):
+        st, d = request("POST", f"/api/terminals/{self.id}/in", {"seq": self.seq, "data": data})
+        if st == 200:
+            self.seq = d["in"]
+        return st, d
+
+    def clean(self):
+        return plain(self.text)
+
+    def until(self, needle, timeout=8):
+        """True once `needle` shows on a line of its own (the typed command line, which also holds it, does not count)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if needle in self.clean():
+                return True
+            self.poll(wait=1)
+        return needle in self.clean()
+
+    def pid(self):
+        self.type("echo pid=$$\r")
+        end = time.time() + 8
+        while time.time() < end:
+            m = re.search(r"^pid=(\d+)$", self.clean(), re.M)
+            if m:
+                return int(m.group(1))
+            self.poll(wait=1)
+        return None
+
+
+def open_term(cols=100, rows=30):
+    st, d = request("POST", "/api/terminals", {"cols": cols, "rows": rows})
+    return (Term(d) if st == 200 else None), st, d
+
+
+def pid_gone(pid):
+    end = time.time() + 5
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def section_default():
+    print("-- 1 off by default")
+    check("1 server starts", start())
+    st, meta = request("GET", "/api/meta")
+    check("1 /api/meta says terminal false", st == 200 and meta.get("terminal") is False and "terminal" not in meta["capabilities"], str(meta)[:200])
+    for method, path, body in (("GET", "/api/terminals", None), ("POST", "/api/terminals", {"cols": 80, "rows": 24})):
+        st, d = request(method, path, body)
+        check(f"1 {method} {path} is 403 terminal_disabled", st == 403 and d.get("error") == "terminal_disabled", f"{st} {d}")
+    st, _ = request("GET", "/api/terminals", tok=None)
+    check("1 no token is 401 before anything else", st == 401)
+    st, js = request("GET", "/term.js", tok=None)
+    check("1 /term.js is public static", st == 200 and "HGTerm" in js)
+    st, js = request("GET", "/term-view.js", tok=None)
+    check("1 /term-view.js is public static", st == 200 and "HGTermView" in js)
+
+
+def section_enabled():
+    print("-- 2 enabled by settings.json")
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    with open(SETTINGS, "w") as f:
+        json.dump({"remote": {"terminal": True}}, f)
+    st, meta = request("GET", "/api/meta")
+    check("2 meta says terminal true without a restart", st == 200 and meta.get("terminal") is True and "terminal" in meta["capabilities"])
+    t, st, d = open_term(100, 30)
+    if not check("2 open", t is not None, f"{st} {d}"):
+        return None
+    check("2 the open answer has the limits", d.get("limits", {}).get("max") == 4, str(d.get("limits")))
+    t.until("$ ")
+    print(f"     first prompt: {t.clean().strip()[-60:]!r}")
+    t.type("echo hello-$((6*7))\r")
+    check("2 echo hello-$((6*7)) prints hello-42", t.until("\nhello-42\n"), repr(t.clean()[-200:]))
+    print(f"     output: {t.clean().strip()[-120:]!r}")
+    st, d = request("POST", f"/api/terminals/{t.id}/resize", {"cols": 120, "rows": 40, "redraw": False})
+    check("2 resize accepted", st == 200, str(d))
+    t.type("stty size\r")
+    check("2 stty size shows the new size (40 120)", t.until("\n40 120\n"), repr(t.clean()[-120:]))
+    t.type("keep=state-kept\r")
+    pid = t.pid()
+    # the input retry: the same number again is answered as a duplicate and typed once
+    n = t.seq
+    st, d = request("POST", f"/api/terminals/{t.id}/in", {"seq": n - 1, "data": "echo twice\r"})
+    check("2 a repeated input number is a dup, not typed twice", st == 200 and d.get("dup") is True, f"{st} {d}")
+    st, d = request("POST", f"/api/terminals/{t.id}/in", {"seq": n + 5, "data": "x"})
+    check("2 an input number from the future is 409 with the number to use", st == 409 and d.get("in") == n, f"{st} {d}")
+    # drop the connection in the middle of a held poll, then reattach from where the page stopped
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    c.sendall((f"GET /api/terminals/{t.id}/out?from={t.pos}&wait=20 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+               f"Authorization: Bearer {token}\r\n\r\n").encode())
+    time.sleep(0.3)
+    c.close()
+    seen = t.pos
+    fresh = Term({"id": t.id, "in": t.seq})
+    st, d = fresh.poll()
+    check("2 a new connection reads the whole screen history from 0", st == 200 and "hello-42" in fresh.clean() and d["reset"] is False, repr(fresh.clean()[:80]))
+    fresh.type("echo $keep\r")
+    check("2 the same shell answers with its variable after the drop", fresh.until("\nstate-kept"), repr(fresh.clean()[-120:]))
+    check("2 and `twice` was never typed", "\ntwice\n" not in fresh.clean(), repr(fresh.clean()[-200:]))
+    print(f"     reattached: from {seen} the shell printed {fresh.clean()[-60:].strip()!r}")
+    st, d = request("GET", "/api/terminals")
+    check("2 the list holds the session", st == 200 and [s["id"] for s in d["sessions"]] == [t.id], str(d))
+    st, d = request("POST", f"/api/terminals/{t.id}/close", {})
+    check("2 close", st == 200, str(d))
+    check("2 the shell process is gone", pid_gone(pid))
+    st, d = request("GET", f"/api/terminals/{t.id}/out")
+    check("2 a closed terminal is 404", st == 404, f"{st} {d}")
+    return t
+
+
+def section_shell():
+    print("-- 3 the shell")
+    t, st, d = open_term()
+    if not check("3 open", t is not None, f"{st} {d}"):
+        return
+    t.until("$ ")
+    t.type("echo [$TERM][$HOME][$(pwd)][$SHELL]; env | grep -c HIVEGRID_REMOTE; shopt -q login_shell && echo login-yes; whoami\r")
+    t.until("\nlogin-yes\n")
+    check("3 TERM, HOME, cwd and SHELL", f"[xterm-256color][{HOME}][{HOME}][/bin/bash]" in t.clean(), repr(t.clean()[-300:]))
+    check("3 no server secret in the shell's environment", "\n0\n" in t.clean(), repr(t.clean()[-200:]))
+    check("3 it is a login shell", "login-yes" in t.clean())
+    check("3 the whole answer is plain text for the page (base64 chunks, no secrets)", token not in t.clean())
+    request("POST", f"/api/terminals/{t.id}/close", {})
+
+
+def section_limits():
+    print("-- 4 limits")
+    start()   # a fresh open allowance
+    made = []
+    codes = []
+    for i in range(5):
+        t, st, d = open_term(80, 24)
+        codes.append(st)
+        if t:
+            made.append(t)
+    check("4 three opens in a burst, then 429", codes[:3] == [200, 200, 200] and codes[3] == 429, str(codes))
+    st, d = request("POST", "/api/terminals", {"cols": 5, "rows": 24})
+    check("4 a size out of range is 400", st in (400, 429), f"{st} {d}")
+    for t in made:
+        request("POST", f"/api/terminals/{t.id}/close", {})
+
+
+def section_off_again():
+    print("-- 5 removing the setting ends the terminals")
+    start()
+    t, st, d = open_term()
+    if not check("5 open", t is not None, f"{st} {d}"):
+        return
+    t.until("$ ")
+    pid = t.pid()
+    os.remove(SETTINGS)
+    st, d = request("GET", "/api/terminals")
+    check("5 the very next request is refused", st == 403 and d.get("error") == "terminal_disabled", f"{st} {d}")
+    check("5 the shell is gone", pid_gone(pid))
+    st, meta = request("GET", "/api/meta")
+    check("5 meta says terminal false again", meta.get("terminal") is False)
+
+
+def section_flag_and_rotation():
+    print("-- 6 --terminal and token rotation")
+    global token
+    check("6 server restarts with --terminal", start("--terminal"))
+    st, meta = request("GET", "/api/meta")
+    check("6 --terminal is on without settings", meta.get("terminal") is True)
+    t, st, d = open_term()
+    if not check("6 open", t is not None, f"{st} {d}"):
+        return
+    t.until("$ ")
+    pid = t.pid()
+    old = token
+    r = cli("token", "--rotate", "--token-file", TOKEN_FILE)
+    token = r.stdout.strip()
+    st, _ = request("GET", "/api/terminals", tok=old)
+    check("6 the old token is 401", st == 401)
+    st, d = request("GET", "/api/terminals")
+    check("6 the new token sees no terminals", st == 200 and d["sessions"] == [], str(d))
+    check("6 the shell opened with the old token ended", pid_gone(pid))
+
+
+def section_readonly():
+    print("-- 7 --read-only")
+    for extra in (("--read-only",), ("--read-only", "--terminal")):
+        check(f"7 server starts with {' '.join(extra)}", start(*extra))
+        st, meta = request("GET", "/api/meta")
+        check("7 meta says terminal false", meta.get("terminal") is False and meta.get("readonly") is True)
+        for method, path, body in (("GET", "/api/terminals", None), ("POST", "/api/terminals", {"cols": 80, "rows": 24})):
+            st, d = request(method, path, body)
+            check(f"7 {method} {path} is 403 readonly", st == 403 and d.get("error") == "readonly", f"{st} {d}")
+
+
+def main():
+    global token
+    os.makedirs(HOME)
+    os.makedirs(RUN, mode=0o700)
+    os.chmod(TMP, 0o700)
+    with open(os.path.join(HOME, ".profile"), "w") as f:
+        f.write("PS1='$ '\n")
+    token = cli("token", "--token-file", TOKEN_FILE).stdout.strip()
+    check("0 a token was written to the temp file only", len(token) >= 20 and os.path.isfile(TOKEN_FILE))
+    try:
+        section_default()
+        section_enabled()
+        section_shell()
+        section_limits()
+        section_off_again()
+        section_flag_and_rotation()
+        section_readonly()
+    finally:
+        stop()
+        if KEEP:
+            print(f"kept {TMP}")
+        else:
+            shutil.rmtree(TMP, ignore_errors=True)
+    print("FAILED: " + "; ".join(fails) if fails else "all checks passed")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

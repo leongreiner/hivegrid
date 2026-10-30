@@ -593,15 +593,16 @@ class State(collections.namedtuple("State", "glyph label color rank")):
 # The state table, shared with config/theme.lua (theme.STATES): keep both in step.
 STATES = {
     "attention": State("?", "needs you", "violet", 1),
-    "bell": State("!", "bell", "red", 2),
-    "done": State("✓", "done", "green", 3),
-    "busy": State("◔", "busy", "amber", 4),
-    "working": State("↻", "working", "accent", 5),
-    "idle": State("·", "idle", "grey", 6),
-    "exited": State("○", "exited", "muted", 7),
-    "web": State("◍", "web", "cyan", 8),
-    "other": State("›", "running", "dim", 9),
-    "shell": State("›", "shell", "dim", 10),
+    "limit": State("⊘", "limit", "red", 2),
+    "bell": State("!", "bell", "red", 3),
+    "done": State("✓", "done", "green", 4),
+    "busy": State("◔", "busy", "amber", 5),
+    "working": State("↻", "working", "accent", 6),
+    "idle": State("·", "idle", "grey", 7),
+    "exited": State("○", "exited", "muted", 8),
+    "web": State("◍", "web", "cyan", 9),
+    "other": State("›", "running", "dim", 10),
+    "shell": State("›", "shell", "dim", 11),
 }
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # drawn instead of ↻ while something runs, at 8 frames a second
 

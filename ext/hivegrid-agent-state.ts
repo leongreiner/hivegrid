@@ -22,7 +22,7 @@ import * as path from "node:path";
 // Pure state machine
 // ---------------------------------------------------------------------------------
 
-export type AgentStateName = "working" | "busy" | "done" | "idle" | "attention";
+export type AgentStateName = "working" | "busy" | "done" | "idle" | "attention" | "limit";
 
 export type Pending =
 	| { kind: "plan_review"; reviewId: string; title: string; choices: { id: string; label: string }[] }
@@ -33,6 +33,13 @@ export interface ToolRun {
 	name: string;
 	start: number;
 	summary: string;
+}
+
+export interface LimitInfo {
+	/** epoch seconds of the request that was refused */
+	hit_at: number;
+	/** epoch seconds the account's window reopens (the refusal's retry-after added to hit_at), null when it named none */
+	reset_at: number | null;
 }
 
 export interface AgentModel {
@@ -49,12 +56,14 @@ export interface AgentModel {
 	jobs: number;
 	tools: Record<string, ToolRun>;
 	approvalPending: boolean;
+	/** the loop that just ended stopped on the account's usage limit (settles to `limit` instead of `done`) */
+	limit: LimitInfo | null;
 }
 
 export type HiveEvent =
 	| { type: "agent_start" }
-	| { type: "agent_end"; jobs?: number }
-	| { type: "session_stop"; jobs?: number }
+	| { type: "agent_end"; jobs?: number; limit?: LimitInfo | null }
+	| { type: "session_stop"; jobs?: number; limit?: LimitInfo | null }
 	| { type: "tool_start"; id: string; name: string; args?: unknown }
 	| { type: "tool_end"; id: string; name?: string; isError?: boolean; errorText?: string }
 	| { type: "approval_requested"; tool: string; summary?: string }
@@ -80,6 +89,7 @@ export function initialModel(now: number): AgentModel {
 		jobs: 0,
 		tools: {},
 		approvalPending: false,
+		limit: null,
 	};
 }
 
@@ -192,6 +202,9 @@ function settle(m: AgentModel, now: number): AgentModel {
 	} else if (m.jobs > 0) {
 		state = "busy";
 		reason = m.jobs === 1 ? "1 background job" : `${m.jobs} background jobs`;
+	} else if (m.limit) {
+		state = "limit";
+		reason = "usage limit";
 	} else {
 		state = m.started ? "done" : "idle";
 		reason = null;
@@ -206,7 +219,7 @@ export function reduce(m: AgentModel, ev: HiveEvent, now: number): AgentModel {
 	let n: AgentModel = m;
 	switch (ev.type) {
 		case "agent_start":
-			n = { ...m, running: true, started: true, tools: {}, pending: null, approvalPending: false };
+			n = { ...m, running: true, started: true, tools: {}, pending: null, approvalPending: false, limit: null };
 			break;
 		case "agent_end":
 		case "session_stop":
@@ -219,11 +232,12 @@ export function reduce(m: AgentModel, ev: HiveEvent, now: number): AgentModel {
 				pending: m.pending?.kind === "plan_review" ? m.pending : null,
 				approvalPending: false,
 				jobs: ev.jobs ?? m.jobs,
+				limit: ev.limit ?? null,
 			};
 			break;
 		case "tool_start": {
 			const tools = { ...m.tools, [ev.id]: { name: ev.name, start: now, summary: summarizeArgs(ev.args) } };
-			n = { ...m, tools, running: true, started: true };
+			n = { ...m, tools, running: true, started: true, limit: null };
 			if (ev.name === "ask") {
 				const a = extractAsk(ev.args);
 				n = { ...n, pending: { kind: "ask", question: a.question, options: a.options } };
@@ -435,6 +449,49 @@ export function usageDoc(stats: unknown, providers: Iterable<string>): UsageDoc 
 	return doc;
 }
 
+/** A refusal that tells to retry sooner than this is a burst limit omp retries by itself, not the account's window. */
+export const LIMIT_MIN_RETRY_S = 60;
+const LIMIT_MAX_RETRY_S = 400 * 86400;
+
+/**
+ * Does the session entry `entry` (omp's persisted `{type: "message", message}`) end a turn on the
+ * account's usage limit? Seen in real session files: an assistant message with `stopReason: "error"`,
+ * `errorStatus: 429` and an `errorMessage` of the form
+ *   429 {"type":"error","error":{"type":"rate_limit_error",...},"request_id":"..."} retry-after-ms=14523000
+ * `retry-after-ms` is the time until the 5-hour or weekly window reopens (it matches the reset time
+ * claude-quota reports). Without it the limit is still reported, with no reset time.
+ */
+export function limitOfEntry(entry: unknown): LimitInfo | null {
+	const e = asRecord(entry);
+	const msg = asRecord(e.message);
+	if (e.type !== "message" || msg.role !== "assistant" || msg.stopReason !== "error") return null;
+	const text = typeof msg.errorMessage === "string" ? msg.errorMessage : "";
+	if (!(msg.errorStatus === 429 || /^\s*429\b/.test(text))) return null;
+	if (!/rate_limit_error|usage[_ ]limit|insufficient_quota/i.test(text)) return null;
+	const m = /retry-after-ms=(\d{1,12})(?!\d)/.exec(text);
+	const retryS = m ? Number(m[1]) / 1000 : null;
+	if (retryS !== null && retryS < LIMIT_MIN_RETRY_S) return null;
+	const ms = amount(msg.completedAt) ?? amount(msg.timestamp) ?? (typeof e.timestamp === "string" ? Date.parse(e.timestamp) : NaN);
+	if (!(typeof ms === "number" && Number.isFinite(ms) && ms > 0)) return null;
+	const hit = Math.round(ms) / 1000;
+	return { hit_at: hit, reset_at: retryS !== null && retryS <= LIMIT_MAX_RETRY_S ? Math.round((hit + retryS) * 1000) / 1000 : null };
+}
+
+/**
+ * The limit the loop that just ended stopped on: the last message of the session is an assistant
+ * message that `limitOfEntry` accepts. Entries that are not messages (usage records, notes) are
+ * skipped; a user message or tool result after the refusal means the chat went on.
+ */
+export function limitFromEntries(entries: unknown): LimitInfo | null {
+	if (!Array.isArray(entries)) return null;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = asRecord(entries[i]);
+		if (e.type !== "message") continue;
+		return limitOfEntry(e);
+	}
+	return null;
+}
+
 export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<string, unknown> {
 	return {
 		v: 1,
@@ -455,6 +512,7 @@ export function toDoc(m: AgentModel, meta: DocMeta, updated: number): Record<str
 		updated,
 		pending: m.pending,
 		error: m.error,
+		limit: m.state === "limit" ? m.limit : null,
 	};
 }
 
@@ -681,6 +739,15 @@ export default function hivegridAgentState(pi: any): void {
 			}
 		};
 
+		/** The limit the loop that just ended stopped on (see `limitFromEntries`), null when it did not. */
+		const loopLimit = (ctx: any): LimitInfo | null => {
+			try {
+				return limitFromEntries(ctx?.sessionManager?.getEntries?.());
+			} catch {
+				return null;
+			}
+		};
+
 		const apply = (ev: HiveEvent) => {
 			try {
 				model = reduce(model, ev, nowS());
@@ -802,11 +869,11 @@ export default function hivegridAgentState(pi: any): void {
 		);
 		pi.on(
 			"agent_end",
-			guard((_e, ctx) => apply({ type: "agent_end", jobs: jobCount(ctx) })),
+			guard((_e, ctx) => apply({ type: "agent_end", jobs: jobCount(ctx), limit: loopLimit(ctx) })),
 		);
 		pi.on(
 			"session_stop",
-			guard((_e, ctx) => apply({ type: "session_stop", jobs: jobCount(ctx) })),
+			guard((_e, ctx) => apply({ type: "session_stop", jobs: jobCount(ctx), limit: loopLimit(ctx) })),
 		);
 		pi.on(
 			"tool_execution_start",

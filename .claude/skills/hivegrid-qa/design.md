@@ -44,13 +44,14 @@ The table is `U.STATES` in `bin/hivegrid_ui.py`; its Lua twin is `theme.STATES` 
 | working | ↻ (spinner) | working | accent |
 | busy | ◔ | busy | amber |
 | attention | ? | needs you | violet |
+| limit | ⊘ | limit | red |
 | done | ✓ | done | green |
 | idle | · | idle | grey |
 | exited | ○ | exited | muted |
 | bell | ! | bell | red |
 | shell | › | shell | dim |
 
-A shell at its prompt is `shell`. `exited` appears only after an agent ran in that pane.
+A shell at its prompt is `shell`. `exited` appears only after an agent ran in that pane. `limit` is an agent whose last turn stopped on the account's usage limit (5 h or weekly): not working, not done, the user must switch account or wait; it wants a look like `attention`, sorts right after it, and is never closed without asking.
 
 ## Components (`bin/hivegrid_ui.py`)
 

@@ -14,3 +14,5 @@ Clicking an account pill (or `Alt+q`, or `LEADER+u <n>`) in a pane that runs a s
 4. `omp --profile=<new> --resume '<copy>'` continues the same chat (a fresh `omp --profile=<new>` when no message was written yet; a `cd` first when the shell is not where omp ran).
 
 If the pane looks busy (agent working or asking), a dialog asks "switch anyway?" first, default No; Yes sends `Esc` (omp's interrupt) before quitting.
+
+The phone page moves a chat the same way (after a usage limit or from the Actions sheet) but is stricter and counts five steps. It refuses with `409 agent_not_ready` while the agent works, is busy, waits for an answer or has exited, and asks no "switch anyway?" question, so it never sends `Esc`; it also checks that omp is still the program in front in the pane before it sends `Ctrl+D`. Its steps are locate, `Ctrl+D`, waiting for the shell, transfer and typing the resume line (the four above, with the wait counted on its own); see [Switching account in remote.md](remote.md#switching-account).

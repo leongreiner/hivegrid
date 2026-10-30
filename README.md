@@ -35,12 +35,12 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 ## Features
 
 - **Agent grid**: `omp-grid` starts one agent per pane (omp or Claude Code, chosen in the settings); panes stay where you put them and are arranged, equalized, rotated, swapped and zoomed only when you ask, and can all be typed into at once (broadcast).
-- **Overview dock**: every pane with its number, state (working, busy, needs you, done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
+- **Overview dock**: every pane with its number, state (working, busy, needs you, limit when the account's usage limit stopped the agent, done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
 - **Accounts and usage**: Claude Code usage (5 h and 7 d) of every account in the header; switch an account from a running chat without losing it.
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings, accounts, the web browser and the agent (omp or Claude Code).
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, with a header row (back, forward, reload, address and search field, Google by default) that `LEADER+w h` collapses, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
-- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes), answer approvals and plan reviews with buttons, change an agent's model and thinking level, start a new session on any of your accounts, and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
+- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes), answer approvals and plan reviews with buttons, change an agent's model and thinking level, see which agents stopped on their account's usage limit (and when it reopens) and move their chat to another account, start a new session on any of your accounts, and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
 - **Session restore**: the layout (windows, tabs, splits and their sizes) and what ran in each pane (omp chats resumed with `--restore`, web pages, shells in their directories) is kept on disk and built again at the next start, after a crash or a power loss.
 - **Polish**: hover feedback, one themed picker for every list, a calm header (project, branch and running agents first, usage and system stats as quiet text), header pills for the active mode, five colour themes (Graphite by default).
 
@@ -89,7 +89,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 | `Ctrl+Shift+A` | arrange the panes into the grid that reads best (only when you press it, or click `⊞` in the dock) |
 | `LEADER+e`, `Ctrl+Shift+E` | equalize all dividers |
 | `LEADER+o` | show or hide the overview dock |
-| `Alt+n` | jump to the next agent that needs you (needs-you or bell state), across tabs; a toast says when none does |
+| `Alt+n` | jump to the next agent that needs you (needs-you, limit or bell state), across tabs; a toast says when none does |
 | `LEADER+g` | agent picker |
 | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | `LEADER+w`, then `n` | new web pane |
@@ -162,7 +162,8 @@ Releases are published by hand: Actions, "Release", "Run workflow" with a tag su
 | [docs/keys.md](docs/keys.md) | every key binding |
 | [docs/accounts-and-quota.md](docs/accounts-and-quota.md) | how usage is read, account precedence, moving a chat between accounts |
 | [docs/features.md](docs/features.md) | every feature in detail |
-| [docs/remote.md](docs/remote.md) | control the agents from a phone over Tailscale: token, `tailscale serve`, systemd unit, API, threat model |
+| [docs/remote.md](docs/remote.md) | control the agents from a phone over Tailscale: token, `tailscale serve`, systemd unit, API, the optional phone terminal (off by default), threat model |
+| [docs/autostart.md](docs/autostart.md) | come back by itself after a crash or reboot: restart units, kernel faults to reboot, watchdog, automatic login, what no software can fix |
 | [docs/panels.md](docs/panels.md) | settings, usage, agents, monitor and hive panels |
 | [docs/wezterm-build.md](docs/wezterm-build.md) | what the WezTerm fork adds and how it degrades on stock WezTerm |
 | [docs/notes-and-limits.md](docs/notes-and-limits.md) | known limits, how sidebar views pick their directory, clipboard behaviour |

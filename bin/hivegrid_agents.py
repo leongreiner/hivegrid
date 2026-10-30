@@ -10,6 +10,7 @@ Own bookkeeping (survives the short-lived overlay): acks.json {pane: done-since}
 config/agentstatus.lua when you look at a done pane), seen.json {pane: {state, since, agent}} for
 title-derived states and for remembering that an agent ran in a pane (a shell there is `exited`).
 """
+import datetime
 import json
 import math
 import mmap
@@ -24,7 +25,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 
-STATES = ("working", "busy", "done", "idle", "attention", "exited")
+STATES = ("working", "busy", "done", "idle", "attention", "limit", "exited")
 STALE_SECS = 20.0          # ext heartbeat older than this (pid alive) => trust the title instead
 CELL_ASPECT = 2.1         # cell height / cell width on screen
 PLAN_CHOICES = ("execute", "compact", "keep", "refine", "save")
@@ -193,7 +194,7 @@ class Agent:
     window: int
     cwd: str
     title: str
-    state: str                    # working|busy|done|idle|attention|exited
+    state: str                    # working|busy|done|idle|attention|limit|exited
     reason: str = ""
     since: float = 0.0
     source: str = "title"         # "ext"|"title"|"scrape"|"shell" (an agent ran here and quit)
@@ -210,6 +211,7 @@ class Agent:
     model: dict = None            # {"id": "provider/id", "name", "provider"} the extension published, None from an older one
     thinking: str = None
     context: dict = None          # {"tokens", "window", "pct"} when omp reported them
+    limit: dict = None            # {"hit_at", "reset_at"} (epoch s, reset_at may be None) while state is "limit"
 
 
 def agent_label(agent, agents):
@@ -340,6 +342,79 @@ def parse_context(doc):
     if tokens is None or window is None or window <= 0:
         return None
     return {"tokens": tokens, "window": window, "pct": pct if pct is not None else round(100 * tokens / window, 1)}
+
+
+# ---------------------------------------------------------------- usage limit
+# The omp extension (ext/hivegrid-agent-state.ts `limitOfEntry`) and this file decide alike, so a
+# session file read here and the state file the extension wrote agree. The signal, as seen in real
+# omp session files: the last message of the session is an assistant message with
+# `stopReason: "error"`, `errorStatus: 429` and an `errorMessage` like
+# `429 {"type":"error","error":{"type":"rate_limit_error",...}} retry-after-ms=14523000`; the
+# retry-after is the time until the account's 5-hour or weekly window reopens.
+
+LIMIT_MIN_RETRY_S = 60            # a refusal that reopens sooner is a burst limit omp retries itself
+LIMIT_MAX_RETRY_S = 400 * 86400
+FIVE_HOURS = 5 * 3600
+_LIMIT_TEXT = re.compile(r"rate_limit_error|usage[_ ]limit|insufficient_quota", re.I)
+_RETRY_MS = re.compile(r"retry-after-ms=(\d{1,12})(?!\d)")  # a longer number is no retry-after: int() of thousands of digits raises
+
+
+def parse_limit(doc):
+    """The state file's `limit` -> {"hit_at", "reset_at"} (epoch seconds, each None when not a finite
+    non-negative number), None when it is not an object."""
+    if not isinstance(doc, dict):
+        return None
+    return {"hit_at": _amount(doc.get("hit_at")), "reset_at": _amount(doc.get("reset_at"))}
+
+
+def limit_of_entry(entry):
+    """{"hit_at", "reset_at"} when the session entry `entry` (a parsed JSONL line) is an assistant message
+    that ended its turn on the account's usage limit, else None. `reset_at` is None when the error named
+    no retry-after. A refusal that reopens within LIMIT_MIN_RETRY_S is not a limit."""
+    msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "message" else None
+    if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("stopReason") != "error":
+        return None
+    text = msg.get("errorMessage") if isinstance(msg.get("errorMessage"), str) else ""
+    if not (msg.get("errorStatus") == 429 or re.match(r"\s*429\b", text)) or not _LIMIT_TEXT.search(text):
+        return None
+    m = _RETRY_MS.search(text)
+    retry = int(m.group(1)) / 1000.0 if m else None
+    if retry is not None and retry < LIMIT_MIN_RETRY_S:
+        return None
+    ms = _amount(msg.get("completedAt"))
+    if ms is None:
+        ms = _amount(msg.get("timestamp"))
+    hit = ms / 1000.0 if ms else None
+    if hit is None and isinstance(entry.get("timestamp"), str):
+        try:
+            hit = datetime.datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            hit = None
+    if hit is None:
+        return None
+    return {"hit_at": round(hit, 3), "reset_at": round(hit + retry, 3) if retry is not None and retry <= LIMIT_MAX_RETRY_S else None}
+
+
+def limit_window(limit, windows, slack=300.0):
+    """Which window of the account a limit hit: "five_hour", "seven_day" or None when it cannot be told.
+    `windows` is the account's quota cache ({"five_hour": {"reset_at"}, "seven_day": {...}}): the window
+    whose own reset time is the refusal's reset time (within `slack` seconds) is the one; when both or
+    neither match (or there is no cache), a reset more than five hours after the refusal can only be the
+    weekly window, and anything else stays undecided: a 5-hour limit and a weekly limit that ends soon look alike."""
+    reset, hit = (limit or {}).get("reset_at"), (limit or {}).get("hit_at")
+    if not isinstance(reset, (int, float)):
+        return None
+    near = []
+    for name in ("five_hour", "seven_day"):
+        w = (windows or {}).get(name)
+        r = w.get("reset_at") if isinstance(w, dict) else None
+        if isinstance(r, (int, float)) and not isinstance(r, bool) and abs(r - reset) <= slack:
+            near.append(name)
+    if len(near) == 1:
+        return near[0]
+    if isinstance(hit, (int, float)) and reset - hit > FIVE_HOURS + slack:
+        return "seven_day"
+    return None
 
 
 def omp_title(title):
@@ -599,8 +674,10 @@ def _collect(run, now, fg):
                 agent.since = None
             else:
                 agent.state = sf["state"] if sf["state"] != "exited" else "idle"
-                if agent.state == "done" and _same_time(acks.get(str(pid_)), agent.since):
+                if agent.state in ("done", "limit") and _same_time(acks.get(str(pid_)), agent.since):
                     agent.state = "idle"
+                if agent.state == "limit":
+                    agent.limit = parse_limit(sf.get("limit"))
         elif (title_state or comm == "omp" or raw_title.startswith("π")) and comm not in SHELLS:
             agent.state = title_state or "idle"
             agent.source = "title"
@@ -667,9 +744,17 @@ def peek(pane, lines=12, run=wezterm_cli):
     return rows[-lines:] if lines > 0 else []
 
 
-def ack(agent):
-    """done -> idle, remembered by (pane, the done's `since`) so a later done is un-acked again."""
-    if agent.state not in ("done", "idle"):
+def limit_expired(agent, now):
+    """True for a limit agent whose reset time is known and no longer ahead of `now`: its account answers again."""
+    info = agent.limit if agent.state == "limit" else None
+    reset = info.get("reset_at") if isinstance(info, dict) else None
+    return isinstance(reset, (int, float)) and not isinstance(reset, bool) and abs(reset) < 1e12 and reset <= now
+
+
+def ack(agent, now=None):
+    """done -> idle (and a limit whose reset has passed -> idle), remembered by (pane, the state's
+    `since`) so a later done or limit is un-acked again."""
+    if agent.state not in ("done", "idle") and not limit_expired(agent, time.time() if now is None else now):
         return
     acks = _read_map("acks.json")
     acks[str(agent.pane)] = agent.since

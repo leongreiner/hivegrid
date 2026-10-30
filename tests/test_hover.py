@@ -587,9 +587,18 @@ class DockCloseTest(unittest.TestCase):
         dock.draw(self.SIZE)
 
     def test_close_rule(self):
-        safe = [k for k in ("shell", "exited", "done", "idle", "web", "working", "busy", "attention", "bell", "other", None)
+        safe = [k for k in ("shell", "exited", "done", "idle", "web", "working", "busy", "attention", "limit", "bell", "other", None)
                 if not D.close_need({"kind": k})]
         self.assertEqual(safe, ["shell", "exited", "done", "idle", "web"])
+
+    def test_a_limit_row_asks_before_closing_and_is_named_in_the_question(self):
+        panes = [{"id": 10, "num": 1, "active": True, "kind": "limit", "name": "a1", "proc": "omp",
+                  "since": NOW - 60, "text": "", "title": "t"}]
+        self.assertEqual([D.question_text(q) for q in D.close_question(panes, 10)], ["close 1 · limit?", "close 1?"])
+        dock = self.dock({"panes": panes})
+        dock.close(10)
+        self.assertEqual(dock.ask, ("pane", 10))
+        self.assertEqual(self.closes(dock), [])
 
     def test_questions(self):
         def texts(pane_id=None, panes=self.DOC["panes"]):

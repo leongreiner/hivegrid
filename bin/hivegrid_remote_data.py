@@ -7,11 +7,13 @@ and only when they are regular files of the current user; quota caches are read 
 nothing returned carries a credential, a token or a directory beyond what the page needs. The
 sanitizers of `hivegrid_remote` are passed in (`san_text`, `san_line`) because that module imports
 this one."""
+import dataclasses
 import datetime
 import itertools
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -286,8 +288,10 @@ class ChatCache:
             if role == "user":
                 out.extend(self._blocks(base, ts, "user", m.get("content")))
             elif role == "assistant":
+                limit = A.limit_of_entry(entry)
                 content = m.get("content")
-                for i, b in enumerate(content[:BLOCKS_PER_LINE] if isinstance(content, list) else []):
+                cap = BLOCKS_PER_LINE - 1 if limit else BLOCKS_PER_LINE   # one index of the line stays free for the note
+                for i, b in enumerate(content[:cap] if isinstance(content, list) else []):
                     if isinstance(b, dict) and b.get("type") == "toolCall":
                         name = self.san_line(b.get("name"), 60) if isinstance(b.get("name"), str) else "tool"
                         summary = self._summary(b.get("arguments")) or self._summary({"intent": b.get("intent")})
@@ -301,6 +305,10 @@ class ChatCache:
                         out.append(item)
                     else:
                         out.extend(self._blocks(base + i, ts, "assistant", [b]))
+                if limit:  # after the content, at the next free index of the line: n stays unique and ascending
+                    item = self._item(base + min(len(content) if isinstance(content, list) else 0, cap), ts, "note", "limit", "usage limit reached")
+                    item["limit"] = limit
+                    out.append(item)
             elif role == "toolResult":
                 self._result(f, m, base, ts, out)
         elif kind in ("model_change", "thinking_level_change"):
@@ -619,6 +627,336 @@ def accounts_json(accounts, agents, now, san_line, directory=None):
     return {"now": now, "accounts": rows,
             "totals": {"agents": allt["agents"], "tokens": allt["tokens"], "reported": allt["reported"],
                        "estimated": allt["estimated"], "text": A.totals_text(allt)}}
+
+
+# ---------------------------------------------------------------- usage limit
+
+LIMIT_TAIL = 262144
+LIMIT_LABELS = {"five_hour": "5-hour limit", "seven_day": "weekly limit", None: "usage limit"}
+
+
+class LimitProbe:
+    """Whether the session file of an agent ends on a usage-limit refusal (`A.limit_of_entry` on the last
+    message entry), for agents whose omp does not report the limit itself (an extension from before the
+    `limit` state). Only the last LIMIT_TAIL bytes are read; the answer is remembered per (mtime, size)."""
+
+    def __init__(self, cap=64):
+        self.cap = cap
+        self._seen = {}
+        self._lock = threading.Lock()
+
+    def check(self, path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            hit = self._seen.get(path)
+            if hit is not None and hit[0] == key:
+                return hit[1]
+        limit = self._tail(path, st.st_size)
+        with self._lock:
+            if len(self._seen) >= self.cap:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen[path] = (key, limit)
+        return limit
+
+    @staticmethod
+    def _tail(path, size):
+        try:
+            with open(path, "rb") as f:
+                start = max(0, size - LIMIT_TAIL)
+                f.seek(start)
+                data = f.read(LIMIT_TAIL)
+        except OSError:
+            return None
+        lines = data.split(b"\n")
+        if start > 0:
+            lines = lines[1:]            # begins inside a line
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except (ValueError, RecursionError):
+                continue                 # a line still being written
+            if isinstance(entry, dict) and entry.get("type") == "message":
+                return A.limit_of_entry(entry)
+        return None
+
+
+def with_limits(agents, probe, find_file):
+    """`agents` with each `done` agent of an extension that does not know the `limit` state promoted to
+    it when its session file (`find_file(agent)`) ends on a usage-limit refusal. Only `done` is looked at:
+    a resumed chat whose last message is an old refusal is `idle` until it is prompted."""
+    out = []
+    for a in agents:
+        if a.state == "done" and a.source == "ext":
+            path = find_file(a)
+            limit = probe.check(path) if path else None
+            if limit:
+                a = dataclasses.replace(a, state="limit", reason="usage limit", limit=limit)
+        out.append(a)
+    return out
+
+
+def limit_json(agent, accounts, now, san_line, directory=None):
+    """What the phone shows of a limit stop: which window (`five_hour`, `seven_day` or None when it cannot
+    be told), its words, when it was hit and when it reopens (epoch seconds or None), and the account the
+    agent runs on. The window comes from `A.limit_window` and the account's quota cache."""
+    limit = agent.limit if isinstance(agent.limit, dict) else {}
+    label, windows = None, None
+    for a in visible_accounts(accounts):
+        if a.get("profile") and a.get("profile") == agent.profile:
+            label, windows = a["label"], read_quota(a["label"], now, directory)
+            break
+    window = A.limit_window(limit, windows)
+    return {"window": window, "label": LIMIT_LABELS[window], "hit_at": limit.get("hit_at"), "reset_at": limit.get("reset_at"),
+            "account": san_line(label, 40) if label else None}
+
+
+# ---------------------------------------------------------------- switching an agent's account
+
+SWITCH_STATES = ("limit", "done", "idle")
+SWITCH_RESULT_TTL = 120.0           # how long the page can still read how a switch ended
+EXIT_WAIT, EXIT_POLL, SHELL_WAIT = 5.0, 0.25, 3.0
+CTRL_D, ENTER = "\x04", "\r"
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+class SwitchRefused(Exception):
+    """The switch cannot start; nothing was touched. `code` is an HttpError code."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+def account_block(agent):
+    """Why `agent` cannot be moved to another account (a sentence), None when it can."""
+    if agent.state == "exited":
+        return "agent has exited"
+    if agent.state not in SWITCH_STATES:
+        return "wait until the agent is idle or has stopped on its limit"
+    if not agent.profile or not A.PROFILE_NAME.fullmatch(agent.profile):
+        return "this chat runs omp's default configuration: a chat moves only between omp profiles paired with an account"
+    if agent.source != "ext" or not isinstance(agent.pid, int) or isinstance(agent.pid, bool) or agent.pid <= 0:
+        return "this agent's omp does not publish its process: restart it to switch"
+    if (os.environ.get("HIVEGRID_AGENT_CMD") or "omp").strip() != "omp":
+        return "HIVEGRID_AGENT_CMD is set: a chat is moved only with plain omp"
+    return None
+
+
+def account_options(accounts, agent, now, san_line, directory=None):
+    """(current, offered) for `agent`: the account it runs on ({"label", "profile"}, label None when no
+    account is paired with its profile) and the accounts it can be moved to, each with its quota windows.
+    An account without a paired omp profile is never offered (a chat moves only between profiles), nor is
+    the current one."""
+    current = {"label": None, "profile": agent.profile}
+    offered, seen = [], set()
+    for a in visible_accounts(accounts):
+        profile = a.get("profile")
+        if not (isinstance(profile, str) and A.PROFILE_NAME.fullmatch(profile)):
+            continue
+        if profile == agent.profile:
+            current["label"] = san_line(a["label"], 40)
+            continue
+        if profile in seen:
+            continue
+        seen.add(profile)
+        q = read_quota(a["label"], now, directory)
+        offered.append({"label": san_line(a["label"], 40), "profile": profile, "state": q["state"],
+                        "five_hour": q["five_hour"], "seven_day": q["seven_day"]})
+    return current, offered
+
+
+def _plain_path(value):
+    return (isinstance(value, str) and os.path.isabs(value) and len(value) <= SESSION_HINT_MAX and not _CONTROL.search(value)
+            and "\\" not in value)  # fish reads a backslash inside single quotes as an escape: never typed
+
+
+def resume_command(cwd, profile, session):
+    """The line typed into the shell after omp quit: `cd <dir> && omp --profile=<p> --resume <file>`
+    (the resume is left out when the chat had no message yet; the cd when the directory is unknown)."""
+    omp = f"omp --profile={profile}" + (f" --resume {shlex.quote(session)}" if session else "")
+    return f"cd {shlex.quote(cwd)} && {omp}" if cwd else omp
+
+
+class AccountSwitcher:
+    """Moves the chat of an agent to another omp profile (account), with `bin/omp-switch`, exactly as the
+    header's account pills do (docs/accounts-and-quota.md):
+
+    1. `begin` checks the agent, asks `omp-switch locate` for its session (read-only; nothing touched
+       yet) and presses Ctrl+D in its pane once omp is still alive in the pane's foreground (omp quits on an empty prompt and stays when it holds a draft);
+       it then returns while a worker thread finishes the move;
+    2. the worker waits up to EXIT_WAIT s for omp to exit (never kills it: it stays, the switch is
+       abandoned) and for the pane to be at a shell prompt, runs `omp-switch transfer`, and types
+       `cd <dir> && omp --profile=<new> --resume <copy>` into the shell. When the transfer fails, the
+       chat is resumed on the old profile instead.
+
+    Nothing page-controlled is typed: the profile is one of the offered names and the paths come from
+    omp-switch, checked to lie under the profiles' session directories and free of control characters.
+    `status(pane)` is what the page reads while and after (state running | done | failed, for
+    SWITCH_RESULT_TTL s). `mux` offers `run`, `act`, `send_keys` and `invalidate`; `spawn(fn)` starts the worker."""
+
+    def __init__(self, mux, san_line, home=None, run=subprocess.run, clock=time.monotonic, wall=time.time,
+                 sleep=time.sleep, alive=A._pid_alive, foreground=A.foreground_by_tty, switch_bin=None, spawn=None):
+        self.mux, self.san_line, self.home = mux, san_line, home
+        self.runner, self.clock, self.wall, self.sleep = run, clock, wall, sleep
+        self.alive, self.foreground = alive, foreground
+        self.switch_bin = switch_bin
+        self.spawn = spawn or self._thread
+        self._lock = threading.Lock()
+        self._jobs = {}                 # pane -> {"state", "to", "message", "since", "ended"}
+
+    @staticmethod
+    def _thread(fn):
+        threading.Thread(target=fn, daemon=True, name="account-switch").start()
+
+    # -- state the page reads
+    def status(self, pane):
+        """{"state", "to", "message", "since"} of the latest switch of `pane`, None when there is none (or it ended long ago)."""
+        with self._lock:
+            job = self._jobs.get(pane)
+            if job is not None and job["ended"] is not None and self.clock() - job["ended"] > SWITCH_RESULT_TTL:
+                del self._jobs[pane]
+                job = None
+            return None if job is None else {k: job[k] for k in ("state", "to", "message", "since")}
+
+    def running(self, pane):
+        job = self.status(pane)
+        return job is not None and job["state"] == "running"
+
+    # -- omp-switch
+    def _bin(self):
+        if self.switch_bin:
+            return self.switch_bin
+        env = os.environ.get("OMP_SWITCH_BIN")
+        if env:
+            return env
+        here = os.path.join(os.path.dirname(os.path.realpath(__file__)), "omp-switch")
+        return here if os.path.isfile(here) else (shutil.which("omp-switch") or here)
+
+    def _omp_switch(self, *args, timeout=30):
+        bad = {"state": "error", "reason": "omp-switch gave no answer"}
+        try:
+            r = self.runner([self._bin(), *map(str, args)], capture_output=True, text=True, timeout=timeout)
+            out = json.loads(r.stdout or "")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return bad
+        return out if isinstance(out, dict) and out.get("state") in ("ok", "none", "error") else bad
+
+    def _reason(self, res):
+        return self.san_line(res.get("reason") if isinstance(res.get("reason"), str) else "unknown reason", 160)
+
+    def _session_in(self, path, profile):
+        """The real path of `path` when it is a session file of `profile` that may be typed, else None."""
+        real = session_path_ok(path, self.home)
+        root = os.path.realpath(os.path.join(_home(self.home), ".omp", "profiles", profile, "agent", "sessions")) + os.sep
+        return real if real and _plain_path(real) and real.startswith(root) else None
+
+    # -- the move
+    def begin(self, agent, profile, to_label, from_label):
+        """Starts the move of `agent` to omp profile `profile` (labelled `to_label`). Raises SwitchRefused
+        before anything is touched; returns when Ctrl+D has been sent and the worker runs."""
+        why = account_block(agent)
+        if why:
+            raise SwitchRefused("agent_not_ready", why)
+        if not A.PROFILE_NAME.fullmatch(profile or "") or profile == agent.profile:
+            raise SwitchRefused("conflict", "the agent already runs on that account")
+        with self._lock:
+            job = self._jobs.get(agent.pane)
+            if job is not None and job["state"] == "running":
+                raise SwitchRefused("conflict", "a switch is already running for this agent")
+            self._jobs[agent.pane] = {"state": "running", "to": to_label, "message": "asking omp to quit", "since": self.wall(), "ended": None}
+        try:
+            loc = self._omp_switch("locate", "--pid", agent.pid, "--from", agent.profile, timeout=15)
+            if loc["state"] == "error":
+                raise SwitchRefused("agent_not_ready", "cannot find the chat, omp keeps running: " + self._reason(loc))
+            session = cwd = None
+            if loc["state"] == "ok":
+                session = self._session_in(loc.get("session"), agent.profile)
+                cwd = loc.get("cwd")
+                if session is None or not _plain_path(cwd):
+                    raise SwitchRefused("agent_not_ready", "cannot find the chat, omp keeps running: the session is not where omp keeps it")
+            elif _plain_path(agent.cwd):
+                cwd = agent.cwd
+            try:
+                if not self._omp_in_front(agent):
+                    raise SwitchRefused("agent_not_ready", "omp is no longer running in that pane: nothing was sent")
+                self.mux.act(lambda: self.mux.send_keys(agent.pane, [CTRL_D]))
+            except SwitchRefused:
+                raise
+            except Exception:  # noqa: BLE001 - the mux says why in its own words; nothing was sent
+                raise SwitchRefused("agent_not_ready", "could not reach the agent's pane") from None
+        except BaseException:
+            with self._lock:
+                self._jobs.pop(agent.pane, None)
+            raise
+        job = {"pane": agent.pane, "pid": agent.pid, "from": agent.profile, "from_label": from_label, "to": profile,
+               "to_label": to_label, "session": session, "cwd": cwd}
+        try:
+            self.spawn(lambda: self._work(job))
+        except Exception:  # noqa: BLE001 - Ctrl+D is out already: the job must not stay `running` and block the next switch
+            self._end(agent.pane, False, "the switch could not continue: omp was asked to quit, check the pane")
+
+    def _omp_in_front(self, agent):
+        """True while the agent's process is alive and omp is what runs in the foreground of its pane:
+        Ctrl+D must never reach a shell (it would close it) or another program."""
+        if not self.alive(agent.pid):
+            return False
+        row = next((p for p in (A._list_panes(self.mux.run) or []) if p["pane_id"] == agent.pane), None)
+        return row is not None and self.foreground().get(A._tty(row), (None, "", 0, ""))[1] == "omp"
+
+    def _end(self, pane, ok, message):
+        with self._lock:
+            job = self._jobs.get(pane)
+            if job is not None:
+                job.update(state="done" if ok else "failed", message=message, ended=self.clock())
+        self.mux.invalidate()
+
+    def _wait_exit(self, pid):
+        end = self.clock() + EXIT_WAIT
+        while self.alive(pid):
+            if self.clock() >= end or self.sleep(EXIT_POLL):
+                return False
+        return True
+
+    def _at_shell(self, pane):
+        end = self.clock() + SHELL_WAIT
+        while True:
+            panes = A._list_panes(self.mux.run) or []
+            row = next((p for p in panes if p["pane_id"] == pane), None)
+            fg = self.foreground() if row is not None else {}
+            if row is not None and fg.get(A._tty(row), (None, "", 0, ""))[1] in A.SHELLS:
+                return True
+            if self.clock() >= end or self.sleep(EXIT_POLL):
+                return False
+
+    def _type(self, pane, line):
+        self.mux.act(lambda: self.mux.send_keys(pane, [ENTER], line))
+
+    def _work(self, job):
+        pane = job["pane"]
+        try:
+            if not self._wait_exit(job["pid"]):
+                return self._end(pane, False, "omp did not quit (unsent text in its prompt?): account not switched, omp keeps running")
+            if not self._at_shell(pane):
+                return self._end(pane, False, "omp quit but the pane is not at a shell prompt: the chat was not moved")
+            session = None
+            if job["session"] is not None:
+                moved = self._omp_switch("transfer", "--session", job["session"], "--from", job["from"], "--to", job["to"], timeout=120)
+                session = self._session_in(moved.get("session"), job["to"]) if moved["state"] == "ok" else None
+                if session is None:
+                    reason = self._reason(moved) if moved["state"] == "error" else "the copy is not where omp keeps sessions"
+                    self._type(pane, resume_command(job["cwd"], job["from"], job["session"]))
+                    return self._end(pane, False, f"the chat could not be moved ({reason}); it continues on {job['from_label']}")
+            self._type(pane, resume_command(job["cwd"], job["to"], session))
+            self._end(pane, True, f"the chat continues on {job['to_label']}")
+        except Exception:  # noqa: BLE001 - a failed worker must still end the job
+            self._end(pane, False, "the switch failed: check the pane")
+
 
 
 # ---------------------------------------------------------------- system metrics

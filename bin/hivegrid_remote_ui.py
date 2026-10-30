@@ -117,6 +117,7 @@ a { color: var(--accent); text-decoration: none; }
 
 /* State colours (hivegrid_ui.STATES): glyph and word carry the state, colour only backs it up. */
 .s-attention { --sc: var(--violet); }
+.s-limit { --sc: var(--red); }
 .s-bell { --sc: var(--red); }
 .s-done { --sc: var(--green); }
 .s-busy { --sc: var(--amber); }
@@ -400,6 +401,7 @@ a { color: var(--accent); text-decoration: none; }
 .it-note { text-align: center; color: var(--dim); font-size: 12px; margin: 6px 0 12px; }
 .it-note span::before { content: "\00B7  "; }
 .it-note span::after { content: "  \00B7"; }
+.it-limit { text-align: center; color: var(--red); font-size: 12px; margin: 10px 0 12px; }
 .it-image { color: var(--dim); }
 .it-image::before { content: "\25A3  "; }
 details > summary { list-style: none; cursor: pointer; touch-action: manipulation; }
@@ -518,6 +520,23 @@ details[open] > summary::before { content: "\25BE"; }
 }
 .strip .grow { flex: 1; }
 .strip .btn { min-height: 36px; }
+.lcard {
+  flex: none;
+  max-height: 36vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px calc(12px + var(--sar)) 10px calc(12px + var(--sal));
+  background: var(--tint-red);
+  border-top: 1px solid var(--red);
+}
+.lcard h3 { margin: 0 0 4px; font-size: 13px; font-weight: 700; color: var(--red); overflow-wrap: anywhere; }
+.lcard p { margin: 0 0 8px; color: var(--text); overflow-wrap: anywhere; }
+.lcard p:last-child { margin-bottom: 0; }
+.lcard.lc-run { background: var(--tint-accent); border-top-color: var(--accent); }
+.lcard.lc-run h3 { color: var(--accent); }
+.lcard.lc-done { background: var(--tint-accent); border-top-color: var(--green); }
+.lcard.lc-done h3 { color: var(--green); }
+.lcard .btn { min-height: 36px; }
 .compose {
   flex: none;
   display: flex;
@@ -741,9 +760,10 @@ APP_JS = r"""(function () {
   "use strict";
 
   var TOKEN_KEY = "hivegrid-remote-token";
-  var STATE_ORDER = ["attention", "working", "busy", "done", "idle", "exited"];
+  var STATE_ORDER = ["attention", "limit", "working", "busy", "done", "idle", "exited"];
   var STATE_DEFAULTS = {
     attention: { glyph: "?", label: "needs you" },
+    limit: { glyph: "\u2298", label: "limit" },
     working: { glyph: "\u21bb", label: "working" },
     busy: { glyph: "\u25d4", label: "busy" },
     done: { glyph: "\u2713", label: "done" },
@@ -823,6 +843,7 @@ APP_JS = r"""(function () {
   var feedbackDrafts = {};
   var pinned = true;
   var pendKey = null;
+  var limKey = null;
   var refineOpen = false;
   var lastOk = 0;
   var D = {};
@@ -874,6 +895,18 @@ APP_JS = r"""(function () {
     var d = new Date(ts * 1000);
     return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
   }
+  function resetText(ts) {
+    var left = ts - nowServer();
+    return left > 0 ? "resets in " + fmtDur(left) : "reset due";
+  }
+  // "5-hour limit · resets in 2h05m": the countdown is kept current by refreshAges
+  function limitLine(lim) {
+    var out = [];
+    var win = lim.window === "five_hour" ? "5-hour" : (lim.window === "seven_day" ? "weekly" : "");
+    if (win) { out.push(win); }
+    if (typeof lim.reset_at === "number") { out.push(win ? " \u00b7 " : "", h("span", { "data-reset": String(lim.reset_at) }, resetText(lim.reset_at))); }
+    return out;
+  }
   function ageNode(a) {
     if (typeof a.since === "number") { return h("span", { "data-since": String(a.since) }, fmtAge(nowServer() - a.since)); }
     return a.age ? h("span", null, a.age) : null;
@@ -887,6 +920,14 @@ APP_JS = r"""(function () {
       if (isFinite(s)) {
         var t = fmtAge(now - s);
         if (els[i].textContent !== t) { els[i].textContent = t; }
+      }
+    }
+    var rs = document.querySelectorAll("[data-reset]");
+    for (var j = 0; j < rs.length; j++) {
+      var r = parseFloat(rs[j].getAttribute("data-reset"));
+      if (isFinite(r)) {
+        var rt = resetText(r);
+        if (rs[j].textContent !== rt) { rs[j].textContent = rt; }
       }
     }
   }
@@ -1133,6 +1174,8 @@ APP_JS = r"""(function () {
     var app = document.getElementById("app");
     app.classList.toggle("ro", !!meta.readonly);
     if (U.ro) { U.ro.hidden = !meta.readonly; }
+    if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
+    routeTerm();
     if (agents) { renderChips(); renderList(); updateDetail(); }
     if (menuSec === "about") { renderMenu(); }
   }
@@ -1178,6 +1221,7 @@ APP_JS = r"""(function () {
     loops.forEach(function (L) { L.stop(); });
     window.clearTimeout(metaTimer);
     window.clearTimeout(menuTimer);
+    closeTerm();
     inApp = false;
   }
   function clearToken() {
@@ -1200,8 +1244,9 @@ APP_JS = r"""(function () {
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
     U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u2261");
+    U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminal", hidden: !(meta && meta.terminal) }, ">_");
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.termBtn, U.menuBtn);
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1235,6 +1280,7 @@ APP_JS = r"""(function () {
     D.pend = h("div", { class: "pcard write", hidden: true, role: "group", "aria-label": "Needs your answer" });
     D.ackBtn = h("button", { class: "btn", type: "button", onclick: sendAck }, "\u2713 acknowledge");
     D.strip = h("div", { class: "strip write", hidden: true }, h("span", { class: "grow" }, "finished"), D.ackBtn);
+    D.lcard = h("div", { class: "lcard", hidden: true, role: "group", "aria-label": "Usage limit and account" });
     D.ta = h("textarea", { class: "field", rows: "1", placeholder: "Message", "aria-label": "Message", enterkeyhint: "send", autocapitalize: "sentences", oninput: onPromptInput, onkeydown: function (ev) {
       var fine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
       if (ev.key === "Enter" && !ev.isComposing && ((fine && !ev.shiftKey) || ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); submit(); }
@@ -1246,6 +1292,7 @@ APP_JS = r"""(function () {
     D.body = h("div", { class: "d-body", hidden: true });
     D.body.appendChild(D.ctx);
     D.body.appendChild(D.chatbox);
+    D.body.appendChild(D.lcard);
     D.body.appendChild(D.pend);
     D.body.appendChild(D.strip);
     D.body.appendChild(D.compose);
@@ -1266,7 +1313,7 @@ APP_JS = r"""(function () {
       return (a.rank - b.rank) || ((a.tab || 0) - (b.tab || 0)) || ((a.num || 0) - (b.num || 0));
     });
     if (typeof data.now === "number") { clockOffset = data.now - Date.now() / 1000; }
-    var needs = agents.filter(function (a) { return a.state === "attention"; }).length;
+    var needs = agents.filter(function (a) { return a.state === "attention" || a.state === "limit"; }).length;
     document.title = (needs > 0 ? "(" + needs + ") " : "") + "Hivegrid";
     clear(U.count);
     U.count.appendChild(document.createTextNode("\u00b7 " + agents.length));
@@ -1316,7 +1363,9 @@ APP_JS = r"""(function () {
       var si = stateInfo(a.state);
       var pend = a.pending ? pendingSummary(a.pending) : "";
       var sub = [h("span", { class: "st" }, si.label)];
-      [a.cwd, a.reason].forEach(function (x) { if (x) { sub.push(" \u00b7 ", x); } });
+      if (a.state === "limit" && a.limit) { var ll = limitLine(a.limit); if (ll.length) { sub.push(" \u00b7 ", ll); } }
+      if (a.switch && a.switch.state === "running") { sub.push(" \u00b7 moving to ", a.switch.to || "another account"); }
+      [a.cwd, a.state === "limit" && a.limit ? "" : a.reason].forEach(function (x) { if (x) { sub.push(" \u00b7 ", x); } });
       var sel = String(a.id) === String(selId);
       var row = h("a", { class: "row " + stClass(a.state) + (sel ? " sel" : ""), href: "#/a/" + encodeURIComponent(a.id), "aria-current": sel ? "true" : null },
         h("span", { class: "mark", "aria-hidden": "true" }, "\u258e"),
@@ -1331,10 +1380,12 @@ APP_JS = r"""(function () {
     U.list.scrollTop = keep;
     clear(U.foot);
     var needs = agents.filter(function (a) { return a.state === "attention"; }).length;
+    var limited = agents.filter(function (a) { return a.state === "limit"; }).length;
     U.foot.appendChild(h("button", { class: "write", type: "button", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+"), "new session"));
     U.foot.appendChild(h("span", { class: "spacer" }));
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
-    else { U.foot.appendChild(h("span", null, "tap an agent to open")); }
+    if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
+    if (needs + limited === 0) { U.foot.appendChild(h("span", null, "tap an agent to open")); }
   }
 
   // ---------------------------------------------------------------- routing
@@ -1398,6 +1449,56 @@ APP_JS = r"""(function () {
       else { renderMenu(); menuTick(true); }
     }
     if (changed && agents) { renderList(); updateDetail(); }
+    routeTerm();
+  }
+
+  // ---------------------------------------------------------------- terminal: its script and styles load when it is first opened
+  var termView = null;
+  var termOpening = false;
+  var termAssets = null;
+  function loadTermAssets() {
+    if (window.HGTermView) { return Promise.resolve(); }
+    if (termAssets) { return termAssets; }
+    termAssets = new Promise(function (resolve, reject) {
+      if (!document.getElementById("term-css")) { document.head.appendChild(h("link", { id: "term-css", rel: "stylesheet", href: "/term.css" })); }
+      var left = 2;
+      ["/term.js", "/term-view.js"].forEach(function (src) {
+        var s = document.createElement("script");
+        s.src = src;
+        s.async = false;
+        s.onload = function () { left -= 1; if (left === 0) { resolve(); } };
+        s.onerror = function () { reject(new Error(src)); };
+        document.head.appendChild(s);
+      });
+    });
+    termAssets.catch(function () { termAssets = null; });
+    return termAssets;
+  }
+  function termWanted() { return inApp && window.location.hash === "#/term" && !!(meta && meta.terminal); }
+  function leaveTerm() { setHash("#/", true); }
+  function openTerm() {
+    termOpening = true;
+    loadTermAssets().then(function () {
+      termOpening = false;
+      if (!termWanted() || termView) { return; }
+      termView = window.HGTermView.open({ api: api, toast: toast, ask: ask, close: leaveTerm });
+    }, function () {
+      termOpening = false;
+      toast("The terminal could not be loaded.", true);
+      if (window.location.hash === "#/term") { leaveTerm(); }
+    });
+  }
+  function closeTerm() {
+    if (!termView) { return; }
+    termView.destroy();
+    termView = null;
+    if (U.termBtn && inApp) { U.termBtn.focus({ preventScroll: true }); }
+  }
+  function routeTerm() {
+    if (!inApp) { return; }
+    if (termWanted()) { if (!termView && !termOpening) { openTerm(); } }
+    else if (termView) { closeTerm(); }
+    if (meta && !meta.terminal && window.location.hash === "#/term") { leaveTerm(); }
   }
 
   // ---------------------------------------------------------------- chat state
@@ -1581,7 +1682,10 @@ APP_JS = r"""(function () {
     var oldDet = old && old.querySelector ? old.querySelector("details") : null;
     var wasOpen = oldDet ? oldDet.open : false;
     var el;
-    if (it.role === "note" || it.kind === "note") {
+    if (it.kind === "limit") {
+      var lr = it.limit && typeof it.limit.reset_at === "number" ? " \u00b7 resets " + fmtTime(it.limit.reset_at) : "";
+      el = h("div", { class: "it it-limit" }, "\u2298 usage limit reached" + lr);
+    } else if (it.role === "note" || it.kind === "note") {
       el = h("div", { class: "it it-note" }, h("span", null, it.text || ""));
     } else if (it.kind === "image") {
       el = h("div", { class: "it it-image" }, it.text || "[image]");
@@ -1715,6 +1819,7 @@ APP_JS = r"""(function () {
     append(D.info, [h("span", { class: "st" }, si.label), ageNode(a), a.cwd ? h("span", { class: "path" }, a.cwd) : null]);
     renderCtx(a);
     renderPending(a);
+    renderLimit(a);
     var can = a.can || {};
     var mode = composeMode(a);
     D.ta.disabled = mode === "none";
@@ -1727,6 +1832,7 @@ APP_JS = r"""(function () {
     D.strip.hidden = !can.ack;
     var note = "";
     if (mode === "answer" && a.pending && a.pending.kind !== "plan_review") { note = "Tap above, or type an answer: it is pasted, then Enter."; }
+    else if (a.state === "limit") { note = "The account's limit is reached: switch account, or wait for the reset."; }
     D.note.hidden = !note;
     D.note.textContent = note;
     // live indicator
@@ -1752,6 +1858,39 @@ APP_JS = r"""(function () {
     if (a.usage && a.usage.text) { bits.push(h("span", { class: "usage" }, a.usage.text)); }
     append(D.ctx, bits);
     D.ctx.hidden = bits.length === 0;
+  }
+  // The card above the composer: the limit an agent stopped on (with the account switch), or how a switch is going.
+  function renderLimit(a) {
+    var lim = a.state === "limit" ? a.limit || { label: "usage limit" } : null;
+    var sw = a.switch;
+    var can = a.can || {};
+    var key = JSON.stringify([a.id, a.state, lim, sw, !!can.account, a.profile]);
+    if (key === limKey) { return; }
+    limKey = key;
+    clear(D.lcard);
+    if (!lim && !sw) { D.lcard.hidden = true; return; }
+    D.lcard.hidden = false;
+    var kind = sw && sw.state === "running" ? "run" : (lim || (sw && sw.state === "failed") ? "limit" : "done");
+    D.lcard.className = "lcard lc-" + kind;
+    if (sw && sw.state === "running") {
+      D.lcard.appendChild(h("h3", null, "\u21c4 Moving the chat to " + (sw.to || "another account")));
+      D.lcard.appendChild(h("p", null, "omp quits, the chat is copied to the new account and omp resumes it in this pane. This takes a few seconds."));
+      return;
+    }
+    if (sw && sw.state === "failed") {
+      D.lcard.appendChild(h("h3", null, "Account switch failed"));
+      D.lcard.appendChild(h("p", null, sw.message || "the chat was not moved"));
+    } else if (sw && !lim) {
+      D.lcard.appendChild(h("h3", null, "Chat moved to " + (sw.to || "the new account")));
+      D.lcard.appendChild(h("p", null, sw.message || "omp resumed the chat"));
+    }
+    if (lim) {
+      D.lcard.appendChild(h("h3", null, "\u2298 " + (lim.label || "usage limit") + " reached" + (lim.account ? " on " + lim.account : "")));
+      var when = typeof lim.reset_at === "number" ? ["The limit ", h("span", { "data-reset": String(lim.reset_at) }, resetText(lim.reset_at)), " (" + fmtTime(lim.reset_at) + ")."] : ["The reset time is not known."];
+      D.lcard.appendChild(h("p", null, ["The agent stopped. "].concat(when)));
+      D.lcard.appendChild(h("div", { class: "pbtns write" },
+        h("button", { class: "btn primary", type: "button", disabled: !can.account, onclick: function () { openAccounts(a.id); } }, "\u21c4 Switch account\u2026")));
+    }
   }
 
   // ---------------------------------------------------------------- pending approval / question / plan review
@@ -1903,7 +2042,8 @@ APP_JS = r"""(function () {
         s.body.appendChild(thinkingBlock(cur, can, busy, modelHint));
         s.body.appendChild(aRow({ glyph: "\u238b", title: "Interrupt", meta: "Esc", hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () { closeSheet(); sendKeys(id, ["esc"], false, "Interrupt sent"); } }));
         s.body.appendChild(aRow({ glyph: "\u25a4", title: "Compact", meta: "/compact", hint: can.prompt ? null : "not while the agent waits for an answer", disabled: !can.prompt, onclick: function () { closeSheet(); post(agentUrl(id, "prompt"), { text: "/compact" }, "Compact sent"); } }));
-        s.body.appendChild(aRow({ glyph: "\u2713", title: "Acknowledge", hint: can.ack ? null : "only when the agent is done or idle", disabled: !can.ack, onclick: function () { closeSheet(); post(agentUrl(id, "ack"), {}, "Acknowledged"); } }));
+        s.body.appendChild(aRow({ glyph: "\u2713", title: "Acknowledge", hint: can.ack ? null : "only when the agent is done or idle, or its limit has reset", disabled: !can.ack, onclick: function () { closeSheet(); post(agentUrl(id, "ack"), {}, "Acknowledged"); } }));
+        s.body.appendChild(aRow({ glyph: "\u21c4", title: "Switch account", meta: cur.profile || "", hint: can.account ? null : "only while the agent is idle or stopped on its limit, on an omp profile", disabled: !can.account, onclick: function () { openAccounts(id); } }));
         s.body.appendChild(aRow({ glyph: "\u25cb", title: "Quit agent", meta: "Ctrl-D", danger: true, hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () {
           ask("Quit agent \u201c" + agentLine(cur) + "\u201d? This sends Ctrl-D.", "Quit agent").then(function (ok) { if (ok) { closeSheet(); sendKeys(id, ["ctrl-d"], true, "Quit sent"); } });
         } }));
@@ -1991,6 +2131,56 @@ APP_JS = r"""(function () {
       });
     } });
   }
+  function quotaText(ac) {
+    var bits = [];
+    [["five_hour", "5h"], ["seven_day", "7d"]].forEach(function (q) {
+      var v = ac[q[0]];
+      if (v && typeof v.pct === "number") { bits.push(q[1] + " " + Math.round(v.pct) + "%"); }
+    });
+    return bits.length ? bits.join(" \u00b7 ") : (ac.state === "ok" || !ac.state ? "no quota data" : ac.state);
+  }
+  function openAccounts(id) {
+    var a = findAgent(id);
+    if (!a) { return; }
+    var info = null;
+    var failed = null;
+    var busyNow = false;
+    openSheet({ title: "Switch account", sub: agentLine(a), back: function () { openActions(); }, render: function (s) {
+      function pick(ac) {
+        var cur = findAgent(id);
+        if (!cur || busyNow) { return; }
+        ask("Move \u201c" + agentLine(cur) + "\u201d to account " + ac.label + "? omp quits, the chat is copied there and omp resumes it in this pane.", "Switch account").then(function (ok) {
+          if (!ok) { return; }
+          busyNow = true;
+          draw();
+          post(agentUrl(id, "account"), { profile: ac.profile, confirm: true }, null).then(function (r) {
+            busyNow = false;
+            if (r) { toast("Moving the chat to " + ac.label + "\u2026"); closeSheet(); } else if (sheet === s) { draw(); }
+          });
+        });
+      }
+      function draw() {
+        clear(s.body);
+        if (failed) { s.body.appendChild(h("div", { class: "note-line err" }, failed)); return; }
+        if (!info) { s.body.appendChild(h("div", { class: "note-line" }, "loading accounts\u2026")); return; }
+        var now = info.current && (info.current.label || info.current.profile);
+        s.body.appendChild(h("div", { class: "note-line" }, (now ? "Now on " + now + ". " : "") + "omp quits, the chat is copied to the account you pick and omp resumes it in this pane."));
+        if (!info.can && info.why) { s.body.appendChild(h("div", { class: "note-line err" }, info.why)); }
+        (info.accounts || []).forEach(function (ac) {
+          s.body.appendChild(aRow({ glyph: "\u25cb", title: ac.label, meta: quotaText(ac), disabled: !info.can || busyNow, onclick: function () { pick(ac); } }));
+        });
+        if (!(info.accounts || []).length && info.can !== false) { s.body.appendChild(h("div", { class: "note-line" }, "no other account is paired with an omp profile")); }
+      }
+      s.refresh = draw;
+      draw();
+      api(agentUrl(id, "accounts"), { timeout: 10000 }).then(function (r) {
+        if (sheet !== s) { return; }
+        if (r.status === 200 && r.data) { info = r.data; } else { failed = errText(r); }
+        draw();
+      }, function () { if (sheet === s) { failed = "no connection"; draw(); } });
+    } });
+  }
+
 
   // ---------------------------------------------------------------- menu: usage, new session, system, about
   var menuTimer = null;
