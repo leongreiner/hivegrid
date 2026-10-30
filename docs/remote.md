@@ -125,7 +125,7 @@ The paths in that line come from `omp-switch`, are checked to be session files b
 
 ## Files and images to the phone
 
-An agent (or you) runs `hivegrid-send FILE...` in a Hivegrid pane, optionally with `--note "text"`, and the files appear in that agent's chat on the phone: an image as a picture (tap to open it full size), any other file as a name and size, with a **save** button. Tell the agent once: "to show me an image or a file, run `hivegrid-send <path>`".
+An agent (or you) runs `hivegrid-send FILE...` in a Hivegrid pane, optionally with `--note "text"`, and the files appear in that agent's chat on the phone, at the point where they were sent (after the last message that is not newer than the file, so later prompts and answers follow them): an image as a picture (tap to open it full size), any other file as a name and size, with a **save** button. Tell the agent once: "to show me an image or a file, run `hivegrid-send <path>`".
 
 - **Where it is kept.** In memory, not on the disk: `$XDG_RUNTIME_DIR/hivegrid-outbox` (a tmpfs, the same place as the agents' state files), else `/tmp/hivegrid-outbox-<uid>`; `$HIVEGRID_OUTBOX` overrides it for both the sender and the server. The directory is mode `0700`, a reboot empties it. At most 20 MiB per file, 50 files and 100 MiB in all, none older than 2 days; the oldest go first on the next send. Sending copies the file, so the original may change or go away.
 - **Which agent.** The pane the command runs in (`$WEZTERM_PANE`; `--pane N` names another). The window's socket name is stored too, so after a Hivegrid restart (pane numbers start again) old files do not show up on a new agent that got the same number.

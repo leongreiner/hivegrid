@@ -424,8 +424,6 @@ a { color: var(--accent); text-decoration: none; }
 .it-limit { text-align: center; color: var(--red); font-size: 12px; margin: 10px 0 12px; }
 .it-image { color: var(--dim); }
 .it-image::before { content: "\25A3  "; }
-.files { margin: 10px 0 4px; display: flex; flex-direction: column; gap: 8px; }
-.files:empty { display: none; }
 .fcard { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 8px 10px; max-width: 100%; }
 .fcard .fhead { display: flex; align-items: baseline; gap: 1ch; font-size: 13px; min-width: 0; }
 .fcard .fname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bright); }
@@ -1314,8 +1312,7 @@ APP_JS = r"""(function () {
     D.older = h("div", { class: "older", hidden: true });
     D.items = h("div", { class: "items" });
     D.working = h("div", { class: "working", hidden: true, role: "status" });
-    D.files = h("div", { class: "files", "aria-label": "Files sent by this agent" });
-    D.inner = h("div", { class: "chat-inner" }, D.older, D.items, D.files, D.working);
+    D.inner = h("div", { class: "chat-inner" }, D.older, D.items, D.working);
     D.chat = h("div", { class: "chat", tabindex: "0", role: "log", "aria-label": "Conversation", "aria-live": "off", onscroll: onChatScroll }, D.inner);
     D.tail = h("pre", { class: "tail", tabindex: "0", "aria-label": "Agent screen" });
     D.tailbox = h("div", { class: "tailbox", hidden: true, onscroll: onChatScroll }, D.tail);
@@ -1554,7 +1551,7 @@ APP_JS = r"""(function () {
   // ---------------------------------------------------------------- chat state
   function newChat(id) {
     return { id: id, map: {}, rev: null, source: null, mode: "chat", hasOlder: false, olderLoaded: false, loadingOlder: false,
-      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null, blobs: {}, fileSig: "", fileNodes: {} };
+      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null, blobs: {}, files: [] };
   }
   function openChat(id) {
     chatLoop.stop();
@@ -1563,7 +1560,6 @@ APP_JS = r"""(function () {
     pinned = true;
     if (C0 && C0.blobs) { Object.keys(C0.blobs).forEach(function (k) { if (C0.blobs[k].url) { URL.revokeObjectURL(C0.blobs[k].url); } }); }
     clear(D.items);
-    clear(D.files);
     D.tail.textContent = "";
     D.older.hidden = true;
     D.latest.hidden = true;
@@ -1632,7 +1628,7 @@ APP_JS = r"""(function () {
     }, function () { toast("could not load " + (f.name || "the file"), true); });
   }
   function buildFile(c, f) {
-    var card = h("div", { class: "fcard" },
+    var card = h("div", { class: "it fcard" },
       h("div", { class: "fhead" }, h("span", { class: "fname" }, (f.image ? "\u25a3 " : "\u2193 ") + (f.name || "file")),
         h("span", { class: "fmeta" }, fmtSize(f.size) + (f.ts ? " \u00b7 " + fmtTime(f.ts) : ""))));
     if (f.note) { card.appendChild(h("div", { class: "fnote" }, f.note)); }
@@ -1648,28 +1644,36 @@ APP_JS = r"""(function () {
     card.appendChild(h("div", { class: "fbtns" }, h("button", { class: "btn", type: "button", onclick: function () { saveFile(c, f); } }, "save")));
     return card;
   }
-  function renderFiles(c, files) {
-    if (c !== C) { return; }
-    var sig = JSON.stringify(files.map(function (f) { return [f.id, f.name, f.note]; }));
-    if (sig === c.fileSig) { return; }
-    c.fileSig = sig;
-    var seen = {};
-    var prev = null;
-    files.slice().reverse().forEach(function (f) {      // oldest first, like the chat
-      seen[f.id] = true;
-      var node = c.fileNodes[f.id] || (c.fileNodes[f.id] = buildFile(c, f));
-      var expected = prev ? prev.nextSibling : D.files.firstChild;
-      if (node !== expected) { D.files.insertBefore(node, expected); }
-      prev = node;
+  // The files an agent sent with hivegrid-send stand in the transcript where they were sent: after the last item that
+  // is not newer than the file (an item without a time takes the time of the one before it). Files older than every item
+  // come first, and when no item has a time at all they come last. `list` is the chat items by number, `files` as the
+  // server sends them; the result is one list for renderTranscript.
+  function mergeFiles(list, files) {
+    if (!files.length) { return list; }
+    var sent = files.slice().reverse().sort(function (a, b) { return a.ts - b.ts; });      // oldest first; a tie keeps the server's order
+    var at = [];
+    var last = null;
+    list.forEach(function (it) { if (typeof it.ts === "number") { last = it.ts; } at.push(last); });
+    var timed = at.some(function (t) { return t !== null; });
+    var after = [];
+    sent.forEach(function (f) {
+      var pos = list.length;
+      if (timed) {
+        pos = 0;
+        for (var i = list.length - 1; i >= 0; i--) { if (at[i] !== null && at[i] <= f.ts) { pos = i + 1; break; } }
+      }
+      (after[pos] = after[pos] || []).push({ n: "f:" + f.id, ts: f.ts, file: f });
     });
-    Object.keys(c.fileNodes).forEach(function (k) {
-      if (!seen[k]) { var n = c.fileNodes[k]; if (n.parentNode) { n.parentNode.removeChild(n); } delete c.fileNodes[k]; }
-    });
-    if (pinned) { scrollBottom(); }
+    var out = [];
+    for (var j = 0; j <= list.length; j++) {
+      (after[j] || []).forEach(function (e) { out.push(e); });
+      if (j < list.length) { out.push(list[j]); }
+    }
+    return out;
   }
   function applyChat(c, data) {
     c.loaded = true;
-    renderFiles(c, Array.isArray(data.files) ? data.files : []);
+    c.files = Array.isArray(data.files) ? data.files : [];
     c.gone = false;
     c.state = data.state;
     c.reason = data.reason;
@@ -1745,17 +1749,17 @@ APP_JS = r"""(function () {
     var wasPinned = pinned;
     var oldH = D.chat.scrollHeight;
     var oldTop = D.chat.scrollTop;
-    var list = Object.keys(c.map).map(function (k) { return c.map[k]; }).sort(function (a, b) { return a.n - b.n; });
+    var list = mergeFiles(Object.keys(c.map).map(function (k) { return c.map[k]; }).sort(function (a, b) { return a.n - b.n; }), c.files);
     // prompts sent from the phone that omp has not written to the session yet: greyed bubbles after the last real item, in send order
     (c.queued || []).forEach(function (p, i) { list.push({ n: "q" + i, role: "user", kind: "text", text: p.text, ts: p.ts, tool: null, queued: true, failed: !!p.failed }); });
     var seen = {};
     var prev = null;
     list.forEach(function (it) {
       var key = String(it.n);
-      var sig = itemSig(it);
+      var sig = it.file ? JSON.stringify([it.file.id, it.file.name, it.file.note]) : itemSig(it);
       var ent = c.nodes[key];
       if (!ent || ent.sig !== sig) {
-        var node = buildItem(it, ent ? ent.node : null);
+        var node = it.file ? buildFile(c, it.file) : buildItem(it, ent ? ent.node : null);
         if (ent && ent.node.parentNode === D.items) { D.items.replaceChild(node, ent.node); }
         c.nodes[key] = ent = { sig: sig, node: node };
       }
