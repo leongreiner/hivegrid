@@ -308,6 +308,11 @@ class TestAgentModel(unittest.TestCase):
         ask = R.pending_json({"kind": "ask", "question": "q\x1b]0;x\x07?", "options": ["a"] * 20 + [5]})
         self.assertEqual(ask["question"], "q?")
         self.assertEqual(len(ask["options"]), 8)
+        self.assertEqual(ask["recommended"], 0)
+        pick = R.pending_json({"kind": "ask", "question": "q", "options": ["a", "b", "c"], "recommended": 2})
+        self.assertEqual(pick["recommended"], 2)
+        for bad in (3, -1, "1", None, True):
+            self.assertEqual(R.pending_json({"kind": "ask", "question": "q", "options": ["a", "b", "c"], "recommended": bad})["recommended"], 0)
         plan = R.pending_json({"kind": "plan_review", "title": "T", "choices": [
             {"id": "execute", "label": "Go\x1b[0m"}, {"id": "rm -rf", "label": "x"}, "junk"]})
         self.assertEqual(plan["choices"], [{"id": "execute", "label": "Go"}])
@@ -365,7 +370,7 @@ class TestAgentModel(unittest.TestCase):
         self.assertEqual(m["states"]["attention"], {"glyph": "?", "label": "needs you", "color": "violet", "rank": 1})
         self.assertEqual(m["dangerous"], ["ctrl-c", "ctrl-d"])
         self.assertNotEqual(m["meta_rev"], R.meta_json(True)["meta_rev"])
-        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit"])
+        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload"])
         self.assertEqual((m["limits"]["chat_max"], m["limits"]["wait_max"]), (200, 20))
 
 

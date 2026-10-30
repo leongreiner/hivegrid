@@ -27,7 +27,7 @@ export type AgentStateName = "working" | "busy" | "done" | "idle" | "attention" 
 export type Pending =
 	| { kind: "plan_review"; reviewId: string; title: string; choices: { id: string; label: string }[] }
 	| { kind: "approval"; tool: string; summary: string }
-	| { kind: "ask"; question: string; options: string[] };
+	| { kind: "ask"; question: string; options: string[]; recommended: number };
 
 export interface ToolRun {
 	name: string;
@@ -112,8 +112,8 @@ export function summarizeArgs(args: unknown): string {
 	return "";
 }
 
-/** Extract question + options from an `ask` tool call's args (shape unverified: tolerate variants). */
-export function extractAsk(args: unknown): { question: string; options: string[] } {
+/** Extract question + options (+ the option omp's selector starts on) from an `ask` tool call's args (shape unverified: tolerate variants). */
+export function extractAsk(args: unknown): { question: string; options: string[]; recommended: number } {
 	const a = asRecord(args);
 	const first = Array.isArray(a.questions) && a.questions.length ? asRecord(a.questions[0]) : a;
 	const q = first.question ?? first.prompt ?? first.text ?? a.question;
@@ -127,7 +127,9 @@ export function extractAsk(args: unknown): { question: string; options: string[]
 			if (typeof label === "string") options.push(clip(label, 80));
 		}
 	}
-	return { question: typeof q === "string" ? clip(q, 300) : "", options };
+	const rec = first.recommended;
+	const recommended = typeof rec === "number" && Number.isInteger(rec) && rec >= 0 && rec < options.length ? rec : 0;
+	return { question: typeof q === "string" ? clip(q, 300) : "", options, recommended };
 }
 
 /** omp's fixed plan-review answers (resolvePlanReview choices); its event carries no list (18.12). */
@@ -240,7 +242,7 @@ export function reduce(m: AgentModel, ev: HiveEvent, now: number): AgentModel {
 			n = { ...m, tools, running: true, started: true, limit: null };
 			if (ev.name === "ask") {
 				const a = extractAsk(ev.args);
-				n = { ...n, pending: { kind: "ask", question: a.question, options: a.options } };
+				n = { ...n, pending: { kind: "ask", question: a.question, options: a.options, recommended: a.recommended } };
 			}
 			break;
 		}

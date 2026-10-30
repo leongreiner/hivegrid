@@ -802,7 +802,7 @@ APP_JS = r"""(function () {
     web: { glyph: "\u25cd", label: "web" },
     shell: { glyph: "\u203a", label: "shell" }
   };
-  var DEFAULT_LIMITS = { prompt: 8000, key_text: 256, feedback: 4000 };
+  var DEFAULT_LIMITS = { prompt: 8000, key_text: 256, feedback: 4000, upload: 25 * 1024 * 1024 };
   var DEFAULT_LEVELS = ["off", "minimal", "low", "medium", "high"];
   var SPIN = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f";
   var WAIT = 20;
@@ -871,6 +871,7 @@ APP_JS = r"""(function () {
   var drafts = {};
   var feedbackDrafts = {};
   var pinned = true;
+  var uploading = false;
   var pendKey = null;
   var limKey = null;
   var refineOpen = false;
@@ -1043,7 +1044,12 @@ APP_JS = r"""(function () {
     var headers = { "Authorization": "Bearer " + token };
     var init = { method: "GET", headers: headers, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" };
     if (opt.etag) { headers["If-None-Match"] = opt.etag; }
-    if (opt.body !== undefined) {
+    if (opt.file) {
+      init.method = "POST";
+      headers["Content-Type"] = "application/octet-stream";
+      headers["X-Hivegrid-Remote"] = "1";
+      init.body = opt.file;
+    } else if (opt.body !== undefined) {
       init.method = "POST";
       headers["Content-Type"] = "application/json";
       headers["X-Hivegrid-Remote"] = "1";
@@ -1329,7 +1335,9 @@ APP_JS = r"""(function () {
     D.send = h("button", { class: "btn primary send", type: "button", onclick: submit }, "send");
     D.plus = h("button", { class: "btn icon", type: "button", "aria-label": "Actions", "aria-haspopup": "dialog", onclick: openActions }, "+");
     D.note = h("p", { class: "note", hidden: true });
-    D.compose = h("div", { class: "compose write" }, D.note, D.plus, D.ta, D.send);
+    D.attach = h("button", { class: "btn icon", type: "button", "aria-label": "Attach a file", title: "Attach a file", onclick: function () { D.file.value = ""; D.file.click(); } }, "\u2191");
+    D.file = h("input", { type: "file", multiple: "", hidden: "", onchange: function () { attachFiles(Array.prototype.slice.call(D.file.files)); } });
+    D.compose = h("div", { class: "compose write" }, D.note, D.plus, D.attach, D.ta, D.send, D.file);
     D.body = h("div", { class: "d-body", hidden: true });
     D.body.appendChild(D.ctx);
     D.body.appendChild(D.chatbox);
@@ -1943,6 +1951,8 @@ APP_JS = r"""(function () {
     D.send.textContent = mode === "answer" ? "answer" : "send";
     D.send.disabled = mode === "none" || !D.ta.value.trim();
     D.plus.disabled = false;
+    D.attach.hidden = !(meta && meta.capabilities && meta.capabilities.indexOf("upload") >= 0);
+    D.attach.disabled = mode === "none" || uploading;
     D.strip.hidden = !can.ack;
     var note = "";
     if (mode === "answer" && a.pending && a.pending.kind !== "plan_review") { note = "Tap above, or type an answer: it is pasted, then Enter."; }
@@ -2058,9 +2068,15 @@ APP_JS = r"""(function () {
       D.pend.appendChild(h("h3", null, "Question"));
       D.pend.appendChild(h("p", { class: "what" }, p.question || ""));
       var box = h("div", { class: "pbtns" });
+      var start = typeof p.recommended === "number" ? p.recommended : 0;
       (p.options || []).forEach(function (o, i) {
         if (i > 8) { return; }
-        box.appendChild(h("button", { class: "btn key opt", type: "button", disabled: !can.keys, onclick: function () { sendKeys(a.id, [String(i + 1)], false, null); } }, h("kbd", null, String(i + 1)), o));
+        // omp's selector takes no digits: its cursor starts on the recommended option, so move it with arrows, then Enter.
+        var keys = [];
+        for (var k = start; k < i; k++) { keys.push("down"); }
+        for (var j = start; j > i; j--) { keys.push("up"); }
+        keys.push("enter");
+        box.appendChild(h("button", { class: "btn key opt", type: "button", disabled: !can.keys, onclick: function () { sendKeys(a.id, keys, false, null); } }, h("kbd", null, String(i + 1)), o));
       });
       box.appendChild(keyBtn(a, "enter", "enter", "", "\u21b5"));
       box.appendChild(keyBtn(a, "esc", "esc", "", null));
@@ -2099,6 +2115,47 @@ APP_JS = r"""(function () {
       D.send.disabled = false;
       if (r && id === selId && D.ta.value.replace(/\r\n?/g, "\n") === text) { D.ta.value = ""; delete drafts[id]; growPrompt(); }
       if (id === selId) { onPromptInput(); }
+    });
+  }
+  // Each chosen file goes to the server one after the other (raw bytes); its path on this machine is added to the message as
+  // `@<path>` on its own line, which omp reads as a file mention. Nothing is sent to the agent until the user presses send.
+  function uploadOne(id, file) {
+    return api(agentUrl(id, "upload") + "?name=" + encodeURIComponent(file.name || "file"), { file: file, timeout: 300000 }).then(function (r) {
+      if (r.status >= 200 && r.status < 300 && r.data && r.data.path) { return r.data.path; }
+      if (r.status !== 401) { toast((file.name || "file") + ": " + errText(r), true); }
+      return null;
+    }, function () { toast((file.name || "file") + ": the upload did not finish", true); return null; });
+  }
+  function attachFiles(files) {
+    var id = selId;
+    if (uploading || id === null || !files.length) { return; }
+    var max = limitOf("upload");
+    var todo = files.filter(function (f) {
+      if (f.size > max) { toast(f.name + " is larger than " + Math.round(max / 1048576) + " MB.", true); return false; }
+      if (f.size === 0) { toast(f.name + " is empty.", true); return false; }
+      return true;
+    });
+    if (!todo.length) { return; }
+    uploading = true;
+    D.attach.disabled = true;
+    var lines = [];
+    var step = Promise.resolve();
+    todo.forEach(function (f, i) {
+      step = step.then(function () {
+        toast("Uploading " + f.name + (todo.length > 1 ? " (" + (i + 1) + "/" + todo.length + ")" : "") + "\u2026");
+        return uploadOne(id, f).then(function (p) { if (p) { lines.push("@" + p); } });
+      });
+    });
+    step.then(function () {
+      uploading = false;
+      var base = id === selId ? D.ta.value : (drafts[id] || "");
+      var text = base + (base && !/\n$/.test(base) ? "\n" : "") + lines.join("\n") + (lines.length ? "\n" : "");
+      if (lines.length) {
+        drafts[id] = text;
+        if (id === selId) { D.ta.value = text; D.ta.focus(); growPrompt(); }
+        toast(lines.length === 1 ? "File attached: add a message and send." : lines.length + " files attached: add a message and send.");
+      }
+      if (id === selId) { onPromptInput(); updateDetail(); }
     });
   }
   function sendAck() {

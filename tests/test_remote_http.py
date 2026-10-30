@@ -301,6 +301,18 @@ class TestFlows(HttpCase):
         self.assertEqual((r.status, data["readonly"]), (200, True))
         self.assertEqual(self.req("GET", "/api/agents")[0].status, 200)
 
+    def test_a_large_upload_arrives_whole_over_a_real_socket(self):
+        data = bytes(range(256)) * (3 * 4096) + b"tail-bytes"   # 3 MiB and a bit: several reads of the body
+        r, body = self.jreq("POST", "/api/agents/3/upload?name=big.bin", raw=data, json_headers=False,
+                            headers={"Content-Type": "application/octet-stream", "X-Hivegrid-Remote": "1"})
+        self.assertEqual((r.status, body["size"], body["name"]), (200, len(data), "big.bin"))
+        with open(body["path"], "rb") as f:
+            self.assertEqual(f.read(), data)
+        r, body = self.jreq("POST", "/api/agents/3/upload?name=big.bin", raw=b"x", json_headers=False,
+                            headers={"Content-Type": "application/octet-stream", "X-Hivegrid-Remote": "1",
+                                     "Content-Length": str(26 * 1024 * 1024)})
+        self.assertEqual((r.status, body["error"]), (413, "too_large"))
+
 
 class TestInertData(HttpCase):
     PAYLOADS = ("<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "\x1b]0;pwned\x07\x1b[2J</title><svg onload=1>")

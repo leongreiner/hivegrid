@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import hivegrid_agents as A  # noqa: E402
 import hivegrid_hive as HV  # noqa: E402
 import hivegrid_outbox as O  # noqa: E402
+import hivegrid_upload as X  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
 import hivegrid_remote_history as HI  # noqa: E402
 import hivegrid_remote_pending as PQ  # noqa: E402
@@ -78,6 +79,8 @@ LIST_TTL = 1.5
 HEADER_DEADLINE = 15.0     # seconds a client has for the request line and headers (absolute)
 BODY_DEADLINE = 15.0       # and for the body, counted from the headers
 DRAIN_DEADLINE = 5.0       # and what a refused request's leftover body may take
+UPLOAD_DEADLINE = 300.0    # an upload's body, counted from when it is accepted (a phone on a slow link)
+UPLOADS_AT_ONCE = 2
 PEER_CAP = 8               # concurrent connections per client key (peer address plus forwarded identity)
 WAIT_MAX = 20              # longest `wait=` a long poll may ask for, seconds
 CHAT_DEFAULT, CHAT_MAX = 60, 200
@@ -747,7 +750,7 @@ def state_vocabulary():
                 "rank": U.STATES[k].rank} for k in VOCAB}
 
 
-CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit")
+CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload")
 
 
 def meta_json(readonly, terminal=False):
@@ -756,7 +759,7 @@ def meta_json(readonly, terminal=False):
     capabilities = CAPABILITIES + (("terminal",) if terminal else ())
     states = state_vocabulary()
     limits = {"prompt": MAX_PROMPT, "keys": MAX_KEYS, "key_text": MAX_KEY_TEXT, "feedback": MAX_FEEDBACK,
-              "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX}
+              "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX, "upload": X.MAX_UPLOAD}
     return {"v": API_VERSION, "readonly": bool(readonly), "terminal": terminal, "limits": limits,
             "states": states, "keys": list(KEYS), "dangerous": list(DANGEROUS_KEYS),
             "capabilities": list(capabilities),
@@ -772,8 +775,10 @@ def pending_json(pend):
         return {"kind": kind, "tool": sanitize_line(pend.get("tool"), 80), "summary": sanitize_line(pend.get("summary"), 200)}
     if kind == "ask":
         options = pend.get("options") if isinstance(pend.get("options"), list) else []
-        return {"kind": kind, "question": sanitize_line(pend.get("question"), 300),
-                "options": [sanitize_line(o, 80) for o in options[:8] if isinstance(o, str)]}
+        options = [sanitize_line(o, 80) for o in options[:8] if isinstance(o, str)]
+        rec = pend.get("recommended")
+        rec = rec if isinstance(rec, int) and not isinstance(rec, bool) and 0 <= rec < len(options) else 0
+        return {"kind": kind, "question": sanitize_line(pend.get("question"), 300), "options": options, "recommended": rec}
     if kind == "plan_review":
         raw = pend.get("choices") if isinstance(pend.get("choices"), list) else []
         choices = [{"id": c["id"], "label": sanitize_line(c.get("label") or c["id"], 80)}
@@ -889,10 +894,11 @@ class Request:
     the body bytes; `duplicate` is true when a header that must be unique came twice; `alive()` says
     whether the client is still connected (a held request stops waiting for one that left)."""
 
-    def __init__(self, method, target, headers, peer="", read=None, duplicate=False, alive=None):
+    def __init__(self, method, target, headers, peer="", read=None, duplicate=False, alive=None, extend=None):
         self.method, self.target, self.headers, self.peer = method, target, headers, peer
         self.read, self.duplicate = read or (lambda n: b""), duplicate
         self.alive = alive or (lambda: True)
+        self.extend = extend or (lambda seconds: None)   # gives the body more time (an upload)
         self.body_read = False
 
 
@@ -984,6 +990,7 @@ class App:
         self.quit_bucket = Bucket(1.0 / QUIT_EVERY, QUIT_BURST, clock)
         self.quitter = quitter or HI.SessionQuitter(self.mux, clock=clock, sleep=self.sleep, foreground=_foreground)
         self.history = history or HI.History(sanitize_line, home=self.home, clock=clock)
+        self._uploading = threading.BoundedSemaphore(UPLOADS_AT_ONCE)
 
     # -- helpers
     def _error(self, err):
@@ -1147,7 +1154,7 @@ class App:
 
         fm = re.fullmatch(r"/api/agents/([^/]+)/files(?:/([^/]+))?", path)
         hm = re.fullmatch(r"/api/history/([0-9a-f]{24})/revive", path)
-        m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account|quit)", path)
+        m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account|quit|upload)", path)
         if path in self.GET_ROUTES or path in self.POST_ROUTES:
             action, ident = path, None
         elif hm:
@@ -1164,6 +1171,8 @@ class App:
         try:
             if req.method == "GET":
                 return self._get(req, action, ident, query)
+            if action == "upload":
+                return self._upload(req, ident, query)
             body = self._post_body(req)
             if self.readonly:
                 raise HttpError("readonly", "this server is read-only")
@@ -1173,12 +1182,13 @@ class App:
         except MuxFailed as exc:
             raise HttpError("mux_failed", str(exc)) from None
 
-    def _post_body(self, req):
+    def _post_head(self, req, ctype, limit):
+        """The checks every write passes before its body is read; returns the body length."""
         h = req.headers
         if not origin_ok(h.get("origin"), h.get("host"), h.get("sec-fetch-site")):
             raise HttpError("forbidden_origin", "cross-site request refused")
-        if (h.get("content-type") or "").split(";")[0].strip().lower() != "application/json":
-            raise HttpError("unsupported_media_type", "Content-Type must be application/json")
+        if (h.get("content-type") or "").split(";")[0].strip().lower() != ctype:
+            raise HttpError("unsupported_media_type", f"Content-Type must be {ctype}")
         if h.get("x-hivegrid-remote") != "1":
             raise HttpError("forbidden_origin", "missing X-Hivegrid-Remote header")
         if "transfer-encoding" in h or h.get("content-length") is None:
@@ -1186,11 +1196,15 @@ class App:
         length = h["content-length"].strip()
         if not re.fullmatch(r"\d{1,9}", length):
             raise HttpError("bad_request", "bad Content-Length")
-        if int(length) > MAX_BODY:
-            raise HttpError("too_large", f"body is larger than {MAX_BODY} bytes")
-        raw = req.read(int(length))
+        if int(length) > limit:
+            raise HttpError("too_large", f"body is larger than {limit} bytes")
+        return int(length)
+
+    def _post_body(self, req):
+        length = self._post_head(req, "application/json", MAX_BODY)
+        raw = req.read(length)
         req.body_read = True
-        if len(raw) != int(length):
+        if len(raw) != length:
             raise HttpError("bad_request", "short body")
         try:
             body = json.loads(raw.decode("utf-8"))
@@ -1199,6 +1213,32 @@ class App:
         if not isinstance(body, dict):
             raise HttpError("bad_request", "body must be a JSON object")
         return body
+
+    def _upload(self, req, ident, query):
+        """`POST /api/agents/<id>/upload?name=<file name>`: the raw bytes of a file the phone sends. Stored in the
+        uploads folder of this machine; answers its absolute path, which the page puts into the message."""
+        length = self._post_head(req, "application/octet-stream", X.MAX_UPLOAD)
+        if self.readonly:
+            raise HttpError("readonly", "this server is read-only")
+        names = urllib.parse.parse_qs(query).get("name", [])
+        if len(names) != 1 or not names[0].strip() or len(names[0]) > 255:
+            raise HttpError("bad_request", "name must be the file's name")
+        agent, agents = self._find(ident, True)
+        if agent.state == "exited":
+            raise HttpError("agent_not_ready", "the agent has exited")
+        if not self._uploading.acquire(blocking=False):
+            raise HttpError("rate_limited", "another upload is running", {"Retry-After": "2"})
+        try:
+            req.extend(UPLOAD_DEADLINE)
+            try:
+                stored = X.save(X.upload_root(home=self.home), names[0], length, req.read, now=self.wall())
+            except X.UploadError as exc:
+                raise HttpError("bad_request", str(exc)) from None
+            req.body_read = True
+        finally:
+            self._uploading.release()
+        self._written("upload", A.agent_label(agent, agents), stored["size"])
+        return Response(200, _json_body({"ok": True, **stored}))
 
     # -- responses
     def _json(self, req, obj, rev=None):
@@ -2047,12 +2087,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD" and resp.status != 304:
             self.wfile.write(resp.body)
 
+    def _extend_deadline(self, seconds):
+        """A request that has earned it (an upload, after its token and headers passed) gets more time for its body."""
+        self.rfile.deadline = self.clock() + seconds
+
     def _serve(self):
         self.rfile.deadline = self.clock() + BODY_DEADLINE
         names = [k.lower() for k in self.headers.keys()]
         req = Request(self.command, self.path, {k.lower(): v for k, v in self.headers.items()},
                       self.client_address[0], self.rfile.read,
-                      duplicate=any(names.count(h) > 1 for h in UNIQUE_HEADERS), alive=self._peer_open)
+                      duplicate=any(names.count(h) > 1 for h in UNIQUE_HEADERS), alive=self._peer_open,
+                      extend=self._extend_deadline)
         timed_out = False
         if not self._claim(self.app._client_key(req)):
             resp = Response(429, _json_body({"ok": False, "error": "rate_limited", "message": "too many connections"}),

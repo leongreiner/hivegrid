@@ -137,7 +137,18 @@ describe("reduce", () => {
 			{ type: "tool_start", id: "q", name: "ask", args: { question: "Which?", options: ["x", "y"] } },
 			2,
 		);
-		expect(mid.pending).toEqual({ kind: "ask", question: "Which?", options: ["x", "y"] });
+		expect(mid.pending).toEqual({ kind: "ask", question: "Which?", options: ["x", "y"], recommended: 0 });
+		const rec = reduce(
+			reduce(initialModel(0), { type: "agent_start" }, 1),
+			{
+				type: "tool_start",
+				id: "q",
+				name: "ask",
+				args: { questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }], recommended: 1 }] },
+			},
+			2,
+		);
+		expect(rec.pending).toEqual({ kind: "ask", question: "Which?", options: ["A", "B"], recommended: 1 });
 	});
 
 	test("plan review pending survives loop end, cleared on resolve", () => {
