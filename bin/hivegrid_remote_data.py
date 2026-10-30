@@ -564,6 +564,33 @@ class ChatCache:
             rows = [dict(i, tool=dict(i["tool"]) if i["tool"] else None) for i in view[lo:hi]]
             return rows, lo > 0 or self._can_extend(f), stamp
 
+    def mark(self, path):
+        """The lowest item number a line appended to `path` from now on can have (None when it cannot be
+        read): every item parsed so far is below it."""
+        with self._lock:
+            f = self._sync(path)
+            return None if f is None else f.offset * BLOCKS_PER_LINE
+
+    def user_items(self, path, min_n=None, min_ts=None, limit=200):
+        """The newest user text items of `path` on the active branch, oldest first, as {"n", "ts", "text"}
+        (None when the file cannot be read): at most `limit`, going back only while `n >= min_n` (when
+        given) and while an item's `ts` is not before `min_ts` (when given and the item has one). Reads
+        only what was appended since the last look; nothing older than the cache is fetched."""
+        with self._lock:
+            f = self._sync(path)
+            if f is None:
+                return None
+            out = []
+            for i in reversed(self._active(f)):
+                if len(out) >= limit or (min_n is not None and i["n"] < min_n):
+                    break
+                if min_ts is not None and i["ts"] is not None and i["ts"] < min_ts:
+                    break
+                if i["role"] == "user" and i["kind"] == "text":
+                    out.append({"n": i["n"], "ts": i["ts"], "text": i["text"]})
+            out.reverse()
+            return out
+
 
 # ---------------------------------------------------------------- accounts
 
@@ -1191,3 +1218,128 @@ def session_options(accounts, agents, san_line, home=None):
         add(os.path.join(projects, name), name)
         count += len(dirs) - before
     return profiles, dirs, real
+
+
+# ---------------------------------------------------------------- custom directory for a new session
+
+SEARCH_MAX = 30            # results of one search
+SEARCH_QUERY_MAX = 100
+SEARCH_VISIT = 5000        # directories looked at per search
+SEARCH_DEPTH = 6           # levels below a root
+SEARCH_SECONDS = 1.0
+SEARCH_SKIP = frozenset(("node_modules", "__pycache__", "site-packages", "target", "venv", "dist", "build"))
+
+
+def dir_roots(home=None):
+    """The real paths a new session's directory may lie below: the home directory and, when it is a
+    link elsewhere, `~/Projects` (the one folder the options already list)."""
+    home = _home(home)
+    roots = [os.path.realpath(home)]
+    projects = os.path.realpath(os.path.join(home, "Projects"))
+    if os.path.isdir(projects) and not any(projects == r or projects.startswith(r.rstrip("/") + "/") for r in roots):
+        roots.append(projects)
+    return roots
+
+
+def _below(path, roots):
+    """True when `path` is a root or lies below one with no hidden component (`.ssh`, `.git`, ...)."""
+    for r in roots:
+        rel = os.path.relpath(path, r)
+        if rel == ".":
+            return True
+        if not (rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel)):
+            return not any(part.startswith(".") for part in rel.split(os.sep))
+    return False
+
+
+def resolve_custom_dir(shown, home=None):
+    """The real directory for a path the phone typed or picked (`~/x`, an absolute path), or None. It must
+    exist as a directory and, once links are resolved, lie in the home directory (or `~/Projects`) with no
+    hidden component: the phone cannot reach `/etc`, `~/.ssh` or a link that leads out of the home."""
+    if not isinstance(shown, str) or not shown or len(shown) > 300 or "\0" in shown:
+        return None
+    home = _home(home)
+    if shown == "~" or shown.startswith("~/"):
+        path = home.rstrip("/") + shown[1:]
+    elif os.path.isabs(shown):
+        path = shown
+    else:
+        return None
+    try:
+        real = os.path.realpath(path)
+        ok = os.path.isdir(real) and _below(real, dir_roots(home))
+    except (OSError, ValueError):
+        return None
+    return real if ok else None
+
+
+def _shown(path, home):
+    home = _home(home).rstrip("/")
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+
+def search_dirs(query, san_line, home=None, clock=time.monotonic):
+    """Directories for the phone's search box: [{path, label}], at most SEARCH_MAX, best first. A query that
+    starts with `~` or `/` is a path to complete (the folders of the typed folder whose name continues what
+    follows the last slash); anything else is words that must all appear in a folder's name or path, looked
+    for below the roots breadth-first (hidden folders, links and build folders are not entered; bounded in
+    folders looked at, depth and time). Only folders `resolve_custom_dir` would accept come back."""
+    query = (query or "").strip()[:SEARCH_QUERY_MAX]
+    if not query or "\0" in query:
+        return []
+    home, roots = _home(home), dir_roots(home)
+    out = []
+
+    def add(path):
+        shown = san_line(_shown(path, home), 200)
+        if shown and san_line(os.path.basename(path), 200) == os.path.basename(path) and shown == _shown(path, home):
+            out.append({"path": shown, "label": san_line(os.path.basename(path) or "/", 60)})
+
+    def subdirs(path):
+        try:
+            return sorted((e.name for e in os.scandir(path) if e.is_dir(follow_symlinks=False) and not e.name.startswith(".")), key=str.lower)
+        except OSError:
+            return []
+
+    if query[0] in "~/":
+        base, _slash, prefix = query.rpartition("/")
+        folder = resolve_custom_dir((base or "/") if query[0] == "/" else (base or "~"), home)
+        if folder is None:
+            return []
+        prefix = prefix.lower()
+        names = subdirs(folder)
+        for name in [n for n in names if n.lower().startswith(prefix)] + [n for n in names if prefix and prefix in n.lower() and not n.lower().startswith(prefix)]:
+            add(os.path.join(folder, name))
+            if len(out) >= SEARCH_MAX:
+                break
+        return out
+
+    words = query.lower().split()
+    end, visited = clock() + SEARCH_SECONDS, 0
+    found = []
+    level = [(r, 0) for r in roots]
+    seen = set()
+    while level and visited < SEARCH_VISIT and clock() < end:
+        nxt = []
+        for path, depth in level:
+            if path in seen:
+                continue
+            seen.add(path)
+            for name in subdirs(path):
+                visited += 1
+                if name in SEARCH_SKIP:
+                    continue
+                child = os.path.join(path, name)
+                text = _shown(child, home).lower()
+                low = name.lower()
+                if all(w in text for w in words):
+                    rank = 0 if low == query.lower() else (1 if low.startswith(words[0]) else (2 if all(w in low for w in words) else 3))
+                    found.append((rank, depth, text, child))
+                if depth + 1 < SEARCH_DEPTH:
+                    nxt.append((child, depth + 1))
+                if visited >= SEARCH_VISIT or clock() >= end:
+                    break
+        level = nxt
+    for _rank, _depth, _text, path in sorted(found)[:SEARCH_MAX]:
+        add(path)
+    return out

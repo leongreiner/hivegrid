@@ -125,6 +125,22 @@ test('arrange keeps the reading order of panes whose ids are not in order', func
   T.eq(counts, { 2, 2 })
 end)
 
+test('a pane that sets hivegrid_arrange_new gets the grid arranged once, after a moment', function(wz)
+  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3, 4, 5 }, 250) })
+  local pane = mux.window:active_pane()
+  pane._tab = mux.tab
+  function pane:tab() return mux.tab end
+  wz.emit('user-var-changed', mux.window, pane, 'hivegrid_other', '1')
+  wz.emit('user-var-changed', mux.window, pane, 'hivegrid_arrange_new', '0')
+  wz.stub.run_timers()
+  T.eq(count(mux, 'split-pane'), 0, 'other variables and values arrange nothing')
+  wz.emit('user-var-changed', mux.window, pane, 'hivegrid_arrange_new', '1')
+  T.eq(count(mux, 'split-pane'), 0, 'not at once: the new pane needs a moment to exist')
+  wz.stub.run_timers()
+  local _, counts = reading(mux)
+  T.eq(counts, { 3, 2 })
+end)
+
 test('arrange: a failed split puts every pane back beside the first, with a toast', function(wz)
   local mux, api = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3, 4, 5 }, 250) })
   local function planned(args) return args[1] == 'split-pane' and (args[5] == '--cells' or args[5] == '--percent') end
@@ -263,11 +279,12 @@ local function moves(mux)
   return bad
 end
 
-test('layouts registers no event handler: nothing runs on status ticks or window resizes', function(wz)
+test('layouts registers no handler for status ticks or window resizes; its only user-var handler is the phone one', function(wz)
   setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
-  for _, event in ipairs { 'update-status', 'window-resized', 'window-config-reloaded', 'user-var-changed' } do
+  for _, event in ipairs { 'update-status', 'window-resized', 'window-config-reloaded' } do
     T.eq(wz.stub.handlers[event] or {}, {}, event)
   end
+  T.eq(#(wz.stub.handlers['user-var-changed'] or {}), 1)
 end)
 
 test('a pane gained or lost keeps every other pane where it is', function(wz)

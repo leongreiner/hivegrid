@@ -365,7 +365,7 @@ class TestAgentModel(unittest.TestCase):
         self.assertEqual(m["states"]["attention"], {"glyph": "?", "label": "needs you", "color": "violet", "rank": 1})
         self.assertEqual(m["dangerous"], ["ctrl-c", "ctrl-d"])
         self.assertNotEqual(m["meta_rev"], R.meta_json(True)["meta_rev"])
-        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll"])
+        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit"])
         self.assertEqual((m["limits"]["chat_max"], m["limits"]["wait_max"]), (200, 20))
 
 
@@ -638,7 +638,8 @@ class AppCase(MuxCase):
         self.home = os.path.join(self.tmp.name, "home")
         os.makedirs(self.home)
         env = unittest.mock.patch.dict(os.environ, {"HOME": self.home, "CLAUDE_QUOTA_CACHE_DIR": os.path.join(self.tmp.name, "quota"),
-                                                    "XDG_CACHE_HOME": os.path.join(self.tmp.name, "cache")})
+                                                    "XDG_CACHE_HOME": os.path.join(self.tmp.name, "cache"),
+                                                    "HIVEGRID_OUTBOX": os.path.join(self.tmp.name, "outbox")})
         env.start()
         self.addCleanup(env.stop)
         self.slept = []

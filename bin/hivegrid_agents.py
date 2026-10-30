@@ -864,17 +864,26 @@ def origin(run=wezterm_cli):
 PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
-def _agent_command(profile=None):
+ARRANGE_VAR = "hivegrid_arrange_new"
+
+
+def _agent_command(profile=None, arrange=False, resume=None):
     """The `bash -ic` command line that starts the agent. With a `profile` the command is
     `omp --profile=<p>`; ValueError for a profile that is not a plain name, or when HIVEGRID_AGENT_CMD
-    names something else than plain omp (the profile flag is omp's, not any other program's)."""
+    names something else than plain omp (the profile flag is omp's, not any other program's). With
+    `arrange` the pane first sets the user var `hivegrid_arrange_new` on itself (OSC 1337, value "1"
+    base64-encoded), which asks config/layouts.lua to arrange the grid once this pane exists: nothing
+    outside the pane can set a user var. `resume` (an absolute session file path, quoted here) starts
+    `omp [--profile=<p>] --resume <file>`; like a profile it needs the plain omp command."""
     cmd = os.environ.get("HIVEGRID_AGENT_CMD") or "omp"
-    if profile:
-        if not PROFILE_NAME.fullmatch(profile):
-            raise ValueError("bad profile name")
+    if profile and not PROFILE_NAME.fullmatch(profile):
+        raise ValueError("bad profile name")
+    if profile or resume:
         if cmd.strip() != "omp":
-            raise ValueError("a profile needs the plain omp command (HIVEGRID_AGENT_CMD is set)")
-        cmd = f"omp --profile={shlex.quote(profile)}"
+            raise ValueError("a profile or a resumed session needs the plain omp command (HIVEGRID_AGENT_CMD is set)")
+        cmd = "omp" + (f" --profile={shlex.quote(profile)}" if profile else "") + (f" --resume {shlex.quote(resume)}" if resume else "")
+    if arrange:
+        cmd = f"printf '\\033]1337;SetUserVar={ARRANGE_VAR}=MQ==\\007'; {cmd}"
     return ["bash", "-ic", f"{cmd}; exec bash"]
 
 
@@ -903,14 +912,15 @@ def _spawn_in_origin(o, extra, run):
     return _split_new(run, _reading_order(grid)[-1], extra)
 
 
-def spawn_agent(cwd=None, near=None, run=wezterm_cli, profile=None):
+def spawn_agent(cwd=None, near=None, run=wezterm_cli, profile=None, arrange=False, resume=None):
     """Start the agent command (HIVEGRID_AGENT_CMD, default omp; run as `bash -ic '<cmd>; exec
     bash'`) in a new pane of the origin tab, always: the pane is split off the last grid pane and
-    stays where the split puts it (nothing re-tiles the grid). The directory is `cwd`, else
-    `near`'s, else the one of the pane the hive was opened over, else $HOME. Returns the new pane
-    id or None. `profile` starts `omp --profile=<profile>` (ValueError, before any pane exists, when
-    that cannot be done: see `_agent_command`)."""
-    command = _agent_command(profile)
+    stays where the split puts it (nothing re-tiles the grid), unless `arrange` asks the window to
+    arrange the grid once the pane is up (the phone does: nobody is there to press the key). The
+    directory is `cwd`, else `near`'s, else the one of the pane the hive was opened over, else $HOME.
+    Returns the new pane id or None. `profile` starts `omp --profile=<profile>` (ValueError, before
+    any pane exists, when that cannot be done: see `_agent_command`); `resume` adds `--resume <file>`."""
+    command = _agent_command(profile, arrange, resume)
     o = origin(run)
     if o is None:
         return None

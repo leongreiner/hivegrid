@@ -282,10 +282,10 @@ a { color: var(--accent); text-decoration: none; }
   border-bottom: 1px solid var(--rule-base);
   background: var(--base);
 }
-.row:nth-child(even) { background: color-mix(in srgb, var(--base) 90%, var(--raised) 10%); }
-.row:active { background: var(--hover); }
+.rw:nth-child(even) > .row { background: color-mix(in srgb, var(--base) 90%, var(--raised) 10%); }
+.rw > .row:active { background: var(--hover); }
 .row .mark { color: var(--accent); font-weight: 700; visibility: hidden; }
-.row.sel { background: var(--raised); color: var(--bright); }
+.rw > .row.sel { background: var(--raised); color: var(--bright); }
 .row.sel .mark { visibility: visible; }
 .row .num { color: var(--cyan); font-weight: 700; text-align: right; white-space: nowrap; }
 .row.sel .num { color: var(--accent); }
@@ -295,6 +295,21 @@ a { color: var(--accent); text-decoration: none; }
 .row .sub { grid-column: 4 / -1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .row .sub .st { font-weight: 700; }
 .row .pend { grid-column: 4 / -1; color: var(--violet); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* swipe a row to the left to quit its session: the row slides over a red Quit button */
+.rw { position: relative; overflow: hidden; background: var(--red); }
+.rw > .row { position: relative; z-index: 1; touch-action: pan-y; transition: transform .16s ease-out; }
+.rw.drag > .row { transition: none; }
+.rw.open > .row { transform: translateX(-96px); }
+.rw > .rquit { position: absolute; top: 0; right: 0; bottom: 0; width: 96px; border: 0; background: var(--red); color: var(--deep); font: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; }
+@media (prefers-reduced-motion: reduce) { .rw > .row { transition: none; } }
+/* history: past sessions */
+.hrow { padding: 10px calc(12px + var(--sar)) 10px calc(12px + var(--sal)); border-bottom: 1px solid var(--rule-base); }
+.hrow .ht { color: var(--bright); font-weight: 700; overflow-wrap: anywhere; }
+.hrow .hp { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .hm { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+.hrow .hb { margin-top: 6px; display: flex; align-items: center; gap: 1.5ch; flex-wrap: wrap; }
+.hrow .hl { color: var(--green); font-size: 12px; }
+.hrow .why { color: var(--dim); font-size: 12px; }
 .empty { padding: 28px 20px; color: var(--muted); text-align: center; }
 .empty strong { display: block; color: var(--text); font-weight: 700; margin-bottom: 4px; }
 
@@ -395,6 +410,11 @@ a { color: var(--accent); text-decoration: none; }
   overflow-wrap: anywhere;
 }
 .ts { margin-top: 2px; color: var(--dim); font-size: 11px; }
+.it-queued .bubble { background: transparent; border: 1px dashed var(--dim); color: var(--muted); }
+.it-queued .ts { color: var(--muted); font-style: italic; }
+.it-queued + .it-queued { margin-top: 0; }
+.it-queued.failed .bubble { border-color: var(--red); }
+.it-queued.failed .ts { color: var(--red); font-style: normal; }
 .it-asst { padding-left: 1.2ch; border-left: 2px solid var(--border); color: var(--text); overflow-wrap: anywhere; }
 .it-tool { margin-bottom: 2px; }
 .it-think, .it-tool, .it-image { padding-left: 1.2ch; border-left: 2px solid transparent; }
@@ -404,6 +424,15 @@ a { color: var(--accent); text-decoration: none; }
 .it-limit { text-align: center; color: var(--red); font-size: 12px; margin: 10px 0 12px; }
 .it-image { color: var(--dim); }
 .it-image::before { content: "\25A3  "; }
+.files { margin: 10px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.files:empty { display: none; }
+.fcard { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 8px 10px; max-width: 100%; }
+.fcard .fhead { display: flex; align-items: baseline; gap: 1ch; font-size: 13px; min-width: 0; }
+.fcard .fname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bright); }
+.fcard .fmeta { flex: none; color: var(--dim); font-size: 12px; }
+.fcard .fnote { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.fcard .fimg { display: block; margin-top: 8px; max-width: 100%; max-height: 60vh; border-radius: 6px; cursor: zoom-in; background: var(--deep); }
+.fcard .fbtns { margin-top: 8px; display: flex; gap: 8px; }
 details > summary { list-style: none; cursor: pointer; touch-action: manipulation; }
 details > summary::-webkit-details-marker { display: none; }
 details > summary::before { content: "\25B8"; display: inline-block; width: 2ch; color: var(--dim); }
@@ -779,7 +808,7 @@ APP_JS = r"""(function () {
   var WAIT = 20;
   var CHAT_LIMIT = 60;
   var TAIL_LINES = 200;
-  var SECTIONS = [["usage", "Usage"], ["new", "New session"], ["system", "System"], ["about", "About"]];
+  var SECTIONS = [["usage", "Usage"], ["new", "New session"], ["history", "History"], ["system", "System"], ["about", "About"]];
   var REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
   // ---------------------------------------------------------------- DOM helpers: text only, never markup
@@ -852,7 +881,12 @@ APP_JS = r"""(function () {
   var C = null;
   var sheet = null;
   var starting = null;
-  var ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", busy: false, err: null };
+  var swipeOpen = null;       // the id of the agent whose row is swiped open
+  var swipeDrag = false;      // a finger is dragging a row: the list is not rebuilt meanwhile
+  var swipeStale = false;     // ... and a rebuild is due once it lets go
+  var quitting = {};
+  var reviving = false;
+  var ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", query: "", busy: false, err: null, found: [], searching: false, timer: null };
   var modelsCache = {};
 
   // ---------------------------------------------------------------- small helpers
@@ -882,6 +916,12 @@ APP_JS = r"""(function () {
     if (s < 3600) { return Math.floor(s / 60) + "m"; }
     if (s < 86400) { return Math.floor(s / 3600) + "h" + ("0" + Math.floor((s % 3600) / 60)).slice(-2) + "m"; }
     return Math.floor(s / 86400) + "d" + ("0" + Math.floor((s % 86400) / 3600)).slice(-2) + "h";
+  }
+  function fmtSize(n) {
+    if (typeof n !== "number") { return ""; }
+    if (n < 1024) { return n + " B"; }
+    if (n < 1048576) { return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB"; }
+    return (n / 1048576).toFixed(1) + " MB";
   }
   function fmtTok(n) {
     if (typeof n !== "number") { return ""; }
@@ -1268,7 +1308,8 @@ APP_JS = r"""(function () {
     D.older = h("div", { class: "older", hidden: true });
     D.items = h("div", { class: "items" });
     D.working = h("div", { class: "working", hidden: true, role: "status" });
-    D.inner = h("div", { class: "chat-inner" }, D.older, D.items, D.working);
+    D.files = h("div", { class: "files", "aria-label": "Files sent by this agent" });
+    D.inner = h("div", { class: "chat-inner" }, D.older, D.items, D.files, D.working);
     D.chat = h("div", { class: "chat", tabindex: "0", role: "log", "aria-label": "Conversation", "aria-live": "off", onscroll: onChatScroll }, D.inner);
     D.tail = h("pre", { class: "tail", tabindex: "0", "aria-label": "Agent screen" });
     D.tailbox = h("div", { class: "tailbox", hidden: true, onscroll: onChatScroll }, D.tail);
@@ -1348,6 +1389,7 @@ APP_JS = r"""(function () {
     U.chips.hidden = agents.length === 0;
   }
   function renderList() {
+    if (swipeDrag) { swipeStale = true; return; }
     var keep = U.list.scrollTop;
     clear(U.list);
     var shown = agents.filter(function (a) { return !filter || a.state === filter; });
@@ -1375,7 +1417,7 @@ APP_JS = r"""(function () {
         h("span", { class: "meta" }, ageNode(a)),
         h("span", { class: "sub" }, sub),
         pend ? h("span", { class: "pend" }, pend) : null);
-      U.list.appendChild(row);
+      U.list.appendChild(swipeable(a, row));
     });
     U.list.scrollTop = keep;
     clear(U.foot);
@@ -1504,13 +1546,16 @@ APP_JS = r"""(function () {
   // ---------------------------------------------------------------- chat state
   function newChat(id) {
     return { id: id, map: {}, rev: null, source: null, mode: "chat", hasOlder: false, olderLoaded: false, loadingOlder: false,
-      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null };
+      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null, blobs: {}, fileSig: "", fileNodes: {} };
   }
   function openChat(id) {
     chatLoop.stop();
+    var C0 = C;
     C = newChat(id);
     pinned = true;
+    if (C0 && C0.blobs) { Object.keys(C0.blobs).forEach(function (k) { if (C0.blobs[k].url) { URL.revokeObjectURL(C0.blobs[k].url); } }); }
     clear(D.items);
+    clear(D.files);
     D.tail.textContent = "";
     D.older.hidden = true;
     D.latest.hidden = true;
@@ -1552,8 +1597,71 @@ APP_JS = r"""(function () {
       return { fail: true, retry: r.retry };
     });
   }
+  // ---------------------------------------------------------------- files sent with hivegrid-send
+  // The bytes are fetched with the token in a header (never in a URL) and shown from a blob: URL; names and notes are text only.
+  function fileBlob(c, f) {
+    var have = c.blobs[f.id];
+    if (have) { return have.promise; }
+    var ent = { url: null, promise: null };
+    ent.promise = fetch("/api/agents/" + encodeURIComponent(c.id) + "/files/" + encodeURIComponent(f.id),
+      { headers: { "Authorization": "Bearer " + token }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" }).then(function (r) {
+      if (!r.ok) { throw new Error("status " + r.status); }
+      return r.blob();
+    }).then(function (b) {
+      ent.url = URL.createObjectURL(b);
+      return ent.url;
+    });
+    ent.promise.catch(function () { delete c.blobs[f.id]; });
+    c.blobs[f.id] = ent;
+    return ent.promise;
+  }
+  function saveFile(c, f) {
+    fileBlob(c, f).then(function (url) {
+      var a = h("a", { href: url, download: f.name || "file" });
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }, function () { toast("could not load " + (f.name || "the file"), true); });
+  }
+  function buildFile(c, f) {
+    var card = h("div", { class: "fcard" },
+      h("div", { class: "fhead" }, h("span", { class: "fname" }, (f.image ? "\u25a3 " : "\u2193 ") + (f.name || "file")),
+        h("span", { class: "fmeta" }, fmtSize(f.size) + (f.ts ? " \u00b7 " + fmtTime(f.ts) : ""))));
+    if (f.note) { card.appendChild(h("div", { class: "fnote" }, f.note)); }
+    if (f.image) {
+      var img = h("img", { class: "fimg", alt: f.name || "image sent by the agent", decoding: "async" });
+      img.onload = function () { if (pinned && C === c) { scrollBottom(); } };
+      fileBlob(c, f).then(function (url) {
+        img.src = url;
+        img.onclick = function () { window.open(url, "_blank", "noopener"); };
+      }, function () { img.replaceWith(h("div", { class: "fnote" }, "the image could not be loaded")); });
+      card.appendChild(img);
+    }
+    card.appendChild(h("div", { class: "fbtns" }, h("button", { class: "btn", type: "button", onclick: function () { saveFile(c, f); } }, "save")));
+    return card;
+  }
+  function renderFiles(c, files) {
+    if (c !== C) { return; }
+    var sig = JSON.stringify(files.map(function (f) { return [f.id, f.name, f.note]; }));
+    if (sig === c.fileSig) { return; }
+    c.fileSig = sig;
+    var seen = {};
+    var prev = null;
+    files.slice().reverse().forEach(function (f) {      // oldest first, like the chat
+      seen[f.id] = true;
+      var node = c.fileNodes[f.id] || (c.fileNodes[f.id] = buildFile(c, f));
+      var expected = prev ? prev.nextSibling : D.files.firstChild;
+      if (node !== expected) { D.files.insertBefore(node, expected); }
+      prev = node;
+    });
+    Object.keys(c.fileNodes).forEach(function (k) {
+      if (!seen[k]) { var n = c.fileNodes[k]; if (n.parentNode) { n.parentNode.removeChild(n); } delete c.fileNodes[k]; }
+    });
+    if (pinned) { scrollBottom(); }
+  }
   function applyChat(c, data) {
     c.loaded = true;
+    renderFiles(c, Array.isArray(data.files) ? data.files : []);
     c.gone = false;
     c.state = data.state;
     c.reason = data.reason;
@@ -1581,6 +1689,7 @@ APP_JS = r"""(function () {
     c.map = keep;
     items.forEach(function (it) { c.map[it.n] = it; });
     if (!c.olderLoaded) { c.hasOlder = !!data.has_older; }
+    c.queued = Array.isArray(data.pending_prompts) ? data.pending_prompts : [];
     renderTranscript(true);
     updateDetail();
   }
@@ -1621,7 +1730,7 @@ APP_JS = r"""(function () {
   }
 
   // ---------------------------------------------------------------- transcript
-  function itemSig(it) { return JSON.stringify([it.role, it.kind, it.text, it.tool]); }
+  function itemSig(it) { return JSON.stringify([it.role, it.kind, it.text, it.tool, it.queued || null, it.failed || null]); }
   function renderTranscript(live) {
     var c = C;
     if (!c) { return; }
@@ -1629,6 +1738,8 @@ APP_JS = r"""(function () {
     var oldH = D.chat.scrollHeight;
     var oldTop = D.chat.scrollTop;
     var list = Object.keys(c.map).map(function (k) { return c.map[k]; }).sort(function (a, b) { return a.n - b.n; });
+    // prompts sent from the phone that omp has not written to the session yet: greyed bubbles after the last real item, in send order
+    (c.queued || []).forEach(function (p, i) { list.push({ n: "q" + i, role: "user", kind: "text", text: p.text, ts: p.ts, tool: null, queued: true, failed: !!p.failed }); });
     var seen = {};
     var prev = null;
     list.forEach(function (it) {
@@ -1703,6 +1814,9 @@ APP_JS = r"""(function () {
     } else if (it.kind === "thinking") {
       el = h("div", { class: "it it-think" },
         h("details", { class: "think" }, h("summary", null, "thinking"), h("div", { class: "think-body" }, it.text || "")));
+    } else if (it.role === "user" && it.queued) {
+      var qnote = (it.failed ? "\u2717 not delivered" : "\u29d6 queued, waiting for the agent") + (it.ts ? " \u00b7 " + fmtTime(it.ts) : "");
+      el = h("div", { class: "it it-user it-queued" + (it.failed ? " failed" : "") }, h("div", { class: "bubble" }, it.text || ""), h("div", { class: "ts" }, qnote));
     } else if (it.role === "user") {
       el = h("div", { class: "it it-user" }, h("div", { class: "bubble" }, it.text || ""), it.ts ? h("div", { class: "ts" }, fmtTime(it.ts)) : null);
     } else {
@@ -2044,8 +2158,8 @@ APP_JS = r"""(function () {
         s.body.appendChild(aRow({ glyph: "\u25a4", title: "Compact", meta: "/compact", hint: can.prompt ? null : "not while the agent waits for an answer", disabled: !can.prompt, onclick: function () { closeSheet(); post(agentUrl(id, "prompt"), { text: "/compact" }, "Compact sent"); } }));
         s.body.appendChild(aRow({ glyph: "\u2713", title: "Acknowledge", hint: can.ack ? null : "only when the agent is done or idle, or its limit has reset", disabled: !can.ack, onclick: function () { closeSheet(); post(agentUrl(id, "ack"), {}, "Acknowledged"); } }));
         s.body.appendChild(aRow({ glyph: "\u21c4", title: "Switch account", meta: cur.profile || "", hint: can.account ? null : "only while the agent is idle or stopped on its limit, on an omp profile", disabled: !can.account, onclick: function () { openAccounts(id); } }));
-        s.body.appendChild(aRow({ glyph: "\u25cb", title: "Quit agent", meta: "Ctrl-D", danger: true, hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () {
-          ask("Quit agent \u201c" + agentLine(cur) + "\u201d? This sends Ctrl-D.", "Quit agent").then(function (ok) { if (ok) { closeSheet(); sendKeys(id, ["ctrl-d"], true, "Quit sent"); } });
+        s.body.appendChild(aRow({ glyph: "\u25cb", title: "Quit session", meta: "Ctrl-D", danger: true, hint: can.quit ? "it leaves the list; History can start it again" : (cur.state === "exited" ? "the agent has exited" : "only when the agent is idle, done or stopped on its limit"), disabled: !can.quit, onclick: function () {
+          ask("Quit \u201c" + agentLine(cur) + "\u201d? omp gets Ctrl-D and the session leaves the list. You can start it again from History.", "Quit session").then(function (ok) { if (ok) { closeSheet(); quitSession(id); } });
         } }));
         s.body.appendChild(aRow({ glyph: "\u2718", title: "Ctrl-C", meta: "kill", danger: true, hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () {
           ask("Send Ctrl-C to \u201c" + agentLine(cur) + "\u201d?", "Send Ctrl-C").then(function (ok) { if (ok) { closeSheet(); sendKeys(id, ["ctrl-c"], true, "Ctrl-C sent"); } });
@@ -2193,7 +2307,7 @@ APP_JS = r"""(function () {
         h("button", { class: "btn ghost icon", type: "button", "aria-label": "Close menu", onclick: closeMenu }, "\u2715")),
       M.tabs, M.body);
     M.root = h("div", { class: "menu", hidden: true }, h("div", { class: "scrim", onclick: closeMenu }), M.panel);
-    M.data = { usage: null, system: null };
+    M.data = { usage: null, system: null, history: null };
   }
   function renderMenu() {
     if (!menuSec) { return; }
@@ -2207,6 +2321,7 @@ APP_JS = r"""(function () {
     M.conn = null;
     if (menuSec === "usage") { drawUsage(); }
     else if (menuSec === "new") { drawNew(); }
+    else if (menuSec === "history") { drawHistory(); }
     else if (menuSec === "system") { drawSystem(); }
     else { drawAbout(); }
     M.body.scrollTop = keep;
@@ -2232,6 +2347,8 @@ APP_JS = r"""(function () {
       }, function () { M.data.systemErr = "no connection"; if (menuSec === sec) { renderMenu(); } }).then(again);
     } else if (sec === "new") {
       loadOptions();
+    } else if (sec === "history") {
+      loadHistory(true);
     } else {
       again();
     }
@@ -2296,11 +2413,9 @@ APP_JS = r"""(function () {
     });
     M.body.appendChild(opts);
     M.body.appendChild(h("div", { class: "sec-h" }, "directory"));
-    if (ns.dirs.length > 8) {
-      var inp = h("input", { class: "field", type: "search", placeholder: "filter directories", "aria-label": "Filter directories", autocapitalize: "off", autocorrect: "off", spellcheck: "false", oninput: function (ev) { ns.filter = ev.target.value.toLowerCase(); drawDirs(); } });
-      inp.value = ns.filter;
-      M.body.appendChild(h("div", { class: "sfilter" }, inp));
-    }
+    var inp = h("input", { class: "field", type: "search", placeholder: "search folders or type a path (~/work/x)", "aria-label": "Search folders", autocapitalize: "off", autocorrect: "off", spellcheck: "false", oninput: function (ev) { ns.query = ev.target.value.trim(); ns.filter = ns.query.toLowerCase(); drawDirs(); searchDirs(); } });
+    inp.value = ns.query;
+    M.body.appendChild(h("div", { class: "sfilter" }, inp));
     M.dirs = h("div", { class: "dirs", role: "listbox", "aria-label": "Directory" });
     M.body.appendChild(M.dirs);
     drawDirs();
@@ -2309,15 +2424,35 @@ APP_JS = r"""(function () {
     M.body.appendChild(h("div", { class: "startbar write" }, go,
       h("div", { class: "why" }, ns.dir === null ? "choose a directory" : "omp starts in a new pane of the Hivegrid window, then its chat opens here")));
   }
+  // The folders of the search box beyond the offered ones: the server looks below the home directory (debounced, newest answer wins).
+  function searchDirs() {
+    window.clearTimeout(ns.timer);
+    var q = ns.query;
+    if (q.length < 2) { ns.found = []; ns.searching = false; drawDirs(); return; }
+    ns.searching = true;
+    ns.timer = window.setTimeout(function () {
+      api("/api/sessions/dirs?q=" + encodeURIComponent(q), { timeout: 10000 }).then(function (r) {
+        if (q !== ns.query) { return; }
+        ns.searching = false;
+        ns.found = r.status === 200 && r.data && Array.isArray(r.data.dirs) ? r.data.dirs : [];
+        drawDirs();
+      }, function () { if (q === ns.query) { ns.searching = false; ns.found = []; drawDirs(); } });
+    }, 250);
+  }
   function drawDirs() {
     if (!M.dirs) { return; }
     clear(M.dirs);
     var shown = ns.dirs.filter(function (x) { return !ns.filter || (x.label + " " + x.path).toLowerCase().indexOf(ns.filter) >= 0; });
-    if (!shown.length) { M.dirs.appendChild(h("div", { class: "note-line" }, "no directories")); }
+    var have = {};
+    shown.forEach(function (x) { have[x.path] = true; });
+    (ns.filter ? ns.found : []).forEach(function (x) { if (!have[x.path]) { have[x.path] = true; shown.push(x); } });
+    if (ns.dir !== null && !have[ns.dir]) { shown.unshift({ label: ns.dir.split("/").filter(Boolean).pop() || ns.dir, path: ns.dir }); }
+    if (!shown.length) { M.dirs.appendChild(h("div", { class: "note-line" }, ns.searching ? "searching\u2026" : "no directories")); }
     shown.forEach(function (x) {
       M.dirs.appendChild(h("button", { class: "drow" + (ns.dir === x.path ? " cur" : ""), type: "button", role: "option", "aria-selected": ns.dir === x.path ? "true" : "false", onclick: function () { ns.dir = x.path; renderMenu(); } },
         h("span", { class: "mark", "aria-hidden": "true" }, "\u258e"), h("span", { class: "nm" }, x.label), h("span", { class: "pth" }, x.path)));
     });
+    if (ns.searching && shown.length) { M.dirs.appendChild(h("div", { class: "note-line" }, "searching\u2026")); }
   }
   function startSession() {
     var p = ns.profiles.filter(function (x) { return x.label === ns.profile; })[0];
@@ -2339,6 +2474,170 @@ APP_JS = r"""(function () {
         renderMenu();
       } else { ns.busy = false; }
     }, function () { ns.busy = false; toast("no connection", true); renderMenu(); });
+  }
+
+  // ---------------------------------------------------------------- swipe a list row to quit its session
+  var SWIPE_W = 96;
+  function setRowOpen(wrap, open) {
+    wrap.classList.toggle("open", open);
+    var b = wrap.querySelector(".rquit");
+    if (b) { b.setAttribute("aria-hidden", open ? "false" : "true"); b.tabIndex = open ? 0 : -1; }
+  }
+  // A row that can be quit slides left under a finger (touch or pen) and rests open, showing a red Quit button; Quit asks
+  // before it does anything. The Actions sheet offers the same for everyone else (mouse, keyboard, screen readers).
+  function swipeable(a, row) {
+    if (!(a.can && a.can.quit)) { return h("div", { class: "rw" }, row); }
+    var id = a.id;
+    var open = swipeOpen === id;
+    var btn = h("button", { class: "rquit", type: "button", "aria-hidden": open ? "false" : "true", tabindex: open ? "0" : "-1",
+      "aria-label": "Quit session " + agentLine(a), onclick: function () { confirmQuit(id); } }, "Quit");
+    var wrap = h("div", { class: "rw" + (open ? " open" : "") }, row, btn);
+    var sx = 0;
+    var sy = 0;
+    var base = 0;
+    var dx = 0;
+    var mode = null;
+    var pid = null;
+    var blockClick = 0;
+    row.addEventListener("pointerdown", function (ev) {
+      if ((ev.pointerType !== "touch" && ev.pointerType !== "pen") || mode !== null) { return; }
+      sx = ev.clientX;
+      sy = ev.clientY;
+      base = wrap.classList.contains("open") ? -SWIPE_W : 0;
+      dx = base;
+      mode = "wait";
+      pid = ev.pointerId;
+    });
+    row.addEventListener("pointermove", function (ev) {
+      if (mode === null || ev.pointerId !== pid) { return; }
+      var mx = ev.clientX - sx;
+      var my = ev.clientY - sy;
+      if (mode === "wait") {
+        if (Math.abs(my) > 10 && Math.abs(my) >= Math.abs(mx)) { mode = null; return; }      // the list is being scrolled
+        if (Math.abs(mx) < 10 || Math.abs(mx) < 1.5 * Math.abs(my)) { return; }              // not clearly sideways yet
+        mode = "drag";
+        swipeDrag = true;
+        wrap.classList.add("drag");
+        try { row.setPointerCapture(pid); } catch (e) { /* the pointer is gone */ }
+      }
+      dx = Math.max(-SWIPE_W - 24, Math.min(0, base + mx));
+      row.style.transform = "translateX(" + dx + "px)";
+    });
+    function end(ev, cancelled) {
+      if (mode === null || ev.pointerId !== pid) { return; }
+      var was = mode;
+      mode = null;
+      if (was !== "drag") { return; }
+      swipeDrag = false;
+      wrap.classList.remove("drag");
+      row.style.transform = "";
+      blockClick = Date.now() + 400;                       // the click that ends a drag must not open the chat
+      var nowOpen = !cancelled && dx < -SWIPE_W / 2;
+      setRowOpen(wrap, nowOpen);
+      swipeOpen = nowOpen ? id : (swipeOpen === id ? null : swipeOpen);
+      if (nowOpen) {
+        Array.prototype.forEach.call(U.list.querySelectorAll(".rw.open"), function (w) { if (w !== wrap) { setRowOpen(w, false); } });
+      }
+      if (swipeStale) { swipeStale = false; renderList(); }
+    }
+    row.addEventListener("pointerup", function (ev) { end(ev, false); });
+    row.addEventListener("pointercancel", function (ev) { end(ev, true); });
+    row.addEventListener("click", function (ev) {
+      if (Date.now() < blockClick) { ev.preventDefault(); return; }
+      if (wrap.classList.contains("open")) { ev.preventDefault(); setRowOpen(wrap, false); swipeOpen = null; }   // a tap closes an open row
+    });
+    return wrap;
+  }
+  function confirmQuit(id) {
+    var a = findAgent(id);
+    if (!a) { return; }
+    ask("Quit \u201c" + agentLine(a) + "\u201d? omp gets Ctrl-D and the session leaves the list. You can start it again from History.", "Quit session").then(function (ok) {
+      if (ok) { quitSession(id); } else { swipeOpen = null; renderList(); }
+    });
+  }
+  function quitSession(id) {
+    if (quitting[id]) { return; }
+    quitting[id] = true;
+    toast("Quitting\u2026");
+    post(agentUrl(id, "quit"), { confirm: true }, "Session quit").then(function (r) {
+      delete quitting[id];
+      swipeOpen = null;
+      if (!r) { renderList(); return; }
+      if (String(selId) === String(id)) { setHash("#/", true); }
+    }, function () { delete quitting[id]; swipeOpen = null; renderList(); });
+  }
+
+  // ---------------------------------------------------------------- history: past sessions, to start one again
+  var HIST_PAGE = 30;
+  function loadHistory(reset) {
+    var d = M.data.history;
+    if (reset || !d) { d = M.data.history = { items: [], next: 0, more: false, total: 0, loaded: false, loading: false, err: null }; }
+    if (d.loading) { return; }
+    d.loading = true;
+    api("/api/history?limit=" + HIST_PAGE + "&offset=" + d.next, { timeout: 12000 }).then(function (r) {
+      if (M.data.history !== d) { return; }
+      d.loading = false;
+      if (r.status === 200 && r.data && Array.isArray(r.data.items)) {
+        d.items = d.items.concat(r.data.items);
+        d.next = (r.data.offset || 0) + (r.data.limit || HIST_PAGE);     // pages are of files: a page may show fewer sessions
+        d.more = !!r.data.more;
+        d.total = r.data.total || 0;
+        d.err = null;
+        d.loaded = true;
+      } else if (r.status !== 401) { d.err = errText(r); }
+      if (menuSec === "history") { renderMenu(); }
+    }, function () {
+      if (M.data.history !== d) { return; }
+      d.loading = false;
+      d.err = "no connection";
+      if (menuSec === "history") { renderMenu(); }
+    });
+  }
+  function drawHistory() {
+    var d = M.data.history;
+    if (!d) { M.body.appendChild(h("div", { class: "note-line" }, "loading history\u2026")); return; }
+    if (d.err) { M.body.appendChild(h("div", { class: "note-line err" }, "history unavailable: " + d.err)); }
+    if (!d.loaded) { if (!d.err) { M.body.appendChild(h("div", { class: "note-line" }, "loading history\u2026")); } return; }
+    M.body.appendChild(h("div", { class: "sec-h" }, "past sessions \u00b7 " + d.items.length + (d.more ? "+" : "")));
+    if (!d.items.length) { M.body.appendChild(h("div", { class: "note-line" }, "no past sessions")); }
+    d.items.forEach(function (it) {
+      var meta = [it.dir, it.account, typeof it.ts === "number" ? fmtAge(nowServer() - it.ts) + " ago" : ""].filter(Boolean).join(" \u00b7 ");
+      var go = h("button", { class: "btn write", type: "button", disabled: !it.can_revive || reviving, onclick: function () { confirmRevive(it); } }, "Revive");
+      var note = it.live ? h("span", { class: "hl" }, "\u25cf open in agent " + (it.agent || "")) : (it.why ? h("span", { class: "why" }, it.why) : null);
+      M.body.appendChild(h("div", { class: "hrow" },
+        h("div", { class: "ht" }, it.title),
+        it.preview ? h("div", { class: "hp" }, it.preview) : null,
+        h("div", { class: "hm" }, meta),
+        h("div", { class: "hb" }, go, note)));
+    });
+    if (d.more) {
+      M.body.appendChild(h("div", { class: "startbar" }, h("button", { class: "btn", type: "button", disabled: d.loading, onclick: function () { loadHistory(false); } }, d.loading ? "loading\u2026" : "older sessions")));
+    }
+  }
+  function confirmRevive(it) {
+    if (reviving) { return; }
+    ask("Start \u201c" + it.title + "\u201d again in a new pane on " + it.account + "? omp resumes it in " + (it.dir || "its directory") + ".", "Revive").then(function (ok) {
+      if (ok) { reviveSession(it); }
+    });
+  }
+  function reviveSession(it) {
+    reviving = true;
+    renderMenu();
+    api("/api/history/" + encodeURIComponent(it.id) + "/revive", { body: { confirm: true }, timeout: 20000 }).then(function (r) {
+      reviving = false;
+      if (r.status >= 200 && r.status < 300 && r.data && r.data.ok) {
+        toast("Starting the session\u2026");
+        starting = { id: r.data.id, t: Date.now() };
+        window.setTimeout(function () {
+          if (starting && starting.id === r.data.id) { starting = null; toast("The session has not appeared yet.", true); }
+        }, 30000);
+        refreshNow();
+        if (findAgent(r.data.id)) { applyAgents({ agents: agents, now: nowServer() }); }
+        return;
+      }
+      if (r.status !== 401) { toast(errText(r), true); }
+      if (menuSec === "history") { loadHistory(true); }            // it may have changed meanwhile (open now, directory gone)
+    }, function () { reviving = false; toast("no connection", true); renderMenu(); });
   }
 
   // system
@@ -2437,7 +2736,7 @@ APP_JS = r"""(function () {
     meta = null; metaRev = null; metaBusy = false; metaFails = 0;
     agents = null; listEtag = null; filter = null; clockOffset = 0; lastOk = 0; nomux = false;
     selId = null; menuSec = null; menuPushed = false; starting = null; modelsCache = {};
-    ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", busy: false, err: null };
+    ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", query: "", busy: false, err: null, found: [], searching: false, timer: null };
     closeSheet(true);
     buildApp();
     C = newChat(null);

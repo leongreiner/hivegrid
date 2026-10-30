@@ -2,7 +2,8 @@
 --   LEADER+r  resize mode      LEADER+p  pane mode
 --   LEADER+e  equalize panes   LEADER+b  broadcast typed input (guarded)
 --   CTRL+SHIFT+A  arrange the panes into the grid that reads best
---   Nothing here runs by itself: splitting, closing or resizing never moves a pane.
+--   Nothing here runs by itself: splitting, closing or resizing never moves a pane. The one
+--   exception is a pane the phone's remote started, which asks for one arrange (see below).
 -- Everything here works on the grid panes only: the sidebar bar and view and the overview
 -- dock (sidebar.is_dock) are never counted, moved or resized.
 return function(config, wezterm)
@@ -685,6 +686,27 @@ return function(config, wezterm)
   local arrange_action = wezterm.action_callback(arrange)
   local ar_key = require('settings')(config, wezterm).key('arrange', 'CTRL+SHIFT+a')
   bind(ar_key.mods, ar_key.key, arrange_action)
+
+  -- A session started from the phone (hivegrid-remote) has nobody at the keyboard to press the
+  -- arrange key: its new pane sets the user var hivegrid_arrange_new, and the grid is arranged
+  -- once, a moment later, when that pane is in the window's active tab. The keyboard focus
+  -- stays where it was. This is the one place a pane's own request re-tiles the grid.
+  wezterm.on('user-var-changed', function(window, pane, name, value)
+    if name ~= 'hivegrid_arrange_new' or tostring(value) ~= '1' then
+      return
+    end
+    local tab = pane:tab()
+    if not tab or is_dock(pane:pane_id()) then
+      return
+    end
+    local tab_id = tab:tab_id()
+    wezterm.time.call_after(0.4, function()
+      local active = window:active_tab()
+      if active and active:tab_id() == tab_id then
+        arrange(window, window:active_pane())
+      end
+    end)
+  end)
 
   -- Rotate and swap -------------------------------------------------------
   -- WezTerm's RotatePanes and PaneSelect work on every pane of the tab, so they would move

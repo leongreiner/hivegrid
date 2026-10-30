@@ -45,7 +45,10 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import hivegrid_agents as A  # noqa: E402
 import hivegrid_hive as HV  # noqa: E402
+import hivegrid_outbox as O  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
+import hivegrid_remote_history as HI  # noqa: E402
+import hivegrid_remote_pending as PQ  # noqa: E402
 import hivegrid_remote_term as T  # noqa: E402
 import hivegrid_remote_termjs as TJ  # noqa: E402
 import hivegrid_remote_ui as UI  # noqa: E402
@@ -86,6 +89,7 @@ TAIL_TTL = 1.0             # a pane's screen text is reused this long by the hel
 SESSION_BURST, SESSION_EVERY = 3, 5.0     # starting a session: 3 at once, then one per 5 seconds
 SESSION_REPEAT = 10.0      # the same directory and account is not started twice within this many seconds
 ACCOUNT_BURST, ACCOUNT_EVERY = 2, 10.0   # moving a chat to another account: 2 at once, then one per 10 seconds
+QUIT_BURST, QUIT_EVERY = HI.QUIT_BURST, HI.QUIT_EVERY   # quitting sessions from the list: 4 at once, then one per 2 seconds
 TERM_IO_RATE, TERM_IO_BURST = 40.0, 80    # terminal requests per device: 40 a second, bursts of 80
 TERM_OPEN_EVERY, TERM_OPEN_BURST = 5.0, 3 # opening a terminal: 3 at once, then one every 5 seconds, per device
 TERM_KEYS = 64                            # devices whose terminal allowance is remembered
@@ -108,7 +112,7 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                                "img-src 'self' data:; font-src 'self'; manifest-src 'self'; base-uri 'none'; "
+                                "img-src 'self' data: blob:; font-src 'self'; manifest-src 'self'; base-uri 'none'; "
                                 "form-action 'none'; frame-ancestors 'none'"),
     "X-Frame-Options": "DENY",
     "Cross-Origin-Resource-Policy": "same-origin",
@@ -743,7 +747,7 @@ def state_vocabulary():
                 "rank": U.STATES[k].rank} for k in VOCAB}
 
 
-CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll")
+CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit")
 
 
 def meta_json(readonly, terminal=False):
@@ -782,12 +786,13 @@ def pending_json(pend):
 
 def can_flags(agent, pending, readonly, switching=False, now=None):
     if readonly:
-        return {"prompt": False, "keys": False, "plan": False, "ack": False, "model": False, "account": False}
+        return {"prompt": False, "keys": False, "plan": False, "ack": False, "model": False, "account": False, "quit": False}
     return {"prompt": agent.state not in ("attention", "exited"), "keys": agent.state != "exited",
             "plan": bool(pending and pending["kind"] == "plan_review"),
             "ack": agent.state in ("done", "idle") or (now is not None and A.limit_expired(agent, now)),
             "model": bool(agent.model) and agent.state != "exited",
-            "account": not switching and D.account_block(agent) is None}
+            "account": not switching and D.account_block(agent) is None,
+            "quit": not switching and HI.quit_block(agent) is None}
 
 
 def model_json(model):
@@ -924,9 +929,10 @@ class App:
     }
     TERM_STATIC = {"/term.js": ("text/javascript; charset=utf-8", "TERM_JS"), "/term.css": ("text/css; charset=utf-8", "TERM_CSS"),
                    "/term-view.js": ("text/javascript; charset=utf-8", "TERM_VIEW_JS")}
-    GET_ROUTES = ("/api/meta", "/api/agents", "/api/accounts", "/api/system", "/api/sessions/options")
+    GET_ROUTES = ("/api/meta", "/api/agents", "/api/accounts", "/api/system", "/api/sessions/options", "/api/sessions/dirs",
+                  "/api/history")
     POST_ROUTES = ("/api/sessions",)
-    GET_ACTIONS = ("tail", "chat", "models", "accounts")
+    GET_ACTIONS = ("tail", "chat", "models", "accounts", "files")
 
     FONTS = {
         "/fonts/mono.ttf": ("~/.local/share/fonts/DejaVuSansMNerdFont/DejaVuSansMNerdFontMono-Regular.ttf",
@@ -937,7 +943,7 @@ class App:
 
     def __init__(self, mux, tokens, readonly=False, allow_hosts=(), clock=time.monotonic, wall=time.time,
                  log=None, theme_watch=None, sleep=None, fonts=None, home=None, sysstats=None, chat=None,
-                 terminal=False, terminals=None, switcher=None):
+                 terminal=False, terminals=None, switcher=None, outbox=None, quitter=None, history=None):
         self.mux, self.tokens, self.readonly = mux, tokens, bool(readonly)
         self.allow_hosts = tuple(h.lower() for h in allow_hosts)
         self.clock, self.wall = clock, wall
@@ -957,6 +963,8 @@ class App:
         self._theme_lock = threading.Lock()
         self._theme = None
         self.chat = chat or D.ChatCache(sanitize_text, sanitize_line)
+        self.queued = PQ.Queued(sanitize_text, MAX_PROMPT)   # prompts sent from the phone that omp may still hold in its queue
+        self.outbox = outbox or O.Outbox()
         self.sysstats = sysstats or D.SysStats(slots=_SLOTS)
         self._fonts = {route: tuple(os.path.expanduser(p) for p in paths) for route, paths in (fonts or self.FONTS).items()}
         self._font_cache = {}
@@ -973,6 +981,9 @@ class App:
         self.switcher = switcher or D.AccountSwitcher(self.mux, sanitize_line, home=self.home, clock=clock, wall=wall,
                                                        sleep=self.sleep, foreground=_foreground)
         self.account_bucket = Bucket(1.0 / ACCOUNT_EVERY, ACCOUNT_BURST, clock)
+        self.quit_bucket = Bucket(1.0 / QUIT_EVERY, QUIT_BURST, clock)
+        self.quitter = quitter or HI.SessionQuitter(self.mux, clock=clock, sleep=self.sleep, foreground=_foreground)
+        self.history = history or HI.History(sanitize_line, home=self.home, clock=clock)
 
     # -- helpers
     def _error(self, err):
@@ -1134,9 +1145,15 @@ class App:
         if terminal:
             return self._terminal(req, key, token, path, query)
 
-        m = re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account)", path)
+        fm = re.fullmatch(r"/api/agents/([^/]+)/files(?:/([^/]+))?", path)
+        hm = re.fullmatch(r"/api/history/([0-9a-f]{24})/revive", path)
+        m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account|quit)", path)
         if path in self.GET_ROUTES or path in self.POST_ROUTES:
             action, ident = path, None
+        elif hm:
+            action, ident = "revive", hm.group(1)
+        elif fm:
+            action, ident = "files", fm.group(1) + ("/" + fm.group(2) if fm.group(2) else "")
         elif m:
             action, ident = m.group(2), m.group(1)
         else:
@@ -1215,8 +1232,13 @@ class App:
         accounts, now = self.settings().accounts(), self.wall()
         return {a.pane: D.limit_json(a, accounts, now, sanitize_line) for a in limited}
 
+    def _listed(self, agents):
+        """The agents the phone's list shows: not the shells that omp left (quit from the phone, or on its own); one
+        whose chat is being moved to another account stays, it reads `exited` for a moment on purpose."""
+        return [a for a in agents if a.state != "exited" or self.switcher.status(a.pane)]
+
     def _agents_doc(self):
-        agents = self._agents()
+        agents = self._listed(self._agents())
         limits = self._limits(agents)
         return agents_json(agents, self.wall(), self.readonly, self._has_session, self.terminal_enabled(),
                            lambda a: limits.get(a.pane), lambda a: self.switcher.status(a.pane))
@@ -1269,13 +1291,50 @@ class App:
         self._sessions_seen[agent.pane] = (key, now, ok)
         return ok
 
+    def _files(self, agent):
+        """The files `hivegrid-send` put in the outbox for `agent`, newest first, as the page lists them."""
+        win = O.window_key(getattr(self.mux, "_sock", None))
+        return [{"id": m["id"], "name": m["name"], "size": m["size"], "ts": m["ts"], "image": m["mime"] != "application/octet-stream",
+                 "note": m["note"]} for m in self.outbox.for_pane(agent.pane, win)]
+
     def _chat_look(self, ident, limit, before):
         agent, agents = self._find(ident, False)
         path = D.find_session_file(agent, self.home)
         stamp = self.chat.stamp(path) if path else None
         pending = pending_json(agent.pending)
-        rev = rev_of([stamp if stamp else "screen", agent.state, agent.reason, pending, limit, before, self.switcher.status(agent.pane)])
+        files = [f["id"] for f in self._files(agent)]
+        self.queued.retain({a.pane for a in agents})
+        queued = self._queued(agent, path if stamp else None, before)
+        rev = rev_of([stamp if stamp else "screen", agent.state, agent.reason, pending, limit, before, self.switcher.status(agent.pane), files, queued])
         return agent, agents, path if stamp else None, rev
+
+    def _session_mark(self, agent):
+        """(session file, `ChatCache.mark`) of `agent` now; (None, None) when it has no readable one."""
+        path = D.find_session_file(agent, self.home)
+        mark = self.chat.mark(path) if path else None
+        return (path, mark) if mark is not None else (None, None)
+
+    def _queued(self, agent, path, before):
+        """The prompts sent from the phone that the session file does not have yet (the older pages have none)."""
+        if before is not None:
+            return []
+        return self.queued.view(agent, path, lambda p, n, ts: self.chat.user_items(p, min_n=n, min_ts=ts), self.wall())
+
+    def _file(self, ident):
+        """`GET /api/agents/<id>/files/<file>`: the bytes of one file sent to that agent's page. Images are served
+        as their sniffed type, everything else as a download."""
+        pane_id, _, fid = ident.partition("/")
+        agent, _agents = self._find(pane_id, False)
+        win = O.window_key(getattr(self.mux, "_sock", None))
+        got = self.outbox.read(fid) if any(m["id"] == fid for m in self.outbox.for_pane(agent.pane, win)) else None
+        if got is None:
+            raise HttpError("not_found", "no such file")
+        meta, data = got
+        image = meta["mime"] != "application/octet-stream"
+        quoted = urllib.parse.quote(meta["name"], safe="")
+        ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", meta["name"])[:100] or "file"
+        disp = f'{"inline" if image else "attachment"}; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
+        return Response(200, data, content_type=meta["mime"], headers={"Content-Disposition": disp})
 
     def _chat(self, req, ident, q):
         limit = self._int_param(q, "limit", CHAT_DEFAULT, 1, CHAT_MAX)
@@ -1291,21 +1350,22 @@ class App:
         agent, agents, path, rev = look
         if client_rev is not None and before is None and rev == client_rev:
             return Response(200, _json_body({"unchanged": True, "rev": rev}))
+        queued = self._queued(agent, path, before)      # before the window: nothing that left the queue is missing from the items
         got = self.chat.window(path, limit, before) if path else None
         if got is None:
             items, has_older, source, gen = [], False, "screen", 0
-            rev = rev_of(["screen", agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane)])
+            rev = rev_of(["screen", agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane), [f["id"] for f in self._files(agent)], queued])
         else:
             items, has_older, stamp = got
             gen = stamp[0]
             source = "session"
-            rev = rev_of([stamp, agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane)])
+            rev = rev_of([stamp, agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane), [f["id"] for f in self._files(agent)], queued])
         state = agent.state if agent.state in U.STATES else "idle"
         return Response(200, _json_body({
             "id": agent.pane, "label": A.agent_label(agent, agents), "source": source, "state": state,
             "state_label": U.STATES[state].label, "reason": sanitize_line(agent.reason, 200), "since": agent.since,
-            "limit": self._limits([agent]).get(agent.pane), "switch": self.switcher.status(agent.pane),
-            "rev": rev, "gen": gen, "has_older": has_older, "older": before is not None, "items": items}))
+            "limit": self._limits([agent]).get(agent.pane), "switch": self.switcher.status(agent.pane), "files": self._files(agent),
+            "rev": rev, "gen": gen, "has_older": has_older, "older": before is not None, "items": items, "pending_prompts": queued}))
 
     def _models(self, req, ident):
         agent, _agents = self._find(ident, False)
@@ -1360,6 +1420,21 @@ class App:
         if action == "/api/sessions/options":
             profiles, dirs, _real = D.session_options(self.settings().accounts(), self._agents_or_none(), sanitize_line, self.home)
             return self._json(req, {"profiles": profiles, "dirs": dirs})
+        if action == "/api/history":
+            offset = self._int_param(q, "offset", 0, 0, HI.SCAN_MAX)
+            limit = self._int_param(q, "limit", HI.PAGE_DEFAULT, 1, HI.PAGE_MAX)
+            labels = HI.account_labels(self.settings().accounts())
+            return self._json(req, self.history.listing(offset, limit, self._live_sessions(self._agents_or_none()), labels, self.readonly))
+        if action == "/api/sessions/dirs":
+            query = q.get("q", [""])[0]
+            if len(query) > D.SEARCH_QUERY_MAX:
+                raise HttpError("bad_request", f"q is at most {D.SEARCH_QUERY_MAX} characters")
+            return self._json(req, {"dirs": D.search_dirs(query, sanitize_line, self.home)})
+        if action == "files":
+            if "/" in ident:
+                return self._file(ident)
+            agent, _agents = self._find(ident, False)
+            return self._json(req, {"files": self._files(agent)})
         if action == "chat":
             return self._chat(req, ident, q)
         if action == "accounts":
@@ -1486,6 +1561,85 @@ class App:
         self._written("account", A.agent_label(agent, agents), 0)
         return Response(202, _json_body({"ok": True, "switching": True, "to": target["label"]}))
 
+    def _live_sessions(self, agents):
+        """{real session file: the agent's label} of the agents that have a session open now (an exited agent has none)."""
+        live = {}
+        for a in agents:
+            path = D.find_session_file(a, self.home) if a.state != "exited" else None
+            if path:
+                live[path] = A.agent_label(a, agents)
+        return live
+
+    def _quit(self, ident, body):
+        """`POST /api/agents/<id>/quit {"confirm": true}`: omp is asked to quit with Ctrl+D (see HI.SessionQuitter); the
+        shell pane that is left reads `exited` and is no longer listed. docs/remote.md, "Quitting a session"."""
+        self._fields(body, ("confirm",))
+        confirm = body.get("confirm", False)
+        if not isinstance(confirm, bool):
+            raise HttpError("bad_request", "confirm must be true or false")
+        agent, agents = self._find(ident, True)
+        why = HI.quit_block(agent)
+        if why:
+            raise HttpError("agent_not_ready", why)
+        if self.switcher.running(agent.pane):
+            raise HttpError("conflict", "an account switch is running for this agent")
+        if not confirm:
+            raise HttpError("confirm_required", "confirm to quit the session: omp gets Ctrl+D")
+        wait = self.quit_bucket.take()
+        if wait > 0:
+            raise HttpError("rate_limited", "too many quits: wait a few seconds", {"Retry-After": str(max(math.ceil(wait), 1))})
+        try:
+            self.quitter.quit(agent)
+        except HI.Refused as exc:
+            raise HttpError(exc.code, exc.message) from None
+        self.mux.invalidate()
+        self._written("quit", A.agent_label(agent, agents), 0)
+        return Response(200, _json_body({"ok": True, "quit": True}))
+
+    def _revive(self, sid, body):
+        """`POST /api/history/<id>/revive {"confirm": true}`: `omp [--profile=<p>] --resume <file>` in a new pane in the
+        session's directory. The id comes from `GET /api/history`; the file is found and checked again here
+        (docs/remote.md, "History")."""
+        self._fields(body, ("confirm",))
+        confirm = body.get("confirm", False)
+        if not isinstance(confirm, bool):
+            raise HttpError("bad_request", "confirm must be true or false")
+        live = self._live_sessions(self._agents())
+        try:
+            real, profile, cwd = self.history.revive_plan(sid, live)
+        except HI.Refused as exc:
+            raise HttpError(exc.code, exc.message) from None
+        if not confirm:
+            raise HttpError("confirm_required", "confirm to start this session again in a new pane")
+        key = ("revive", real)
+        with self._session_lock:
+            now = self.clock()
+            for k in [k for k, t in self._session_recent.items() if now - t >= SESSION_REPEAT]:
+                del self._session_recent[k]
+            if key in self._session_recent:
+                retry = max(math.ceil(SESSION_REPEAT - (now - self._session_recent[key])), 1)
+                raise HttpError("conflict", "this session was just started again: it is on its way", {"Retry-After": str(retry)})
+            wait = self.session_bucket.take()
+            if wait > 0:
+                raise HttpError("rate_limited", "too many sessions started: wait a few seconds",
+                                {"Retry-After": str(max(math.ceil(wait), 1))})
+            self._session_recent[key] = now
+        pane = None
+        try:
+            pane = self.mux.act(lambda: A.spawn_agent(cwd=cwd, run=self.mux.run, profile=profile, arrange=True, resume=real))
+        except ValueError as exc:
+            raise HttpError("bad_request", sanitize_line(str(exc), 120)) from None
+        finally:
+            if pane is None:
+                with self._session_lock:
+                    self._session_recent.pop(key, None)
+        if pane is None:
+            raise HttpError("mux_failed", "could not start an agent")
+        self.mux.invalidate()
+        labels = HI.account_labels(self.settings().accounts())
+        self.log(f"write revive account={sanitize_line(labels.get(profile) or 'default', 40)}")
+        return Response(200, _json_body({"ok": True, "id": pane}))
+
     def _new_session(self, body):
         self._fields(body, ("profile", "dir"))
         profile, shown = body.get("profile"), body.get("dir")
@@ -1497,9 +1651,10 @@ class App:
         known = {p["profile"]: p["label"] for p in profiles if p["profile"]}
         if profile is not None and profile not in known:
             raise HttpError("bad_request", "unknown profile")
-        if shown not in real:
-            raise HttpError("bad_request", "dir must be one of the offered directories")
-        key = (real[shown], profile)
+        real_dir = real.get(shown) or D.resolve_custom_dir(shown, self.home)
+        if real_dir is None:
+            raise HttpError("bad_request", "dir must be an offered directory or a folder below your home")
+        key = (real_dir, profile)
         with self._session_lock:
             now = self.clock()
             for k in [k for k, t in self._session_recent.items() if now - t >= SESSION_REPEAT]:
@@ -1515,7 +1670,7 @@ class App:
             self._session_recent[key] = now
         pane = None
         try:
-            pane = self.mux.act(lambda: A.spawn_agent(cwd=real[shown], run=self.mux.run, profile=profile))
+            pane = self.mux.act(lambda: A.spawn_agent(cwd=real_dir, run=self.mux.run, profile=profile, arrange=True))
         except ValueError as exc:
             raise HttpError("bad_request", sanitize_line(str(exc), 120)) from None
         finally:
@@ -1531,6 +1686,10 @@ class App:
     def _post(self, action, ident, body):
         if action == "/api/sessions":
             return self._new_session(body)
+        if action == "quit":
+            return self._quit(ident, body)
+        if action == "revive":
+            return self._revive(ident, body)
         if action == "account":
             return self._account(ident, body)
         if action in ("model", "thinking"):
@@ -1542,10 +1701,12 @@ class App:
             if problem:
                 raise HttpError("bad_request", problem)
             agent, agents = self._find(ident, True)
+            sent, path, mark = self.wall(), *self._session_mark(agent)
             ok, msg = self.mux.act(lambda: A.send_prompt(agent, text, self.mux.run))
             if not ok:
                 code = "agent_not_ready" if ("waiting for an answer" in msg or "exited" in msg) else "mux_failed"
                 raise HttpError(code, msg)
+            self.queued.add(agent, text, sent, path, mark, self.wall())
             self.mux.invalidate()
             self._written("prompt", A.agent_label(agent, agents), len(text.encode("utf-8")))
             return Response(200, _json_body({"ok": True, "message": "sent"}))

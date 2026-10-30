@@ -735,6 +735,21 @@ class TestSpawnProfile(EnvCase):
         t, _ = self.spawn(None)
         self.assertEqual(t.cmd, ["bash", "-ic", "omp; exec bash"])
 
+    def test_arrange_sets_the_user_var_before_omp_starts(self):
+        self.assertEqual(A._agent_command(None, True)[2],
+                         "printf '\\033]1337;SetUserVar=hivegrid_arrange_new=MQ==\\007'; omp; exec bash")
+        self.assertEqual(A._agent_command("beta", True)[2],
+                         "printf '\\033]1337;SetUserVar=hivegrid_arrange_new=MQ==\\007'; omp --profile=beta; exec bash")
+
+    def test_spawn_with_arrange_runs_that_command_and_without_it_never_does(self):
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(1)
+        A.spawn_agent("/w", None, run=t, arrange=True)
+        self.assertIn("SetUserVar=hivegrid_arrange_new", t.cmd[2])
+        t = self.strip(1)
+        A.spawn_agent("/w", None, run=t)
+        self.assertNotIn("SetUserVar", t.cmd[2])
+
 
 class TestModelFiles(Base):
     def test_state_file_model_thinking_context_and_session(self):

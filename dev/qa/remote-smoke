@@ -8,7 +8,7 @@ them through its HTTP API, and the sandbox HOME keeps the token away from the re
   3 auth: no token 401; a Host header of another site 403
   4 /api/agents lists the 3 agents labelled 1, 2, 3 like the dock (never a pane id)
   5 prompt, keys and tail reach the agent as bytes; Ctrl-C and Ctrl-D need `confirm`
-  6 a pane that needs you refuses prompts but takes keys; an exited agent refuses everything and
+  6 a pane that needs you refuses prompts but takes keys; an agent that exited leaves the list and refuses everything, and
     nothing is typed into the shell left behind
   7 a Chromium-family browser (when one is installed) renders hostile pane text as inert text
   8 the GUI restarts: 503 no_mux while it is down, 200 again without restarting the server
@@ -267,8 +267,8 @@ def section_actions():
 
     st, _ = api("POST", f"/api/agents/{a3['id']}/keys", {"keys": ["ctrl-d"], "confirm": True})
     check("6 ctrl-d with confirm: 200", st == 200, str(st))
-    gone = waitfor(lambda: (by_label("3") or {}).get("state") == "exited", 10)
-    check("6 agent 3 is exited", bool(gone), str(by_label("3")))
+    gone = waitfor(lambda: by_label("3") is None and len(agents()) == 2, 10)
+    check("6 agent 3 has left the list (an exited agent is not shown)", bool(gone), json.dumps(agents())[:300])
     st, _ = api("POST", f"/api/agents/{a3['id']}/keys", {"keys": ["z", "q", "9"]})
     check("6 keys to an exited agent: 409", st == 409, str(st))
     st, _ = api("POST", f"/api/agents/{a3['id']}/prompt", {"text": "zq9"})

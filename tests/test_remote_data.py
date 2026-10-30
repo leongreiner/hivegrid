@@ -990,8 +990,8 @@ class TestSessionsApi(RichCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fake_spawn(self, cwd=None, near=None, run=None, profile=None):
-        self.spawned.append((cwd, profile))
+    def fake_spawn(self, cwd=None, near=None, run=None, profile=None, arrange=False):
+        self.spawned.append((cwd, profile, arrange))
         return 41
 
     def test_options(self):
@@ -1006,14 +1006,14 @@ class TestSessionsApi(RichCase):
     def test_start(self):
         r, data = self.call("POST", "/api/sessions", {"profile": "alpha", "dir": "~/Projects/proj"})
         self.assertEqual((r.status, data), (200, {"ok": True, "id": 41}))
-        self.assertEqual(self.spawned, [(os.path.join(self.home, "Projects", "proj"), "alpha")])
+        self.assertEqual(self.spawned, [(os.path.join(self.home, "Projects", "proj"), "alpha", True)])
         r, data = self.call("POST", "/api/sessions", {"profile": None, "dir": "~"})
-        self.assertEqual((r.status, self.spawned[-1]), (200, (self.home, None)))
+        self.assertEqual((r.status, self.spawned[-1]), (200, (self.home, None, True)))
         self.assertEqual(self.logs[-1], "write session account=default", "no paths in the log")
         self.assertIn("write session account=alpha", self.logs)
 
     def test_only_offered_values_are_accepted(self):
-        for body in ({"profile": "alpha", "dir": "/etc"}, {"profile": "alpha", "dir": "~/Projects/../.ssh"}, {"profile": "alpha", "dir": self.home},
+        for body in ({"profile": "alpha", "dir": "/etc"}, {"profile": "alpha", "dir": "~/Projects/../.ssh"},
                      {"profile": "alpha", "dir": "~/Projects/nope"}, {"profile": "nope", "dir": "~"}, {"profile": "", "dir": "~"},
                      {"profile": "alpha; rm -rf /", "dir": "~"}, {"profile": 5, "dir": "~"}, {"profile": "alpha", "dir": 5},
                      {"profile": "alpha"}, {"dir": ""}, {"profile": "alpha", "dir": "~", "extra": 1}, {"profile": "alpha", "dir": "x" * 400}):
@@ -1083,6 +1083,47 @@ class TestSessionsApi(RichCase):
         with unittest.mock.patch.object(R.A, "spawn_agent", side_effect=self.fake_spawn):
             self.call("POST", "/api/sessions", {"profile": None, "dir": "~"})
         self.assertEqual(held, [True])
+
+    def test_a_new_session_asks_the_window_to_arrange_the_grid(self):
+        self.call("POST", "/api/sessions", {"profile": None, "dir": "~"})
+        self.assertEqual(self.spawned, [(os.path.realpath(self.home), None, True)])
+
+    def test_a_custom_folder_below_home_may_be_started_in(self):
+        deep = os.path.join(self.home, "work", "client", "app")
+        os.makedirs(deep)
+        r, data = self.call("POST", "/api/sessions", {"profile": None, "dir": "~/work/client/app"})
+        self.assertEqual((r.status, data["ok"]), (200, True))
+        self.assertEqual(self.spawned[0][0], os.path.realpath(deep))
+
+    def test_custom_folders_outside_home_hidden_or_missing_are_refused(self):
+        os.makedirs(os.path.join(self.home, ".ssh", "x"))
+        os.symlink("/etc", os.path.join(self.home, "etclink"))
+        for shown in ("/etc", "~/.ssh", "~/.ssh/x", "~/missing", "~/etclink", "relative/dir", "~/../etc", "~/Projects/../../etc", "/"):
+            r, data = self.call("POST", "/api/sessions", {"profile": None, "dir": shown})
+            self.assertEqual((r.status, data["error"]), (400, "bad_request"), shown)
+        self.assertEqual(self.spawned, [])
+
+    def test_dir_search_finds_folders_by_words_and_completes_typed_paths(self):
+        for p in ("work/alpha-service", "work/beta", "Projects/alpha-ui", ".hidden/alpha", "node_modules/alpha"):
+            os.makedirs(os.path.join(self.home, p))
+        _, data = self.call("GET", "/api/sessions/dirs?q=alpha")
+        self.assertEqual(sorted(d["path"] for d in data["dirs"]), ["~/Projects/alpha-ui", "~/work/alpha-service"])
+        _, data = self.call("GET", "/api/sessions/dirs?q=~/wo")
+        self.assertEqual([d["path"] for d in data["dirs"]], ["~/work"])
+        _, data = self.call("GET", "/api/sessions/dirs?q=~/work/")
+        self.assertEqual(sorted(d["path"] for d in data["dirs"]), ["~/work/alpha-service", "~/work/beta"])
+        for hidden in ("~/.hidden/", "/etc/", "~/../"):
+            self.assertEqual(self.call("GET", "/api/sessions/dirs?q=" + hidden)[1]["dirs"], [], hidden)
+        r, data = self.call("GET", "/api/sessions/dirs?q=" + "a" * 200)
+        self.assertEqual((r.status, data["error"]), (400, "bad_request"))
+        self.assertEqual(self.call("GET", "/api/sessions/dirs?q=alpha", token=None)[0].status, 401)
+
+    def test_every_search_result_can_be_started_in(self):
+        os.makedirs(os.path.join(self.home, "work", "alpha"))
+        _, data = self.call("GET", "/api/sessions/dirs?q=alpha")
+        self.assertTrue(data["dirs"])
+        for d in data["dirs"]:
+            self.assertEqual(self.call("POST", "/api/sessions", {"profile": None, "dir": d["path"]})[0].status, 200)
 
 
 class TestModelApi(RichCase):
