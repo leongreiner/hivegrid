@@ -290,6 +290,12 @@ class AutostartTest(unittest.TestCase):
         self.assertNotIn("would run", out)
         self.assertIn("unchanged", out)
 
+    def test_remote_unit_leaves_sudo_working_in_the_phone_shells(self):
+        # In a user unit these set the no-new-privs flag, which the terminal shells inherit: sudo refuses to run.
+        unit = A.render_remote_unit("/home/tester/.local/bin/hivegrid-remote", "/home/tester")
+        for key in ("NoNewPrivileges", "LockPersonality", "RestrictAddressFamilies"):
+            self.assertNotRegex(unit, r"(?m)^" + key + "=")
+
     def test_no_token_enables_but_does_not_start_the_remote_unit(self):
         os.unlink(self.token)
         rc, out = self.cli("install", "--bin-dir", self.bin)

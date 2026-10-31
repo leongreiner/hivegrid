@@ -95,7 +95,7 @@ or start the server with `hivegrid-remote serve --terminal` (`HIVEGRID_REMOTE_TE
 
 **Turning it off again.** Delete the `remote.terminal` key, restart without `--terminal`, or run with `--read-only`; `hivegrid-remote token --rotate` ends every shell and locks the phone out in one step. Limits are in *Limits*, the threat in *Threat model*.
 
-**What the user service does to these shells.** Under `hivegrid-autostart install` the shells inherit the unit's hardening (`NoNewPrivileges`, `UMask=0077`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`): `sudo` and `su` fail inside a phone shell, files it creates are mode `0600` (not `0644`), and tools that talk netlink (`ip`, `ss`) fail. A server started by hand has none of that. A process started with `nohup` or `setsid` survives closing the terminal and a token rotation: `hivegrid-remote token --rotate` ends the shells, not the children they detached.
+**What the user service does to these shells.** Under `hivegrid-autostart install` the shells inherit its `UMask=0077`: files they create are mode `0600` (not `0644`). The unit sets no `NoNewPrivileges` (nor `LockPersonality` or `RestrictAddressFamilies`, which imply it in a user unit), so `sudo` works in a phone shell as in any other. A server started by hand has no umask change. After updating, run `hivegrid-autostart install` and `systemctl --user restart hivegrid-remote` (open shells end). A process started with `nohup` or `setsid` survives closing the terminal and a token rotation: `hivegrid-remote token --rotate` ends the shells, not the children they detached.
 
 ## Usage limit
 
