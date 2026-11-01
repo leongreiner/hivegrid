@@ -49,6 +49,7 @@ import hivegrid_outbox as O  # noqa: E402
 import hivegrid_upload as X  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
 import hivegrid_remote_history as HI  # noqa: E402
+import hivegrid_remote_notify as N  # noqa: E402
 import hivegrid_remote_pending as PQ  # noqa: E402
 import hivegrid_remote_term as T  # noqa: E402
 import hivegrid_remote_termjs as TJ  # noqa: E402
@@ -1026,6 +1027,8 @@ class App:
         """Wakes the held requests (they answer at once) and ends every terminal when the server shuts down."""
         self._stop.set()
         self.terminals.shutdown()
+        if getattr(self, "notifier", None):
+            self.notifier.stop()
 
     # -- pipeline
     def dispatch(self, req):
@@ -1846,6 +1849,14 @@ class App:
                     self.log(f"terminal sweep failed: {type(exc).__name__}")
         threading.Thread(target=run, name="terminal-janitor", daemon=True).start()
 
+    def start_notifier(self, every=5.0):
+        """Starts the ntfy notifier (hivegrid_remote_notify.py). It only does something while `remote.notify_url` is set."""
+        def describe(agent, agents):
+            return " \u00b7 ".join(p for p in (A.agent_label(agent, agents), sanitize_line(HV.calm_title(agent.title), 80),
+                                              sanitize_line(U.home_path(agent.cwd), 80)) if p)
+        self.notifier = N.Notifier(self.terminal_settings, self._agents, describe, log=self.log)
+        self.notifier.start(every)
+
     def _terminal_gate(self):
         if self.readonly:
             raise HttpError("readonly", "the terminal is off: this server is read-only")
@@ -2367,6 +2378,7 @@ def cmd_serve(args):
     if args.read_only and args.terminal:
         print("hivegrid-remote: --terminal is ignored: the server is read-only", file=sys.stderr, flush=True)
     app.start_janitor()
+    app.start_notifier()
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     try:
         server.serve_forever()

@@ -1197,3 +1197,87 @@ describe("pasteText", () => {
 		expect(HG.pasteText(42, false)).toBe("42");
 	});
 });
+
+// ---- the overview's preview lines (termjs) and the page's pager rules (ui), both run on their own
+
+const viewMatch = py.match(/TERM_VIEW_JS = r"""([\s\S]*?)"""/);
+if (!viewMatch) throw new Error("TERM_VIEW_JS not found");
+(0, eval)(viewMatch[1]);
+const previewLines = (g.HGTermView as { previewLines(em: Em, n: number): string[] }).previewLines;
+
+const ui = fs.readFileSync(path.join(import.meta.dir, "../../bin/hivegrid_remote_ui.py"), "utf8");
+const pagerMatch = ui.match(/\/\/ pager-logic:begin\n([\s\S]*?)\/\/ pager-logic:end/);
+if (!pagerMatch) throw new Error("pager-logic block not found");
+const pager = new Function(
+	`${pagerMatch[1]}\nreturn { pagerClassify, pagerAllows, pagerCommit, pagerDest, termHash, PAGER_EDGE };`,
+)() as {
+	pagerClassify(dx: number, dy: number): "wait" | "lock" | "cancel";
+	pagerAllows(zone: string, dx: number): boolean;
+	pagerCommit(dx: number, ms: number): boolean;
+	pagerDest(zone: string): string;
+	termHash(hash: string): { n: number | null } | null;
+	PAGER_EDGE: number;
+};
+
+describe("previewLines", () => {
+	test("the last lines that hold something, without the empty rows under them", () => {
+		const em = feed(20, 10, "one\r\ntwo\r\nthree\r\nfour");
+		expect(previewLines(em, 3)).toEqual(["two", "three", "four"]);
+		expect(previewLines(em, 9)).toEqual(["one", "two", "three", "four"]);
+	});
+
+	test("an empty screen has no lines, a blank line inside stays", () => {
+		expect(previewLines(mk(20, 5), 6)).toEqual([]);
+		expect(previewLines(feed(20, 5, "a\r\n\r\nb"), 6)).toEqual(["a", "", "b"]);
+	});
+
+	test("escape sequences never reach the text", () => {
+		const em = feed(30, 4, `${CSI}1;31mred${CSI}0m plain${ESC}]0;title\x07`);
+		expect(previewLines(em, 6)).toEqual(["red plain"]);
+	});
+});
+
+describe("pager gesture rules", () => {
+	test("a vertical move cancels, a clearly sideways one locks, anything between waits", () => {
+		expect(pager.pagerClassify(2, 30)).toBe("cancel");
+		expect(pager.pagerClassify(20, 20)).toBe("cancel");
+		expect(pager.pagerClassify(40, 10)).toBe("lock");
+		expect(pager.pagerClassify(-40, 10)).toBe("lock");
+		expect(pager.pagerClassify(5, 2)).toBe("wait");
+		expect(pager.pagerClassify(14, 10)).toBe("wait");
+	});
+
+	test("agents take a swipe to the right (the row's left swipe is Quit), the overview one to the left", () => {
+		expect(pager.pagerAllows("agents", 50)).toBe(true);
+		expect(pager.pagerAllows("agents", -50)).toBe(false);
+		expect(pager.pagerAllows("ov", -50)).toBe(true);
+		expect(pager.pagerAllows("ov", 50)).toBe(false);
+		expect(pager.pagerAllows("term", 50)).toBe(true);
+		expect(pager.pagerAllows("term", -50)).toBe(true);
+		expect(pager.pagerAllows("elsewhere", 50)).toBe(false);
+	});
+
+	test("it commits for a long drag or a short quick flick, not for a short slow one", () => {
+		expect(pager.pagerCommit(80, 900)).toBe(true);
+		expect(pager.pagerCommit(-80, 900)).toBe(true);
+		expect(pager.pagerCommit(40, 60)).toBe(true);
+		expect(pager.pagerCommit(40, 900)).toBe(false);
+		expect(pager.pagerCommit(20, 10)).toBe(false);
+		expect(pager.pagerCommit(40, 200)).toBe(false);
+	});
+
+	test("the destinations: the overview back to the agents, everything else to the overview", () => {
+		expect(pager.pagerDest("ov")).toBe("#/");
+		expect(pager.pagerDest("agents")).toBe("#/term");
+		expect(pager.pagerDest("term")).toBe("#/term");
+	});
+
+	test("the terminal routes", () => {
+		expect(pager.termHash("#/term")).toEqual({ n: null });
+		expect(pager.termHash("#/term/3")).toEqual({ n: 3 });
+		expect(pager.termHash("#/term/12")).toEqual({ n: 12 });
+		for (const bad of ["#/", "#/a/1", "#/term/", "#/term/x", "#/term/1/2", "#/terms", "#/term/1234567890", "#/term?x"]) {
+			expect(pager.termHash(bad)).toBeNull();
+		}
+	});
+});

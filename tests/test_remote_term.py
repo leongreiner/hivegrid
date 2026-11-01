@@ -523,7 +523,8 @@ class TestRemoteSettings(unittest.TestCase):
         return S.Settings(self.path).remote()
 
     def test_the_terminal_is_off_unless_the_file_says_true(self):
-        self.assertEqual(self.remote(None), {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60})
+        self.assertEqual(self.remote(None), {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
+                                             "notify_url": None, "notify_events": ["attention", "done", "limit"]})
         for stored in ({}, {"remote": {}}, {"remote": {"terminal": False}}, {"remote": {"terminal": 1}}, {"remote": {"terminal": "true"}},
                        {"remote": {"terminal": "yes"}}, {"remote": {"terminal": None}}, {"remote": "terminal"}, {"remote": [True]},
                        {"remote": True}, {"remote": {"Terminal": True}}, "{not json", "[1]"):
@@ -777,6 +778,28 @@ class TestTerminalFlow(TerminalAppCase):
         self.assertEqual(base64.b64decode(data["data"]), seen)
         self.assertEqual(self.typed(sid, listing[0]["in"], "more\r")[1]["in"], 2)
 
+    def test_the_listing_carries_what_the_overview_draws(self):
+        """The phone's overview needs no API of its own: the list says which shells exist, how big, how old and whether they
+        ended; the tail of each comes from its output request."""
+        first = self.open(80, 24)
+        self.clock.t += R.TERM_OPEN_EVERY
+        self.terms.shell = script(self.home, "short-lived", "exit 7\n")
+        second = self.open(100, 30)
+        self.assertEqual((first["n"], second["n"]), (1, 2))
+        self.assertTrue(wait_for(lambda: self.out(second["id"])[1]["exit"] == 7))
+        r, data = self.call("GET", "/api/terminals")
+        self.assertEqual(r.status, 200)
+        one, two = data["sessions"]
+        self.assertEqual([one["n"], two["n"]], [1, 2], "oldest first: the overview lists them in this order")
+        for info in (one, two):
+            self.assertEqual(set(info), {"id", "n", "cols", "rows", "alive", "exit", "age", "idle", "in", "end"})
+            self.assertIsInstance(info["age"], int)
+            self.assertIsInstance(info["idle"], int)
+        self.assertEqual((one["alive"], one["exit"], one["cols"], one["rows"]), (True, None, 80, 24))
+        self.assertEqual((two["alive"], two["exit"]), (False, 7))
+        self.assertEqual(data["limits"]["max"], 4, "the + tile stops at this many")
+        self.assertEqual(self.out(first["id"], 0)[0].status, 200, "a tile reads the tail through the output request")
+
     def test_a_retry_is_recognised_and_a_gap_is_reported(self):
         sid = self.open()["id"]
         self.assertEqual(self.typed(sid, 0, "a")[1], {"ok": True, "in": 1, "dup": False})
@@ -891,6 +914,29 @@ class TestStatic(TR.AppCase):
             self.assertEqual(self.call("GET", path, token=None, headers={"if-none-match": r.headers["ETag"]})[0].status, 304)
             self.assertEqual(self.call("GET", path, token=None, host="evil.example")[0].status, 403)
         self.assertEqual(self.call("POST", "/term.js", {}, token=None)[0].status, 405)
+
+    def test_the_overview_and_the_pager_are_in_the_page_and_stay_inside_its_rules(self):
+        app_js = self.call("GET", "/app.js", token=None)[0].body.decode()
+        app_css = self.call("GET", "/app.css", token=None)[0].body.decode()
+        view = self.call("GET", "/term-view.js", token=None)[0].body.decode()
+        css = self.call("GET", "/term.css", token=None)[0].body.decode()
+        self.assertIn("HGTermView.overview(", app_js)
+        self.assertIn("root.HGTermView = { open: open, overview: overview", view)
+        # the swipe listeners exist only through pagerSet(meta.terminal): with the terminal off nothing is registered
+        self.assertEqual(app_js.count('f.call(document, "pointerdown", pagerDown'), 1)
+        self.assertNotIn('document.addEventListener("pointerdown"', app_js)
+        self.assertIn("pagerSet(!!meta.terminal)", app_js)
+        self.assertEqual(app_js.count("pagerDown"), 2, "registered in one place only (definition and the one registration)")
+        # the page's rules: no inline script or style, colours only from the theme
+        for text in (app_js, view):
+            self.assertNotIn(".style.cssText", text)
+            self.assertNotIn("setAttribute(\"style\"", text)
+            self.assertNotRegex(text, r"#[0-9a-fA-F]{6}\b")
+        for text in (app_css, css):
+            self.assertNotRegex(text, r"#[0-9a-fA-F]{3,8}\b")
+        self.assertIn("pan-y pinch-zoom", app_css)
+        self.assertIn("aria-current", app_js)
+        self.assertIn("prefers-reduced-motion", app_css)
 
     def test_the_theme_carries_the_terminal_colours(self):
         css = self.call("GET", "/theme.css", token=None)[0].body.decode()

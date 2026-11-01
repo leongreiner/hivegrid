@@ -184,6 +184,8 @@ a { color: var(--accent); text-decoration: none; }
 .btn.key { min-width: 0; }
 .btn.key kbd { color: var(--bright); font-weight: 700; margin-right: 0.6ch; }
 .btn.icon { padding: 0; width: 44px; font-size: 18px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+.btn.ghost.on { background: var(--raised); color: var(--bright); }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 /* chip: tab strips and buttons. Active: raised + bright + bold; inactive: muted. 44px hit area, 30px pill. */
 .chip {
@@ -534,19 +536,6 @@ details[open] > summary::before { content: "\25BE"; }
 .pbtns .btn { flex: 1 1 auto; }
 .pbtns .btn.opt { flex: 1 1 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; }
 .refine { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-.strip {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 1ch;
-  padding: 2px calc(8px + var(--sar)) 2px calc(12px + var(--sal));
-  background: var(--surface);
-  border-top: 1px solid var(--rule-surface);
-  color: var(--muted);
-  font-size: 12px;
-}
-.strip .grow { flex: 1; }
-.strip .btn { min-height: 36px; }
 .lcard {
   flex: none;
   max-height: 36vh;
@@ -778,6 +767,11 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
 @media (max-width: 470px) {
   .top .wide-only { display: none; }
 }
+/* swipe pager (only while the terminal is on, see pagerSet): horizontal moves reach the page, vertical ones scroll, pinch still zooms */
+#app.pg-on .top, #app.pg-on .list-pane, #app.pg-on .list, #app.pg-on .foot, #app.pg-on .tov-pane, #app.pg-on .tov-scroll { touch-action: pan-y pinch-zoom; }
+#app.pg-on .chips { touch-action: auto; }
+#app.pg-on .list-pane, #app.pg-on .tov-pane { transition: transform .16s ease-out; }
+#app.pg-on .pg-drag { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
@@ -1219,6 +1213,7 @@ APP_JS = r"""(function () {
     app.classList.toggle("ro", !!meta.readonly);
     if (U.ro) { U.ro.hidden = !meta.readonly; }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
+    pagerSet(!!meta.terminal);
     routeTerm();
     if (agents) { renderChips(); renderList(); updateDetail(); }
     if (menuSec === "about") { renderMenu(); }
@@ -1266,6 +1261,7 @@ APP_JS = r"""(function () {
     window.clearTimeout(metaTimer);
     window.clearTimeout(menuTimer);
     closeTerm();
+    pagerSet(false);
     inApp = false;
   }
   function clearToken() {
@@ -1288,7 +1284,7 @@ APP_JS = r"""(function () {
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
     U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u2261");
-    U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminal", hidden: !(meta && meta.terminal) }, ">_");
+    U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
       h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.termBtn, U.menuBtn);
 
@@ -1320,10 +1316,8 @@ APP_JS = r"""(function () {
     D.latest = h("button", { class: "latest", type: "button", hidden: true, onclick: function () { scrollBottom(); } }, "\u2193 latest");
     D.chatbox = h("div", { class: "chatbox" }, D.screenNote, D.chat, D.tailbox, D.latest);
 
-    // pending card, strip, composer
+    // pending card, composer
     D.pend = h("div", { class: "pcard write", hidden: true, role: "group", "aria-label": "Needs your answer" });
-    D.ackBtn = h("button", { class: "btn", type: "button", onclick: sendAck }, "\u2713 acknowledge");
-    D.strip = h("div", { class: "strip write", hidden: true }, h("span", { class: "grow" }, "finished"), D.ackBtn);
     D.lcard = h("div", { class: "lcard", hidden: true, role: "group", "aria-label": "Usage limit and account" });
     D.ta = h("textarea", { class: "field", rows: "1", placeholder: "Message", "aria-label": "Message", enterkeyhint: "send", autocapitalize: "sentences", oninput: onPromptInput, onkeydown: function (ev) {
       var fine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
@@ -1340,13 +1334,15 @@ APP_JS = r"""(function () {
     D.body.appendChild(D.chatbox);
     D.body.appendChild(D.lcard);
     D.body.appendChild(D.pend);
-    D.body.appendChild(D.strip);
     D.body.appendChild(D.compose);
     D.empty = h("div", { class: "d-empty" });
     var detailPane = h("section", { class: "detail-pane", "aria-label": "Agent chat" }, D.head, D.body, D.empty);
 
     app.appendChild(top);
-    app.appendChild(h("div", { class: "split" }, listPane, detailPane));
+    U.tov = h("section", { class: "tov-pane", hidden: true, "aria-label": "Terminals" });
+    U.live = h("div", { class: "sr-only", role: "status", "aria-live": "polite" });
+    app.appendChild(h("div", { class: "split" }, listPane, detailPane, U.tov));
+    app.appendChild(U.live);
     buildMenu();
     app.appendChild(M.root);
     app.classList.toggle("ro", !!(meta && meta.readonly));
@@ -1432,7 +1428,10 @@ APP_JS = r"""(function () {
     U.foot.appendChild(h("span", { class: "spacer" }));
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
-    if (needs + limited === 0) { U.foot.appendChild(h("span", null, "tap an agent to open")); }
+    if (needs + limited === 0) {
+      var swipeHint = meta && meta.terminal && window.matchMedia && window.matchMedia("(pointer: coarse)").matches ? " \u00b7 swipe right: terminals" : "";
+      U.foot.appendChild(h("span", null, "tap an agent to open" + swipeHint));
+    }
   }
 
   // ---------------------------------------------------------------- routing
@@ -1500,7 +1499,10 @@ APP_JS = r"""(function () {
   }
 
   // ---------------------------------------------------------------- terminal: its script and styles load when it is first opened
-  var termView = null;
+  var termView = null;      // one terminal, #/term/N (HGTermView.open)
+  var ovView = null;        // the overview of the terminals, #/term (HGTermView.overview)
+  var termMode = null;      // where the page is: "ov", "view" or null (agents), for focus and the announcement
+  var termLast = null;      // the terminal shown last: the overview puts focus on its tile
   var termOpening = false;
   var termAssets = null;
   function loadTermAssets() {
@@ -1521,31 +1523,156 @@ APP_JS = r"""(function () {
     termAssets.catch(function () { termAssets = null; });
     return termAssets;
   }
-  function termWanted() { return inApp && window.location.hash === "#/term" && !!(meta && meta.terminal); }
+  function termRoute() { return inApp && meta && meta.terminal ? termHash(window.location.hash) : null; }
   function leaveTerm() { setHash("#/", true); }
-  function openTerm() {
-    termOpening = true;
-    loadTermAssets().then(function () {
-      termOpening = false;
-      if (!termWanted() || termView) { return; }
-      termView = window.HGTermView.open({ api: api, toast: toast, ask: ask, close: leaveTerm });
-    }, function () {
-      termOpening = false;
-      toast("The terminal could not be loaded.", true);
-      if (window.location.hash === "#/term") { leaveTerm(); }
-    });
+  function setTermBtn(on) {
+    if (!U.termBtn) { return; }
+    U.termBtn.classList.toggle("on", on);
+    if (on) { U.termBtn.setAttribute("aria-current", "page"); } else { U.termBtn.removeAttribute("aria-current"); }
+  }
+  function announce(text) { if (U.live) { U.live.textContent = text; } }
+  function termCtx() {
+    return {
+      api: api, toast: toast, ask: ask,
+      close: function () { setHash("#/term", true); },
+      route: function (n) {
+        var hash = "#/term/" + n;
+        if (window.location.hash !== hash) { window.history.replaceState(null, "", hash); route(); }
+      }
+    };
+  }
+  function overviewCtx() {
+    return {
+      host: U.tov, api: api, toast: toast, state: stateInfo, leave: leaveTerm,
+      open: function (n) { setHash("#/term/" + n, false); }
+    };
   }
   function closeTerm() {
-    if (!termView) { return; }
-    termView.destroy();
-    termView = null;
-    if (U.termBtn && inApp) { U.termBtn.focus({ preventScroll: true }); }
+    if (termView) { termView.destroy(); termView = null; }
+    if (ovView) { ovView.destroy(); ovView = null; }
+    termMode = null;
   }
+  // The address decides what shows: #/ the agents, #/term the overview of the terminals (a pane of the page, under the same
+  // top bar), #/term/N terminal N (a full-screen page over it). Scripts and styles load when the first of them is wanted.
   function routeTerm() {
     if (!inApp) { return; }
-    if (termWanted()) { if (!termView && !termOpening) { openTerm(); } }
-    else if (termView) { closeTerm(); }
-    if (meta && !meta.terminal && window.location.hash === "#/term") { leaveTerm(); }
+    var want = termRoute();
+    if (!want) {
+      if (meta && !meta.terminal && termHash(window.location.hash)) { leaveTerm(); return; }
+    } else if (!window.HGTermView) {
+      if (termOpening) { return; }
+      termOpening = true;
+      loadTermAssets().then(function () { termOpening = false; routeTerm(); }, function () {
+        termOpening = false;
+        toast("The terminal could not be loaded.", true);
+        if (termHash(window.location.hash)) { leaveTerm(); }
+      });
+      return;
+    }
+    var mode = !want ? null : (want.n === null ? "ov" : "view");
+    var app = document.getElementById("app");
+    if (mode !== "view" && termView) { termView.destroy(); termView = null; }
+    if (mode !== "ov" && ovView) { ovView.destroy(); ovView = null; }
+    app.classList.toggle("term-ov", mode === "ov");
+    U.tov.hidden = mode !== "ov";
+    setTermBtn(mode === "ov");
+    if (mode === "ov" && !ovView) { ovView = window.HGTermView.overview(overviewCtx()); }
+    if (mode === "view") {
+      termLast = want.n;
+      if (termView) { termView.select(want.n); } else { termView = window.HGTermView.open(termCtx(), want.n); }
+    }
+    if (mode !== termMode) {
+      termMode = mode;
+      if (mode === "ov") { ovView.focus(termLast); announce("Terminals"); }
+      else if (mode === null) { announce("Agents"); if (U.termBtn && !U.termBtn.hidden) { U.termBtn.focus({ preventScroll: true }); } }
+    }
+  }
+
+  // ---------------------------------------------------------------- swipe pager: agents <-> terminal overview
+  // The pager gesture, as pure functions (tests/ext/remote-term.test.ts runs this block on its own). Finger moves right on the
+  // agents: terminals open (a left swipe on a row is the row's swipe-to-quit, so the pager takes the other direction); left on the
+  // overview: back to the agents; in an open terminal, from its header or an edge of the screen either way: back to the overview.
+  // pager-logic:begin
+  var PAGER_EDGE = 24;       // px from a screen edge where a swipe inside an open terminal counts
+  function pagerClassify(dx, dy) {
+    var ax = Math.abs(dx);
+    var ay = Math.abs(dy);
+    if (ay > 10 && ay >= ax) { return "cancel"; }                  // a vertical move: the list scrolls
+    if (ax >= 12 && ax >= 1.5 * ay) { return "lock"; }             // clearly sideways: the direction is locked
+    return "wait";
+  }
+  function pagerAllows(zone, dx) {
+    if (zone === "agents") { return dx > 0; }
+    if (zone === "ov") { return dx < 0; }
+    return zone === "term";
+  }
+  function pagerCommit(dx, ms) {
+    var ax = Math.abs(dx);
+    return ax >= 72 || (ax >= 36 && ax / Math.max(ms, 1) >= 0.5);   // far enough, or a short flick
+  }
+  function pagerDest(zone) { return zone === "ov" ? "#/" : "#/term"; }
+  function termHash(hash) {
+    var m = /^#\/term(?:\/([0-9]{1,9}))?$/.exec(hash);
+    return m ? { n: m[1] === undefined ? null : parseInt(m[1], 10) } : null;
+  }
+  // pager-logic:end
+  var pagerOn = false;
+  var pg = null;             // the swipe being tracked: { id, x, y, t, zone, locked, dx, pane }
+  function pagerZone(ev) {
+    var t = ev.target;
+    if (!inApp || !t || !t.closest || menuSec || sheet || document.getElementById("confirm").open) { return null; }
+    if (document.querySelector(".term-page")) {
+      var edge = ev.clientX < PAGER_EDGE || ev.clientX > window.innerWidth - PAGER_EDGE;
+      return t.closest(".term-top") || (edge && t.closest(".term-page")) ? "term" : null;
+    }
+    var app = document.getElementById("app");
+    if (!app.contains(t) || t.closest(".chips, .rw.open, input, textarea, select, button.rquit")) { return null; }
+    if (app.classList.contains("term-ov")) { return t.closest(".top, .tov-pane") ? "ov" : null; }
+    return t.closest(".top, .list-pane") ? "agents" : null;
+  }
+  function pagerDown(ev) {
+    if (ev.pointerType !== "touch" && ev.pointerType !== "pen") { return; }
+    if (!ev.isPrimary) { pagerEnd(null, true); return; }           // a second finger: a pinch, not a swipe
+    var zone = pagerZone(ev);
+    pg = zone ? { id: ev.pointerId, x: ev.clientX, y: ev.clientY, t: ev.timeStamp, zone: zone, locked: false, dx: 0, pane: null } : null;
+  }
+  function pagerMove(ev) {
+    if (!pg || ev.pointerId !== pg.id) { return; }
+    var dx = ev.clientX - pg.x;
+    var dy = ev.clientY - pg.y;
+    if (!pg.locked) {
+      var c = pagerClassify(dx, dy);
+      if (c === "wait") { return; }
+      if (c === "cancel" || !pagerAllows(pg.zone, dx)) { pg = null; return; }
+      pg.locked = true;
+      pg.pane = document.querySelector(pg.zone === "agents" ? ".list-pane" : (pg.zone === "ov" ? ".tov-pane" : ".none"));
+      if (pg.pane) { pg.pane.classList.add("pg-drag"); }
+    }
+    pg.dx = dx;
+    if (pg.pane && !REDUCED) { pg.pane.style.transform = "translateX(" + Math.max(-40, Math.min(40, dx * 0.35)) + "px)"; }
+  }
+  function pagerEnd(ev, cancelled) {
+    if (!pg || (ev && ev.pointerId !== pg.id)) { return; }
+    var g = pg;
+    pg = null;
+    if (g.pane) { g.pane.classList.remove("pg-drag"); g.pane.style.transform = ""; }
+    if (cancelled || !g.locked || !ev) { return; }
+    if (pagerAllows(g.zone, g.dx) && pagerCommit(g.dx, ev.timeStamp - g.t)) { setHash(pagerDest(g.zone), false); }
+  }
+  function pagerUp(ev) { pagerEnd(ev, false); }
+  function pagerCancel(ev) { pagerEnd(ev, true); }
+  // Registered only while the terminal is on (meta.terminal): with it off nothing listens and the page's touch handling is untouched.
+  function pagerSet(on) {
+    if (on === pagerOn) { return; }
+    pagerOn = on;
+    pg = null;
+    var app = document.getElementById("app");
+    if (app) { app.classList.toggle("pg-on", on); }
+    var f = on ? document.addEventListener : document.removeEventListener;
+    f.call(document, "pointerdown", pagerDown, { passive: true });
+    f.call(document, "pointermove", pagerMove, { passive: true });
+    f.call(document, "pointerup", pagerUp, { passive: true });
+    f.call(document, "pointercancel", pagerCancel, { passive: true });
   }
 
   // ---------------------------------------------------------------- chat state
@@ -1957,7 +2084,6 @@ APP_JS = r"""(function () {
     D.plus.disabled = false;
     D.attach.hidden = !(meta && meta.capabilities && meta.capabilities.indexOf("upload") >= 0);
     D.attach.disabled = mode === "none" || uploading;
-    D.strip.hidden = !can.ack;
     var note = "";
     if (mode === "answer" && a.pending && a.pending.kind !== "plan_review") { note = "Tap above, or type an answer: it is pasted, then Enter."; }
     else if (a.state === "limit") { note = "The account's limit is reached: switch account, or wait for the reset."; }
@@ -2161,10 +2287,6 @@ APP_JS = r"""(function () {
       }
       if (id === selId) { onPromptInput(); updateDetail(); }
     });
-  }
-  function sendAck() {
-    if (selId === null) { return; }
-    post(agentUrl(selId, "ack"), {}, "Acknowledged");
   }
 
   // ---------------------------------------------------------------- sheets (actions, models)
@@ -2787,6 +2909,7 @@ APP_JS = r"""(function () {
     if (dlg.open) { return; }
     if (sheet) { closeSheet(); ev.preventDefault(); }
     else if (menuSec) { closeMenu(); ev.preventDefault(); }
+    else if (termMode === "ov") { setHash("#/", false); ev.preventDefault(); }
   });
 
   // ---------------------------------------------------------------- start

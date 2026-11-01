@@ -1224,14 +1224,41 @@ TERM_CSS = r"""
 .term-keys .btn{flex:none;min-width:44px;padding:6px 10px}
 .term-keys .btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--deep);font-weight:700}
 .term-in{position:absolute;left:0;bottom:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;resize:none;background:transparent;color:transparent;caret-color:transparent;pointer-events:none}
+.term-top{touch-action:pan-y pinch-zoom}
+#app.term-ov .list-pane,#app.term-ov .detail-pane{display:none}
+.tov-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--base)}
+.tov-head{flex:none;display:flex;align-items:center;gap:6px;min-height:44px;padding:0 calc(8px + var(--sar)) 0 calc(4px + var(--sal));background:var(--base);border-bottom:1px solid var(--rule-base)}
+.tov-back{display:inline-flex;align-items:center;padding:0 10px;font-size:13px;white-space:nowrap}
+.tov-title{margin:0;font:inherit;font-weight:700;color:var(--bright);white-space:nowrap;outline:none}
+.tov-title .n{color:var(--muted);font-weight:400}
+.tov-head .spacer{flex:1}
+.tov-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+.tgrid{list-style:none;margin:0;padding:10px calc(10px + var(--sar)) 14px calc(10px + var(--sal));display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
+.tli{min-width:0;display:flex}
+.tile{flex:1;min-width:0;display:grid;grid-template-columns:2ch minmax(0,1fr) auto;column-gap:1ch;align-items:baseline;padding:8px 10px;background:var(--surface);border:1px solid var(--rule-surface);border-radius:6px;box-shadow:inset 3px 0 0 var(--sc,var(--dim));color:var(--text);text-align:left;font:inherit;cursor:pointer}
+.tile:active{background:var(--hover)}
+.tile .glyph{width:2ch}
+.tname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700}
+.tnum{color:var(--cyan);margin-right:1ch}
+.tmeta{color:var(--dim);font-size:12px;white-space:nowrap}
+.tprev{grid-column:1/-1;margin-top:6px;padding:6px 8px;height:calc(6 * 1.3em + 12px);overflow:hidden;background:var(--deep);border:1px solid var(--rule-base);border-radius:4px;font-size:11px;line-height:1.3;color:var(--text)}
+.tl{min-height:1.3em;white-space:pre;overflow:hidden}
+.tile.s-exited .tprev{opacity:.6}
+.tsub{grid-column:1/-1;margin-top:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.tile.new{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:96px;background:transparent;border:1px dashed var(--edge-hi);box-shadow:none;color:var(--muted)}
+.tile.new .plus{font-size:28px;line-height:1;font-weight:700;color:var(--accent)}
+.tile.new:disabled{cursor:default;color:var(--dim)}
+.tile.new:disabled .plus{color:var(--dim)}
 """
 
 TERM_VIEW_JS = r"""
 (function (root) {
   "use strict";
 
-  var KEY_ID = "hivegrid-remote-term";
   var KEY_FONT = "hivegrid-remote-term-font";
+  var KEY_OLD = "hivegrid-remote-term";      // the shell the page used to remember: the route names it now
+  var PREVIEW_LINES = 6;
+  var POLL_MS = 2000;
   var MAX_IN = 4000;
   var MAX_QUEUE = 65536;
   var HOLD_MS = 420;
@@ -1279,8 +1306,9 @@ TERM_VIEW_JS = r"""
     return r && r.data && r.data.message ? String(r.data.message) : "request failed (" + (r ? r.status : "?") + ")";
   }
 
-  // ctx: { api(path, opt), toast(msg, isErr), ask(text, okLabel), close() }. Returns { destroy() }.
-  function open(ctx) {
+  // ctx: { api(path, opt), toast(msg, isErr), ask(text, okLabel), close() (to the overview), route(n) (the address now names terminal n) }.
+  // `want` is the number of the terminal to show. Returns { destroy(), select(n) }.
+  function open(ctx, want) {
     var dead = false;
     var fontSize = parseInt(store(KEY_FONT), 10) || 13;
     var mods = { ctrl: false, alt: false };
@@ -1292,7 +1320,7 @@ TERM_VIEW_JS = r"""
     var app = document.getElementById("app");
 
     // ---- DOM
-    var back = el("a", "btn ghost icon", "\u25c0", { href: "#/", "aria-label": "Back to agents" });
+    var back = el("a", "btn ghost icon", "\u25c0", { href: "#/term", "aria-label": "Back to terminals" });
     var title = el("span", "term-title");
     title.appendChild(el("span", "accent", "\u2b21"));
     var titleText = document.createTextNode("Terminal");
@@ -1366,14 +1394,9 @@ TERM_VIEW_JS = r"""
     }
     function forget(id) {
       sessions = sessions.filter(function (s) { return s.id !== id; });
-      if (store(KEY_ID) === id) { store(KEY_ID, null); }
     }
-    function best() {
-      var alive = sessions.filter(function (s) { return s.alive; });
-      var pool = alive.length ? alive : sessions;
-      var want = store(KEY_ID);
-      var hit = pool.filter(function (s) { return s.id === want; })[0];
-      return hit || pool[pool.length - 1] || null;
+    function find(n) {
+      return sessions.filter(function (s) { return s.n === n; })[0] || null;
     }
     function measure() {
       var r = new root.HGTerm.Renderer(host, new root.HGTerm.Emulator(80, 24), { fontSize: fontSize });
@@ -1394,9 +1417,17 @@ TERM_VIEW_JS = r"""
       hideNote();
       load().then(function (ok) {
         if (!ok || dead) { return; }
-        var s = best();
-        if (s) { attach(s); } else { create(); }
+        var s = find(want);
+        if (s) { attach(s); return; }
+        ctx.toast("That terminal is gone.", true);
+        ctx.close();
       });
+    }
+    function select(n) {
+      want = n;
+      if (cur && cur.n === n) { return; }
+      var s = find(n);
+      if (s) { attach(s); } else { begin(); }
     }
     function create() {
       var f = measure();
@@ -1426,7 +1457,7 @@ TERM_VIEW_JS = r"""
     }
     function attach(info) {
       detach();
-      store(KEY_ID, info.id);
+      want = info.n;
       var s = { id: info.id, n: info.n, pos: 0, catching: true, fitted: false, seq: info["in"] || 0, inq: "", inflight: false,
         fails: 0, ifails: 0, ended: false, dead: false, pid: 0, req: { ctrl: null }, timer: 0, ftimer: 0, utf8: new root.HGTerm.Utf8Stream() };
       s.em = new root.HGTerm.Emulator(info.cols, info.rows, {
@@ -1445,6 +1476,7 @@ TERM_VIEW_JS = r"""
       hideNote();
       setConn("wait");
       drawTabs();
+      ctx.route(info.n);
       pump(s);
       if (!root.matchMedia || !root.matchMedia("(pointer: coarse)").matches) { focusInput(); }
     }
@@ -1656,9 +1688,7 @@ TERM_VIEW_JS = r"""
         call("/api/terminals/" + s.id + "/close", {}).then(function (r) {
           if (dead || (r.status !== 200 && r.status !== 404)) { if (!dead && r.status !== 401) { ctx.toast(reason(r), true); } return; }
           detach();
-          forget(s.id);
-          var next = best();
-          if (next) { attach(next); } else { ctx.close(); }
+          ctx.close();
         });
       });
     });
@@ -1689,9 +1719,11 @@ TERM_VIEW_JS = r"""
     document.body.appendChild(page);
     if ("inert" in app) { app.inert = true; }
     fitVisible();
+    store(KEY_OLD, null);
     begin();
 
     return {
+      select: select,
       destroy: function () {
         if (dead) { return; }
         dead = true;
@@ -1708,6 +1740,272 @@ TERM_VIEW_JS = r"""
     };
   }
 
-  root.HGTermView = { open: open, version: 1 };
+  // ---------------------------------------------------------------- overview: one tile per terminal, with the tail of its screen
+
+  var CTRL = /[\u0000-\u001f\u007f-\u009f]/g;
+  var BUSY_MS = 3500;                  // output within this long ago: the tile says busy
+
+  function apiCall(ctx, path, body, timeout, holder) {
+    var opt = { timeout: timeout || 12000 };
+    if (body !== undefined) { opt.body = body; }
+    if (holder) { opt.loop = holder; }
+    return ctx.api(path, opt).then(null, function () { return { status: 0, data: null }; });
+  }
+
+  function fmtAge(sec) {
+    var s = Math.max(Math.floor(sec), 0);
+    if (s < 60) { return s + "s"; }
+    if (s < 3600) { return Math.floor(s / 60) + "m"; }
+    if (s < 86400) { return Math.floor(s / 3600) + "h" + ("0" + Math.floor((s % 3600) / 60)).slice(-2) + "m"; }
+    return Math.floor(s / 86400) + "d";
+  }
+
+  // The lines a tile shows: up to `count` lines of the screen, ending at its last line that holds anything.
+  function previewLines(em, count) {
+    var lines = em.screenText();
+    var last = lines.length - 1;
+    while (last >= 0 && lines[last] === "") { last -= 1; }
+    if (last < 0) { return []; }
+    return lines.slice(Math.max(0, last + 1 - count), last + 1);
+  }
+
+  // ctx: { host, api(path, opt), toast(msg, isErr), state(kind) -> { glyph, label }, leave() (to the agents), open(n) (to terminal n) }.
+  // Draws into ctx.host and keeps a screen model per terminal, fed from the same output API the terminal view reads, so the tiles
+  // show what the shells show now (colours and the cursor aside). Returns { destroy(), focus(n) }.
+  function overview(ctx) {
+    var host = ctx.host;
+    var dead = false;
+    var halted = false;                // a refusal ended the polling
+    var running = false;
+    var loaded = false;
+    var creating = false;
+    var timer = 0;
+    var fails = 0;
+    var max = 4;
+    var recs = {};                     // session id -> tile record
+    var wantN = null;                  // the terminal whose tile takes focus once it is listed
+    var listReq = { ctrl: null };
+    var coarse = !!(root.matchMedia && root.matchMedia("(pointer: coarse)").matches);
+
+    host.textContent = "";
+    var back = el("a", "btn ghost tov-back", "\u25c0 agents", { href: "#/", "aria-label": "Back to agents" });
+    var count = el("span", "n");
+    var title = el("h2", "tov-title", "Terminals", { tabindex: "-1" });
+    title.appendChild(count);
+    var conn = el("span", "status-chip conn-wait", "wait", { role: "status" });
+    var head = el("div", "tov-head");
+    [back, title, el("span", "spacer"), conn].forEach(function (n) { head.appendChild(n); });
+    var noteMsg = el("span", "msg");
+    var noteBtn = el("button", "btn", "Retry", { type: "button" });
+    var note = el("div", "term-note", null, { role: "status" });
+    note.appendChild(noteMsg);
+    note.appendChild(noteBtn);
+    note.hidden = true;
+    var empty = el("div", "empty");
+    empty.appendChild(el("strong", null, "No terminals open"));
+    empty.appendChild(document.createTextNode("Tap + for a shell on this machine, as your user."));
+    empty.hidden = true;
+    var grid = el("ul", "tgrid", null, { role: "list", "aria-label": "Terminals" });
+    var add = el("button", "tile new", null, { type: "button" });
+    var addLabel = el("span", "tlabel", "new terminal");
+    add.appendChild(el("span", "plus", "+", { "aria-hidden": "true" }));
+    add.appendChild(addLabel);
+    var addLi = el("li", "tli");
+    addLi.appendChild(add);
+    grid.appendChild(addLi);
+    var scroll = el("div", "tov-scroll");
+    scroll.appendChild(empty);
+    scroll.appendChild(grid);
+    var foot = el("div", "foot", coarse ? "tap a terminal to open \u00b7 swipe left: agents" : "tap a terminal to open");
+    [head, note, scroll, foot].forEach(function (n) { host.appendChild(n); });
+
+    function setConn(kind) {
+      conn.className = "status-chip conn-" + kind;
+      conn.textContent = kind === "live" ? "live" : (kind === "wait" ? "retry" : "offline");
+      conn.hidden = kind === "live";                         // the top bar already says live
+    }
+    function showNote(text) { noteMsg.textContent = text; note.hidden = false; }
+
+    // ---- one tile per terminal
+    function makeRec(info) {
+      var rec = { id: info.id, info: info, pos: 0, done: false, seen: false, grew: 0, title: "", sig: null, req: { ctrl: null }, utf8: new root.HGTerm.Utf8Stream() };
+      rec.em = new root.HGTerm.Emulator(info.cols, info.rows, {
+        scrollback: 0,
+        onTitle: function (t) { rec.title = String(t).replace(CTRL, "").slice(0, 80); }
+      });
+      rec.em.quiet = true;                                   // a preview never answers the shell's questions
+      rec.glyph = el("span", "glyph", null, { "aria-hidden": "true" });
+      rec.num = el("span", "tnum", String(info.n));
+      rec.text = el("span", "ttext");
+      rec.meta = el("span", "tmeta");
+      rec.prev = el("div", "tprev", null, { "aria-hidden": "true" });
+      rec.sub = el("div", "tsub");
+      rec.a = el("a", "tile", null, { href: "#/term/" + info.n });
+      var name = el("span", "tname");
+      name.appendChild(rec.num);
+      name.appendChild(rec.text);
+      [rec.glyph, name, rec.meta, rec.prev, rec.sub].forEach(function (n) { rec.a.appendChild(n); });
+      rec.li = el("li", "tli");
+      rec.li.appendChild(rec.a);
+      return rec;
+    }
+    function paint(rec) {
+      var info = rec.info;
+      var kind = !info.alive ? "exited" : (rec.seen && Date.now() - rec.grew < BUSY_MS ? "busy" : "shell");
+      var st = ctx.state(kind);
+      var name = rec.title || (info.alive ? "shell" : "ended");
+      rec.a.className = "tile s-" + kind;
+      rec.glyph.textContent = st.glyph;
+      rec.text.textContent = name;
+      rec.meta.textContent = fmtAge(info.age);
+      rec.sub.textContent = info.alive
+        ? info.cols + "\u00d7" + info.rows + " \u00b7 typed " + fmtAge(info.idle) + " ago"
+        : "ended" + (typeof info.exit === "number" ? " \u00b7 status " + info.exit : "");
+      rec.a.setAttribute("aria-label", "Terminal " + info.n + ", " + name + (name === st.label ? "" : ", " + st.label));
+      var lines = previewLines(rec.em, PREVIEW_LINES);
+      var sig = lines.join("\n");
+      if (sig !== rec.sig) {
+        rec.sig = sig;
+        rec.prev.textContent = "";
+        lines.forEach(function (l) { rec.prev.appendChild(el("div", "tl", l)); });
+      }
+    }
+    function paintAll() {
+      var alive = 0;
+      var n = 0;
+      Object.keys(recs).forEach(function (id) {
+        paint(recs[id]);
+        n += 1;
+        if (recs[id].info.alive) { alive += 1; }
+      });
+      count.textContent = " \u00b7 " + n;
+      empty.hidden = n > 0;
+      var full = alive >= max;
+      add.disabled = full || creating;
+      addLabel.textContent = full ? max + " of " + max + " open" : "new terminal";
+      add.setAttribute("aria-label", full ? "New terminal: the limit of " + max + " is reached" : "New terminal");
+    }
+    function drop(id) {
+      var rec = recs[id];
+      delete recs[id];
+      if (rec.req.ctrl) { try { rec.req.ctrl.abort(); } catch (e) { /* done already */ } }
+      if (rec.li.parentNode) { rec.li.parentNode.removeChild(rec.li); }
+    }
+    function apply(data) {
+      var list = (data.sessions || []).slice().sort(function (a, b) { return a.n - b.n; });
+      if (data.limits && data.limits.max) { max = data.limits.max; }
+      var ids = {};
+      list.forEach(function (info, i) {
+        var rec = recs[info.id];
+        if (!rec) { rec = recs[info.id] = makeRec(info); }
+        rec.info = info;
+        ids[info.id] = true;
+        if (rec.em.cols !== info.cols || rec.em.rows !== info.rows) { rec.em.resize(info.cols, info.rows); }
+        if (grid.children[i] !== rec.li) { grid.insertBefore(rec.li, grid.children[i] || null); }
+      });
+      Object.keys(recs).forEach(function (id) { if (!ids[id]) { drop(id); } });
+      paintAll();
+    }
+
+    // ---- output: each model reads from where it stopped; the first read takes everything the server kept
+    function pull(rec, depth) {
+      if (dead || rec.done) { return Promise.resolve(); }
+      return apiCall(ctx, "/api/terminals/" + rec.id + "/out?from=" + rec.pos + "&wait=0", undefined, 15000, rec.req).then(function (r) {
+        if (dead || r.status !== 200 || !r.data) { return; }
+        var d = r.data;
+        if (d.reset) { rec.em.reset(); rec.utf8.reset(); rec.pos = 0; }
+        var text = rec.utf8.decode(d.data || "");
+        if (text) { rec.em.write(text); }
+        if (rec.seen && d.next > rec.pos) { rec.grew = Date.now(); }
+        rec.pos = d.next;
+        var caught = d.next >= d.end;
+        if (caught) { rec.seen = true; }
+        if (!d.alive && caught) { rec.done = true; }
+        if (!caught && depth < 12) { return pull(rec, depth + 1); }
+      });
+    }
+
+    // ---- the polling loop: the list, then the new output of every shell; paused while the page is hidden
+    function cycle() {
+      timer = 0;
+      if (dead || halted || running || document.hidden) { return; }
+      running = true;
+      apiCall(ctx, "/api/terminals", undefined, 10000, listReq).then(function (r) {
+        if (dead) { return; }
+        if (r.status === 200 && r.data) {
+          fails = 0;
+          loaded = true;
+          note.hidden = true;
+          setConn("live");
+          apply(r.data);
+          focusPending();
+          return Promise.all(Object.keys(recs).map(function (id) { return pull(recs[id], 0); })).then(function () { if (!dead) { paintAll(); } });
+        }
+        if (r.status === 403) { halted = true; ctx.toast(reason(r), true); ctx.leave(); return; }
+        if (r.status === 401) { halted = true; return; }          // the page asks for the token again
+        fails += 1;
+        setConn(fails > 2 ? "down" : "wait");
+        if (!loaded) { showNote("The terminals could not be listed: " + reason(r)); }
+      }).then(function () {
+        running = false;
+        if (!dead && !halted && !document.hidden) { timer = root.setTimeout(cycle, fails ? Math.min(8000, 1000 * Math.pow(2, fails)) : POLL_MS); }
+      });
+    }
+    function wake() {
+      if (document.hidden || dead || halted || running) { return; }
+      root.clearTimeout(timer);
+      cycle();
+    }
+    document.addEventListener("visibilitychange", wake);
+    root.addEventListener("online", wake);
+    noteBtn.addEventListener("click", function () { fails = 0; wake(); });
+
+    // ---- new terminal: sized from the screen; the terminal view fits it exactly when it opens
+    add.addEventListener("click", function () {
+      if (creating || add.disabled) { return; }
+      creating = true;
+      add.disabled = true;
+      var cols = Math.max(20, Math.min(200, Math.floor((root.innerWidth - 8) / 7.8)));
+      var rows = Math.max(8, Math.min(80, Math.floor((root.innerHeight - 160) / 16.25)));
+      apiCall(ctx, "/api/terminals", { cols: cols, rows: rows }, 15000).then(function (r) {
+        creating = false;
+        if (dead) { return; }
+        if (r.status === 200 && r.data && typeof r.data.n === "number") { ctx.open(r.data.n); return; }
+        paintAll();
+        if (r.status === 403) { halted = true; ctx.toast(reason(r), true); ctx.leave(); return; }
+        if (r.status !== 401) { ctx.toast(reason(r), true); }
+      });
+    });
+
+    // ---- focus: the heading when the overview opens, the tile of the terminal that was just left once it is listed
+    function focusPending() {
+      if (wantN === null) { return; }
+      var hit = Object.keys(recs).map(function (id) { return recs[id]; }).filter(function (rec) { return rec.info.n === wantN; })[0];
+      wantN = null;
+      var a = document.activeElement;
+      if (hit && (a === title || a === document.body || !a)) { hit.a.focus(); }
+    }
+
+    cycle();
+    return {
+      focus: function (n) {
+        try { title.focus({ preventScroll: true }); } catch (e) { title.focus(); }
+        wantN = typeof n === "number" ? n : null;
+        if (loaded) { focusPending(); }
+      },
+      destroy: function () {
+        if (dead) { return; }
+        dead = true;
+        root.clearTimeout(timer);
+        if (listReq.ctrl) { try { listReq.ctrl.abort(); } catch (e) { /* done already */ } }
+        Object.keys(recs).forEach(drop);
+        document.removeEventListener("visibilitychange", wake);
+        root.removeEventListener("online", wake);
+        host.textContent = "";
+      }
+    };
+  }
+
+  root.HGTermView = { open: open, overview: overview, previewLines: previewLines, version: 2 };
 })(typeof window !== "undefined" ? window : globalThis);
 """

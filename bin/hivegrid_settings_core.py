@@ -155,21 +155,41 @@ def agent_setting(stored):
 # settings.json "remote": terminal is true only when the user asked for a shell on the phone page
 # (hivegrid-remote reads it at every request, so deleting the key ends the terminals at once; nothing
 # but the literal true counts); terminal_detached_minutes and terminal_idle_minutes bound how long a shell
-# lives with nobody looking at it and without a keystroke. Only hivegrid-remote reads this; the Lua
-# config and the settings panel do not (the panel keeps the key when it saves other settings).
-REMOTE_DEFAULTS = {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60}
+# lives with nobody looking at it and without a keystroke. notify_url is the topic URL of the user's own
+# ntfy server (an http or https URL without spaces or credentials; anything else means no notifications) and
+# notify_events says which agent states send one (a non-empty subset of attention, done, limit; all three
+# by default). Only hivegrid-remote reads this; the Lua config and the settings panel do not (the panel
+# keeps the keys when it saves other settings).
+REMOTE_NOTIFY_EVENTS = ("attention", "done", "limit")
+REMOTE_DEFAULTS = {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
+                   "notify_url": None, "notify_events": list(REMOTE_NOTIFY_EVENTS)}
 REMOTE_MINUTES = (1, 24 * 60)
+
+
+def notify_url_setting(v):
+    """`v` when it is an http(s) URL with a host and no credentials, spaces or control characters, else None."""
+    if not isinstance(v, str) or not 8 <= len(v) <= 500 or not v.isprintable() or " " in v:
+        return None
+    m = re.fullmatch(r"https?://([^/@?#\s]+)(/[^?#\s]*)?", v)
+    return v if m and m.group(1) else None
 
 
 def remote_settings(stored):
     """The effective remote settings of the stored `remote` value: defaults for anything missing or invalid."""
     stored = stored if isinstance(stored, dict) else {}
     out = dict(REMOTE_DEFAULTS)
+    out["notify_events"] = list(REMOTE_NOTIFY_EVENTS)
     out["terminal"] = stored.get("terminal") is True
     for key in ("terminal_detached_minutes", "terminal_idle_minutes"):
         v = stored.get(key)
         if type(v) is int and REMOTE_MINUTES[0] <= v <= REMOTE_MINUTES[1]:
             out[key] = v
+    out["notify_url"] = notify_url_setting(stored.get("notify_url"))
+    ev = stored.get("notify_events")
+    if isinstance(ev, list) and ev and all(isinstance(e, str) and e in REMOTE_NOTIFY_EVENTS for e in ev):
+        out["notify_events"] = [e for e in REMOTE_NOTIFY_EVENTS if e in ev]
+    return out
+
     return out
 
 
