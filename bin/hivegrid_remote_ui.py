@@ -2280,16 +2280,20 @@ APP_JS = r"""(function () {
     var max = limitOf(mode === "answer" ? "key_text" : "prompt");
     if (text.length > max) { toast("Too long: at most " + max + " characters.", true); return; }
     var id = selId;
-    D.send.disabled = true;
     pinned = true;
+    // Clear at once and give the text back when the request fails. Waiting for the answer and clearing only when the field still held exactly
+    // `text` left a message behind whenever the keyboard changed the field meanwhile (a pending autocorrect word, a trailing space).
+    D.ta.value = "";
+    delete drafts[id];
+    onPromptInput();
     var req = mode === "answer"
       ? post(agentUrl(id, "keys"), { text: text, keys: ["enter"] }, null)
       : post(agentUrl(id, "prompt"), { text: text }, null);
-    if (sw && sw.state !== "running" && swDismissed[a.id] === sw.since) { sw = null; }
     req.then(function (r) {
-      D.send.disabled = false;
-      if (r && id === selId && D.ta.value.replace(/\r\n?/g, "\n") === text) { D.ta.value = ""; delete drafts[id]; growPrompt(); }
-    window.clearTimeout(swTimer);
+      if (!r) {
+        if (id !== selId) { if (!drafts[id]) { drafts[id] = text; } }
+        else if (!D.ta.value) { D.ta.value = text; drafts[id] = text; }
+      }
       if (id === selId) { onPromptInput(); }
     });
   }
