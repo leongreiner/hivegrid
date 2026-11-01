@@ -1247,11 +1247,11 @@ describe("pager gesture rules", () => {
 		expect(pager.pagerClassify(14, 10)).toBe("wait");
 	});
 
-	test("agents take a swipe to the right (the row's left swipe is Quit), the overview one to the left", () => {
-		expect(pager.pagerAllows("agents", 50)).toBe(true);
-		expect(pager.pagerAllows("agents", -50)).toBe(false);
-		expect(pager.pagerAllows("ov", -50)).toBe(true);
-		expect(pager.pagerAllows("ov", 50)).toBe(false);
+	test("the terminals sit to the right: agents take a swipe to the left, the overview one to the right", () => {
+		expect(pager.pagerAllows("agents", -50)).toBe(true);
+		expect(pager.pagerAllows("agents", 50)).toBe(false);
+		expect(pager.pagerAllows("ov", 50)).toBe(true);
+		expect(pager.pagerAllows("ov", -50)).toBe(false);
 		expect(pager.pagerAllows("term", 50)).toBe(true);
 		expect(pager.pagerAllows("term", -50)).toBe(true);
 		expect(pager.pagerAllows("elsewhere", 50)).toBe(false);

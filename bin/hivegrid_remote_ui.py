@@ -303,6 +303,8 @@ a { color: var(--accent); text-decoration: none; }
 .rw.drag > .row { transition: none; }
 .rw.open > .row { transform: translateX(-96px); }
 .rw > .rquit { position: absolute; top: 0; right: 0; bottom: 0; width: 96px; border: 0; background: var(--red); color: var(--deep); font: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; }
+.rw.rev > .rquit { left: 0; right: auto; }
+.rw.rev.open > .row { transform: translateX(96px); }
 @media (prefers-reduced-motion: reduce) { .rw > .row { transition: none; } }
 /* history: past sessions */
 .hrow { padding: 10px calc(12px + var(--sar)) 10px calc(12px + var(--sal)); border-bottom: 1px solid var(--rule-base); }
@@ -770,8 +772,12 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
 /* swipe pager (only while the terminal is on, see pagerSet): horizontal moves reach the page, vertical ones scroll, pinch still zooms */
 #app.pg-on .top, #app.pg-on .list-pane, #app.pg-on .list, #app.pg-on .foot, #app.pg-on .tov-pane, #app.pg-on .tov-scroll { touch-action: pan-y pinch-zoom; }
 #app.pg-on .chips { touch-action: auto; }
-#app.pg-on .list-pane, #app.pg-on .tov-pane { transition: transform .16s ease-out; }
+#app.pg-on .list-pane, #app.pg-on .tov-pane { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s ease-out; will-change: transform; }
 #app.pg-on .pg-drag { transition: none; }
+@keyframes pg-in-r { from { transform: translateX(32%); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes pg-in-l { from { transform: translateX(-32%); opacity: 0; } to { transform: none; opacity: 1; } }
+.pg-from-r { animation: pg-in-r .26s cubic-bezier(.2, .8, .2, 1) both; }
+.pg-from-l { animation: pg-in-l .26s cubic-bezier(.2, .8, .2, 1) both; }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
@@ -1429,7 +1435,7 @@ APP_JS = r"""(function () {
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
     if (needs + limited === 0) {
-      var swipeHint = meta && meta.terminal && window.matchMedia && window.matchMedia("(pointer: coarse)").matches ? " \u00b7 swipe right: terminals" : "";
+      var swipeHint = meta && meta.terminal && window.matchMedia && window.matchMedia("(pointer: coarse)").matches ? " \u00b7 swipe left: terminals" : "";
       U.foot.appendChild(h("span", null, "tap an agent to open" + swipeHint));
     }
   }
@@ -1552,6 +1558,12 @@ APP_JS = r"""(function () {
     if (ovView) { ovView.destroy(); ovView = null; }
     termMode = null;
   }
+  // The pane that comes in slides from the side it sits on (CSS .pg-from-l / .pg-from-r; none with reduced motion).
+  function enterPane(pane, cls) {
+    if (!pane || REDUCED) { return; }
+    pane.classList.add(cls);
+    pane.addEventListener("animationend", function () { pane.classList.remove(cls); }, { once: true });
+  }
   // The address decides what shows: #/ the agents, #/term the overview of the terminals (a pane of the page, under the same
   // top bar), #/term/N terminal N (a full-screen page over it). Scripts and styles load when the first of them is wanted.
   function routeTerm() {
@@ -1581,7 +1593,13 @@ APP_JS = r"""(function () {
       termLast = want.n;
       if (termView) { termView.select(want.n); } else { termView = window.HGTermView.open(termCtx(), want.n); }
     }
+    var prevMode = termMode;
     if (mode !== termMode) {
+      ["list-pane", "tov-pane"].forEach(function (c) { var p = document.querySelector("." + c); if (p) { pagerRest(p); p.classList.remove("pg-from-l", "pg-from-r"); } });
+      if (mode === "ov" && prevMode === null) { enterPane(U.tov, "pg-from-r"); }          // the terminals sit to the right of the agents
+      else if (mode === null && prevMode === "ov") { enterPane(document.querySelector(".list-pane"), "pg-from-l"); }
+    }
+    if (mode !== prevMode) {
       termMode = mode;
       if (mode === "ov") { ovView.focus(termLast); announce("Terminals"); }
       else if (mode === null) { announce("Agents"); if (U.termBtn && !U.termBtn.hidden) { U.termBtn.focus({ preventScroll: true }); } }
@@ -1589,9 +1607,9 @@ APP_JS = r"""(function () {
   }
 
   // ---------------------------------------------------------------- swipe pager: agents <-> terminal overview
-  // The pager gesture, as pure functions (tests/ext/remote-term.test.ts runs this block on its own). Finger moves right on the
-  // agents: terminals open (a left swipe on a row is the row's swipe-to-quit, so the pager takes the other direction); left on the
-  // overview: back to the agents; in an open terminal, from its header or an edge of the screen either way: back to the overview.
+  // The pager gesture, as pure functions (tests/ext/remote-term.test.ts runs this block on its own). The terminals sit to the right
+  // of the agents: finger moves left on the agents and the terminal overview opens; right on the overview: back to the agents; in
+  // an open terminal, from its header or an edge of the screen either way: back to the overview.
   // pager-logic:begin
   var PAGER_EDGE = 24;       // px from a screen edge where a swipe inside an open terminal counts
   function pagerClassify(dx, dy) {
@@ -1602,8 +1620,8 @@ APP_JS = r"""(function () {
     return "wait";
   }
   function pagerAllows(zone, dx) {
-    if (zone === "agents") { return dx > 0; }
-    if (zone === "ov") { return dx < 0; }
+    if (zone === "agents") { return dx < 0; }
+    if (zone === "ov") { return dx > 0; }
     return zone === "term";
   }
   function pagerCommit(dx, ms) {
@@ -1649,16 +1667,40 @@ APP_JS = r"""(function () {
       if (pg.pane) { pg.pane.classList.add("pg-drag"); }
     }
     pg.dx = dx;
-    if (pg.pane && !REDUCED) { pg.pane.style.transform = "translateX(" + Math.max(-40, Math.min(40, dx * 0.35)) + "px)"; }
+    if (pg.pane && !REDUCED) {                                   // the page follows the finger and fades as it leaves
+      var w = pg.pane.offsetWidth || window.innerWidth;
+      pg.pane.style.transform = "translateX(" + dx + "px)";
+      pg.pane.style.opacity = String(1 - 0.6 * Math.min(1, Math.abs(dx) / w));
+    }
   }
   function pagerEnd(ev, cancelled) {
     if (!pg || (ev && ev.pointerId !== pg.id)) { return; }
     var g = pg;
     pg = null;
-    if (g.pane) { g.pane.classList.remove("pg-drag"); g.pane.style.transform = ""; }
-    if (cancelled || !g.locked || !ev) { return; }
-    if (pagerAllows(g.zone, g.dx) && pagerCommit(g.dx, ev.timeStamp - g.t)) { setHash(pagerDest(g.zone), false); }
+    var go = !cancelled && g.locked && !!ev && pagerAllows(g.zone, g.dx) && pagerCommit(g.dx, ev.timeStamp - g.t);
+    var pane = g.pane;
+    if (!pane) { if (go) { setHash(pagerDest(g.zone), false); } return; }
+    pane.classList.remove("pg-drag");
+    if (!go || REDUCED) {                                  // not far enough: it springs back; reduced motion: no slide
+      pagerRest(pane);
+      if (go) { setHash(pagerDest(g.zone), false); }
+      return;
+    }
+    var w = pane.offsetWidth || window.innerWidth;         // far enough: it slides the rest of the way out, then the page changes
+    pane.style.transform = "translateX(" + (g.dx < 0 ? -w : w) + "px)";
+    pane.style.opacity = "0";
+    var done = false;
+    function fin() {
+      if (done) { return; }
+      done = true;
+      pane.removeEventListener("transitionend", fin);
+      setHash(pagerDest(g.zone), false);
+      window.setTimeout(function () { pagerRest(pane); }, 400);   // routeTerm clears it on the page change; this is the safety net
+    }
+    pane.addEventListener("transitionend", fin);
+    window.setTimeout(fin, 240);
   }
+  function pagerRest(pane) { pane.style.transform = ""; pane.style.opacity = ""; }
   function pagerUp(ev) { pagerEnd(ev, false); }
   function pagerCancel(ev) { pagerEnd(ev, true); }
   // Registered only while the terminal is on (meta.terminal): with it off nothing listens and the page's touch handling is untouched.
@@ -2666,15 +2708,17 @@ APP_JS = r"""(function () {
     var b = wrap.querySelector(".rquit");
     if (b) { b.setAttribute("aria-hidden", open ? "false" : "true"); b.tabIndex = open ? 0 : -1; }
   }
-  // A row that can be quit slides left under a finger (touch or pen) and rests open, showing a red Quit button; Quit asks
+  // A row that can be quit slides under a finger (touch or pen) and rests open, showing a red Quit button; Quit asks
   // before it does anything. The Actions sheet offers the same for everyone else (mouse, keyboard, screen readers).
+  // The row goes left (Quit on the right) normally and right (Quit on the left) while the terminal pager is on.
   function swipeable(a, row) {
     if (!(a.can && a.can.quit)) { return h("div", { class: "rw" }, row); }
     var id = a.id;
     var open = swipeOpen === id;
     var btn = h("button", { class: "rquit", type: "button", "aria-hidden": open ? "false" : "true", tabindex: open ? "0" : "-1",
       "aria-label": "Quit session " + agentLine(a), onclick: function () { confirmQuit(id); } }, "Quit");
-    var wrap = h("div", { class: "rw" + (open ? " open" : "") }, row, btn);
+    var sgn = pagerOn ? 1 : -1;       // Quit slides out to the right while the pager owns the left swipe (terminal on)
+    var wrap = h("div", { class: "rw" + (sgn > 0 ? " rev" : "") + (open ? " open" : "") }, row, btn);
     var sx = 0;
     var sy = 0;
     var base = 0;
@@ -2686,7 +2730,7 @@ APP_JS = r"""(function () {
       if ((ev.pointerType !== "touch" && ev.pointerType !== "pen") || mode !== null) { return; }
       sx = ev.clientX;
       sy = ev.clientY;
-      base = wrap.classList.contains("open") ? -SWIPE_W : 0;
+      base = wrap.classList.contains("open") ? sgn * SWIPE_W : 0;
       dx = base;
       mode = "wait";
       pid = ev.pointerId;
@@ -2698,12 +2742,13 @@ APP_JS = r"""(function () {
       if (mode === "wait") {
         if (Math.abs(my) > 10 && Math.abs(my) >= Math.abs(mx)) { mode = null; return; }      // the list is being scrolled
         if (Math.abs(mx) < 10 || Math.abs(mx) < 1.5 * Math.abs(my)) { return; }              // not clearly sideways yet
+        if (base === 0 && sgn * mx < 0) { mode = null; return; }                              // the other way is the pager's (or nothing)
         mode = "drag";
         swipeDrag = true;
         wrap.classList.add("drag");
         try { row.setPointerCapture(pid); } catch (e) { /* the pointer is gone */ }
       }
-      dx = Math.max(-SWIPE_W - 24, Math.min(0, base + mx));
+      dx = sgn < 0 ? Math.max(-SWIPE_W - 24, Math.min(0, base + mx)) : Math.min(SWIPE_W + 24, Math.max(0, base + mx));
       row.style.transform = "translateX(" + dx + "px)";
     });
     function end(ev, cancelled) {
@@ -2715,7 +2760,7 @@ APP_JS = r"""(function () {
       wrap.classList.remove("drag");
       row.style.transform = "";
       blockClick = Date.now() + 400;                       // the click that ends a drag must not open the chat
-      var nowOpen = !cancelled && dx < -SWIPE_W / 2;
+      var nowOpen = !cancelled && (sgn < 0 ? dx < -SWIPE_W / 2 : dx > SWIPE_W / 2);
       setRowOpen(wrap, nowOpen);
       swipeOpen = nowOpen ? id : (swipeOpen === id ? null : swipeOpen);
       if (nowOpen) {

@@ -1816,7 +1816,7 @@ TERM_VIEW_JS = r"""
     var scroll = el("div", "tov-scroll");
     scroll.appendChild(empty);
     scroll.appendChild(grid);
-    var foot = el("div", "foot", coarse ? "tap a terminal to open \u00b7 swipe left: agents" : "tap a terminal to open");
+    var foot = el("div", "foot", coarse ? "tap a terminal to open \u00b7 swipe right: agents" : "tap a terminal to open");
     [head, note, scroll, foot].forEach(function (n) { host.appendChild(n); });
 
     function setConn(kind) {
