@@ -48,8 +48,17 @@ def under(path, root):
         return False
 
 
+def is_chat_file(path, sessions_root):
+    """True for `sessions/<project>/<chat>.jsonl`. A subagent's transcript lives below the chat's
+    artifact directory (`sessions/<project>/<chat>/<name>.jsonl`) and is no chat of its own."""
+    try:
+        return len(Path(path).resolve().relative_to(Path(sessions_root).resolve()).parts) == 2
+    except ValueError:
+        return False
+
+
 def open_session_files(pid, sessions_root):
-    """jsonl files of the profile that the process holds open."""
+    """Chat files (jsonl) of the profile that the process holds open; subagent transcripts are left out."""
     found = []
     fd_dir = Path(f"/proc/{pid}/fd")
     try:
@@ -61,7 +70,7 @@ def open_session_files(pid, sessions_root):
             target = os.readlink(e)
         except OSError:
             continue
-        if target.endswith(".jsonl") and under(target, sessions_root):
+        if target.endswith(".jsonl") and is_chat_file(target, sessions_root) and target not in found:
             found.append(target)
     return found
 

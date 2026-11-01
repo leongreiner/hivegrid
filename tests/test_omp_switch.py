@@ -134,6 +134,24 @@ class Locate(Base):
         self.record(b)
         self.assertEqual(self.locate(proc)["session"], str(b))
 
+    def test_a_subagent_transcript_held_open_is_not_a_second_chat(self):
+        s = self.session(self.src, "--proj--/chat.jsonl")
+        sub = self.session(self.src, "--proj--/chat/S1Task.jsonl")
+        proc = self.spawn(s, sub)
+        self.assertEqual(self.locate(proc), {"state": "ok", "session": str(s), "cwd": str(self.cwd)})
+
+    def test_profiles_sharing_one_sessions_directory_by_symlink_still_find_the_chat(self):
+        shared = self.home / "shared-sessions"
+        (self.src / "sessions").rmdir()
+        (self.src / "sessions").symlink_to(shared)
+        s = shared / "--proj--" / "chat.jsonl"
+        sub = shared / "--proj--" / "chat" / "S1Task.jsonl"
+        sub.parent.mkdir(parents=True)
+        s.write_bytes(b"{}\n")
+        sub.write_bytes(b"{}\n")
+        proc = self.spawn(s, sub)
+        self.assertEqual(self.locate(proc)["session"], str(s))
+
     def test_unknown_profile_and_dead_process_are_errors(self):
         proc = self.spawn()
         self.assertEqual(self.run_cli("locate", "--pid", str(proc.pid), "--from", "nope")["state"], "error")
