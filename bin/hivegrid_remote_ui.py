@@ -939,6 +939,8 @@ APP_JS = r"""(function () {
     return left > 0 ? "resets in " + fmtDur(left) : "reset due";
   }
   // "5-hour limit · resets in 2h05m": the countdown is kept current by refreshAges
+  var swDismissed = {};              // agent id -> `since` of the switch result the user (or the timer) dismissed
+  var swTimer = null;
   function limitLine(lim) {
     var out = [];
     var win = lim.window === "five_hour" ? "5-hour" : (lim.window === "seven_day" ? "weekly" : "");
@@ -2283,9 +2285,11 @@ APP_JS = r"""(function () {
     var req = mode === "answer"
       ? post(agentUrl(id, "keys"), { text: text, keys: ["enter"] }, null)
       : post(agentUrl(id, "prompt"), { text: text }, null);
+    if (sw && sw.state !== "running" && swDismissed[a.id] === sw.since) { sw = null; }
     req.then(function (r) {
       D.send.disabled = false;
       if (r && id === selId && D.ta.value.replace(/\r\n?/g, "\n") === text) { D.ta.value = ""; delete drafts[id]; growPrompt(); }
+    window.clearTimeout(swTimer);
       if (id === selId) { onPromptInput(); }
     });
   }
@@ -2304,6 +2308,12 @@ APP_JS = r"""(function () {
     var max = limitOf("upload");
     var todo = files.filter(function (f) {
       if (f.size > max) { toast(f.name + " is larger than " + Math.round(max / 1048576) + " MB.", true); return false; }
+    if (sw && sw.state !== "running" && !lim) {
+      var since = sw.since;
+      var dismiss = function () { swDismissed[a.id] = since; updateDetail(); };
+      D.lcard.appendChild(h("div", { class: "pbtns" }, h("button", { class: "btn", type: "button", onclick: dismiss }, "Dismiss")));
+      if (sw.state === "done") { swTimer = window.setTimeout(dismiss, 8000); }
+    }
       if (f.size === 0) { toast(f.name + " is empty.", true); return false; }
       return true;
     });

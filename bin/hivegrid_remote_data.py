@@ -746,7 +746,8 @@ def limit_json(agent, accounts, now, san_line, directory=None):
 # ---------------------------------------------------------------- switching an agent's account
 
 SWITCH_STATES = ("limit", "done", "idle")
-SWITCH_RESULT_TTL = 120.0           # how long the page can still read how a switch ended
+SWITCH_RESULT_TTL = 120.0           # how long the page can still read why a switch failed
+SWITCH_DONE_TTL = 15.0              # a switch that worked is only a confirmation: it goes away soon
 EXIT_WAIT, EXIT_POLL, SHELL_WAIT = 5.0, 0.25, 3.0
 CTRL_D, ENTER = "\x04", "\r"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
@@ -846,7 +847,8 @@ class AccountSwitcher:
         """{"state", "to", "message", "since"} of the latest switch of `pane`, None when there is none (or it ended long ago)."""
         with self._lock:
             job = self._jobs.get(pane)
-            if job is not None and job["ended"] is not None and self.clock() - job["ended"] > SWITCH_RESULT_TTL:
+            ttl = SWITCH_DONE_TTL if job is not None and job["state"] == "done" else SWITCH_RESULT_TTL
+            if job is not None and job["ended"] is not None and self.clock() - job["ended"] > ttl:
                 del self._jobs[pane]
                 job = None
             return None if job is None else {k: job[k] for k in ("state", "to", "message", "since")}

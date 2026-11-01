@@ -262,6 +262,18 @@ class TestAccountSwitch(SwitchCase):
         self.clock.t += D.SWITCH_RESULT_TTL + 1
         self.assertIsNone(self.row()["switch"])
 
+    def test_a_successful_switch_is_forgotten_sooner_than_a_failed_one(self):
+        self.go()
+        self.finish()
+        self.clock.t += D.SWITCH_DONE_TTL + 1
+        self.assertIsNone(self.row()["switch"])
+
+    def test_a_failed_switch_stays_readable_for_the_full_ttl(self):
+        self.go()
+        self.jobs.pop()()            # omp never exits: the job fails
+        self.clock.t += D.SWITCH_DONE_TTL + 1
+        self.assertEqual(self.row()["switch"]["state"], "failed")
+
     def test_a_chat_without_a_message_starts_fresh_on_the_new_account(self):
         self.omp.locate = {"state": "none"}
         self.go()
