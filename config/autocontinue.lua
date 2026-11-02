@@ -33,6 +33,7 @@
 local wezterm = require 'wezterm'
 
 local DELAY = 30 -- seconds after the reset before the prompt is typed
+local VERIFY = 60 -- seconds after typing before an unchanged `limit` counts as a failed attempt
 local CAP, CAP_WINDOW = 3, 3600 -- at most this many continues per pane per hour
 local EVERY = 5 -- seconds between checks
 local HEARTBEAT = 10 -- the ledger is rewritten at least this often
@@ -204,10 +205,20 @@ return function(config, wezterm_)
       local rec = { fires = recent(old.fires, now) }
       local ext = limit_of(id, now)
       if ext and acks[id] ~= ext.since then
-        if old.since == ext.since and (old.status == 'sent' or old.status == 'capped') then
+        local last_fire = old.fires and old.fires[#old.fires]
+        local retry = old.since == ext.since and old.status == 'sent' and num(last_fire) and now - last_fire >= VERIFY
+        if old.since == ext.since and (old.status == 'sent' or old.status == 'capped') and not retry then
           rec.since, rec.status, rec.at = old.since, old.status, num(old.at)
           rec.fires = recent(old.fires, now)
         else
+          if retry then
+            -- Still at `limit` VERIFY seconds after typing: the text did not land. Clear a leftover
+            -- `continue` from the input line (only when it is visible there), then fire again.
+            local okp, txt = pcall(function() return pane:get_lines_as_text(5) end)
+            if okp and type(txt) == 'string' and txt:lower():find(TEXT, 1, true) then
+              pcall(pane.send_text, pane, '\21')
+            end
+          end
           rec.since, rec.status = ext.since, 'waiting'
           local reset = reset_of(ext.limit)
           rec.at = reset and reset + DELAY or nil

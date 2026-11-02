@@ -238,3 +238,58 @@ T.test('quota_open is false for no entry, no hit time and an entry without windo
   T.eq(q({ updated_at = T0 - 100, five_hour = { pct = 94.9 } }, T0 - 600, T0), true)
   T.eq(q({ updated_at = T0 - 100, five_hour = { pct = 95 } }, T0 - 600, T0), false)
 end)
+
+T.test('a continue that did not land (still limit after 60 s) is cleared and typed again', function(wz)
+  local api, pane = setup(wz)
+  advance(200)
+  write_state(wz)
+  T.eq(api.tick(), { 11 })
+  pane.o.text = '> continue'
+  advance(55)
+  write_state(wz)
+  T.eq(api.tick(), {}, 'still inside the verify window')
+  advance(10)
+  write_state(wz)
+  T.eq(api.tick(), { 11 })
+  T.eq(pane.sent, { 'continue', '\r', '\21', 'continue', '\r' }, 'Ctrl-U clears the leftover text first')
+  T.eq(#ledger(wz).panes['11'].fires, 2)
+end)
+
+T.test('a retry sends no Ctrl-U when the text is not on screen', function(wz)
+  local api, pane = setup(wz)
+  advance(200)
+  write_state(wz)
+  api.tick()
+  pane.o.text = 'something the user typed'
+  advance(61)
+  write_state(wz)
+  T.eq(api.tick(), { 11 })
+  T.eq(pane.sent, { 'continue', '\r', 'continue', '\r' })
+end)
+
+T.test('a continue that landed (state left limit) is never retried', function(wz)
+  local api, pane = setup(wz)
+  advance(200)
+  write_state(wz)
+  api.tick()
+  for _ = 1, 8 do
+    advance(30)
+    write_state(wz, { state = 'working' })
+    T.eq(api.tick(), {})
+  end
+  T.eq(pane.sent, TYPED)
+end)
+
+T.test('retries stop at the hourly cap', function(wz)
+  local api, pane = setup(wz)
+  advance(200)
+  for _ = 1, 8 do
+    write_state(wz)
+    api.tick()
+    advance(61)
+  end
+  local n = 0
+  for _, s in ipairs(pane.sent) do if s == '\r' then n = n + 1 end end
+  T.eq(n, 3)
+  T.eq(ledger(wz).panes['11'].status, 'capped')
+end)
