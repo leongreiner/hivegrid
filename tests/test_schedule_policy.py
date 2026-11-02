@@ -159,6 +159,36 @@ class Catchup(unittest.TestCase):
         self.assertEqual(S.next_run(s, st, slot(2, 8)), slot(3))
         self.assertIsNone(S.plan_catchup(s, st, slot(2, 9, 1)))
 
+    def test_unskip_brings_the_skipped_run_back(self):
+        s = sched()
+        before = state(baseline=slot(1))
+        skipped = S.skip_next(s, before, slot(2, 8))
+        self.assertEqual(S.skipped_slot(s, skipped, slot(2, 8)), slot(2))
+        back = S.unskip(s, skipped, slot(2, 8))
+        self.assertEqual(S.next_run(s, back, slot(2, 8)), slot(2))
+        self.assertEqual((back["last_slot"], back["last_slot_local"]), (before["last_slot"], before["last_slot_local"]))
+        self.assertNotIn("skips", back)
+        self.assertEqual(S.plan_catchup(s, back, slot(2, 9, 1))[:2], ("fire", slot(2)))
+
+    def test_skips_stack_and_unskip_takes_back_the_newest(self):
+        s = sched()
+        st = S.skip_next(s, state(baseline=slot(1)), slot(2, 8))
+        st = S.skip_next(s, st, slot(2, 8))
+        self.assertEqual(S.skipped_slot(s, st, slot(2, 8)), slot(3))
+        st = S.unskip(s, st, slot(2, 8))
+        self.assertEqual(S.skipped_slot(s, st, slot(2, 8)), slot(2))
+        self.assertEqual(S.next_run(s, st, slot(2, 8)), slot(3))
+
+    def test_nothing_to_undo_once_the_skipped_slot_is_past_or_something_ran_after(self):
+        s = sched()
+        st = S.skip_next(s, state(baseline=slot(1)), slot(2, 8))
+        self.assertIsNone(S.skipped_slot(s, st, slot(2, 9, 1)))
+        self.assertEqual(S.unskip(s, st, slot(2, 9, 1)), st)
+        later = S.advance(s, st, slot(3), "cron")
+        self.assertIsNone(S.skipped_slot(s, later, slot(2, 8)))
+        self.assertEqual(S.unskip(s, later, slot(2, 8)), later)
+        self.assertIsNone(S.skipped_slot(s, state(), slot(2, 8)))
+
 
 class Overlap(unittest.TestCase):
     def test_table(self):

@@ -758,6 +758,7 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
 .toast .tt { color: var(--accent); font-weight: 700; margin-right: 1ch; }
 .toast.err { border-color: var(--red); }
 .toast.err .msg { color: var(--red); }
+.toast .tact { pointer-events: auto; margin-left: 1.2ch; min-height: 32px; padding: 0 10px; background: var(--raised); border: 1px solid var(--edge-hi); border-radius: 4px; color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; }
 
 /* ---------------------------------------------------------------- wide screens: list and chat side by side */
 @media (min-width: 900px) {
@@ -865,7 +866,25 @@ textarea.field { resize: vertical; line-height: 1.4; min-height: 88px; }
 .sec-h .n { color: var(--accent); }
 .bseen { min-height: 32px; padding: 0 8px; font-size: 12px; }
 .blist { list-style: none; margin: 0; padding: 0; }
-.bri { border-bottom: 1px solid var(--rule-base); }
+.bw { position: relative; overflow: hidden; list-style: none; border-bottom: 1px solid var(--rule-base); transition: height .18s ease-out; }
+.bw.out { pointer-events: none; }
+.bri { position: relative; z-index: 1; display: flex; align-items: flex-start; background: var(--base); touch-action: pan-y; transition: transform .16s ease-out, opacity .16s ease-out; }
+.bw.drag > .bri { transition: none; }
+.bri-bg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; padding: 0 calc(16px + var(--sar)); background: var(--green); color: var(--deep); font-weight: 700; }
+.bri-a { flex: 1; min-width: 0; }
+.bri.seen .bri-h, .bri.seen .bri-m, .bri.seen .bri-m .bname { color: var(--dim); font-weight: 400; }
+.bri-x { flex: none; align-self: center; width: 44px; min-height: 44px; margin-right: calc(2px + var(--sar)); background: none; border: 0; border-radius: 6px; color: var(--dim); font: inherit; font-size: 16px; cursor: pointer; touch-action: manipulation; }
+.bri-x:hover, .bri-x:focus-visible { color: var(--green); background: var(--hover); }
+.sec-link { display: inline-flex; align-items: baseline; gap: 0; min-height: 32px; color: var(--muted); cursor: pointer; align-self: center; }
+.sec-link:hover { color: var(--bright); }
+.sec-link .n { white-space: pre; }
+.sec-link .chev { margin-left: 1ch; color: var(--accent); font-size: 16px; line-height: 1; }
+.note-line.calm { padding: 12px calc(12px + var(--sar)) 12px calc(12px + var(--sal)); }
+.bskip { padding: 0 10px 4px 12px; font-size: 12px; color: var(--amber); }
+.bskip .link { background: none; border: 0; padding: 0; font: inherit; font-weight: 700; color: var(--accent); cursor: pointer; min-height: 28px; }
+.bskip .link:disabled { color: var(--dim); cursor: default; }
+#app.embed .bots-pane.hist .bots-back { display: inline-flex; }
+.bri { border-bottom: 0; }
 .bri-a { display: grid; grid-template-columns: 1.5ch minmax(0, 1fr); column-gap: 1ch; padding: 9px calc(12px + var(--sar)) 9px calc(12px + var(--sal)); color: var(--text); }
 .bri-a:active, .bri-a:hover { background: var(--hover); }
 .bri-dot { color: var(--violet); font-size: 12px; grid-row: 1 / 3; align-self: start; padding-top: 3px; }
@@ -1150,11 +1169,15 @@ APP_JS = r"""(function () {
   function isBusy(a) { return !!a && (a.state === "working" || a.state === "busy" || a.state === "attention"); }
 
   // ---------------------------------------------------------------- toasts and the confirm dialog
-  function toast(msg, isErr) {
+  // `undo` is { label, fn }: a button in the toast that stays a few seconds longer ("Marked read \u00b7 Undo").
+  function toast(msg, isErr, undo) {
     var host = document.getElementById("toasts");
     var t = h("div", { class: "toast" + (isErr ? " err" : "") }, h("span", { class: "tt" }, "\u2b21 Hivegrid"), h("span", { class: "msg" }, msg));
+    if (undo) {
+      t.appendChild(h("button", { class: "tact", type: "button", onclick: function () { if (t.parentNode) { t.parentNode.removeChild(t); } undo.fn(); } }, undo.label));
+    }
     host.appendChild(t);
-    window.setTimeout(function () { if (t.parentNode) { t.parentNode.removeChild(t); } }, isErr ? 5000 : 3200);
+    window.setTimeout(function () { if (t.parentNode) { t.parentNode.removeChild(t); } }, isErr ? 5000 : (undo ? 7000 : 3200));
   }
   var confirmDone = null;
   function ask(text, okLabel) {
@@ -1796,11 +1819,16 @@ APP_JS = r"""(function () {
     var ax = Math.abs(dx);
     return ax >= 72 || (ax >= 36 && ax / Math.max(ms, 1) >= 0.5);   // far enough, or a short flick
   }
+  function briefCommit(dx, width, ms) {
+    var ax = Math.abs(dx);
+    return ax >= Math.max(72, width * 0.35) || (ax >= 36 && ax / Math.max(ms, 1) >= 0.5);       // far enough, or a short flick
+  }
   function termHash(hash) {
     var m = /^#\/term(?:\/([0-9]{1,9}))?$/.exec(hash);
     return m ? { n: m[1] === undefined ? null : parseInt(m[1], 10) } : null;
   }
   function botsHash(hash) {
+    if (hash === "#/bots/briefing") { return { id: null, run: null, brief: true }; }       // the full history of the Briefing, a state of the list page
     var m = /^#\/bots(?:\/([a-z0-9-]{3,32})(?:\/([0-9]{1,9}))?)?$/.exec(hash);
     return m ? { id: m[1] === undefined ? null : m[1], run: m[2] === undefined ? null : parseInt(m[2], 10) } : null;
   }
@@ -1843,7 +1871,11 @@ APP_JS = r"""(function () {
     var app = document.getElementById("app");
     if (!app.contains(t) || t.closest(".chips, .rw.open, input, textarea, select, button.rquit")) { return null; }
     if (app.classList.contains("term-ov")) { return t.closest(".top, .tov-pane") ? "ov" : null; }
-    if (app.classList.contains("bots-on")) { return t.closest(".top, .bots-pane") ? "bots" : null; }
+    if (app.classList.contains("bots-on")) {
+      if (t.closest(".bw")) { return null; }              // a Briefing entry is swiped away, not paged
+      if (BT.hist) { return t.closest(".bots-head") || (edge && t.closest(".bots-pane")) ? "bot" : null; }       // the history view: one step back, to the list
+      return t.closest(".top, .bots-pane") ? "bots" : null;
+    }
     return t.closest(".top, .list-pane") ? "agents" : null;
   }
   function pagerDown(ev) {
@@ -3433,6 +3465,7 @@ APP_JS = r"""(function () {
     else if (menuSec) { closeMenu(); ev.preventDefault(); }
     else if (botsMode === "run" && BT.page) { setHash("#/bots/" + BT.page.id, false); ev.preventDefault(); }
     else if (botsMode === "bot" || botsMode === "list") {
+      if (BT.hist) { setHash("#/bots", false); ev.preventDefault(); return; }
       if (EMBED && botsMode === "list") { return; }       // Bots is the home page of an embedded view
       setHash(botsMode === "bot" ? "#/bots" : "#/", false); ev.preventDefault();
     }
@@ -3446,7 +3479,7 @@ APP_JS = r"""(function () {
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var PRESETS = [["Once", "tomorrow 9am"], ["Daily", "daily 09:00"], ["Weekdays", "weekdays 09:00"], ["Hourly", "hourly"]];
-  function newBots() { return { data: null, etag: null, err: null, brief: null, briefEtag: null, briefErr: null, page: null, det: null, runs: null, conv: null, drafts: {}, open: {}, form: null, ui: null }; }
+  function newBots() { return { hist: false, anim: 0, stale: false, data: null, etag: null, err: null, brief: null, briefEtag: null, briefErr: null, page: null, det: null, runs: null, conv: null, drafts: {}, open: {}, form: null, ui: null }; }
   function hasBots() { return !!(meta && meta.capabilities && meta.capabilities.indexOf("bots") >= 0); }
   function botsLimits() {
     var L = meta && meta.limits && meta.limits.bots;
@@ -3465,6 +3498,7 @@ APP_JS = r"""(function () {
   // kind, a clock) and the phone's own word for it.
   function botView(b) {
     var last = b.last ? b.last.status : null;
+    if (b.running && b.waiting) { return { kind: "attention", label: "needs you" }; }
     if (b.running) { return { kind: "working", label: "running" }; }
     if (b.paused_reason) { return { kind: "attention", label: "paused" }; }
     if (b.state === "attention") {
@@ -3512,21 +3546,31 @@ APP_JS = r"""(function () {
       botsPost(b.id, "delete", { confirm: true }, "Bot deleted").then(function (r) { if (r && BT.page) { setHash("#/bots", true); } });
     });
   }
+  // A skip can be taken back: the toast carries Undo, and the card keeps "Skipped <time> \u00b7 Undo" while the skipped run is still ahead.
+  function botSkip(id) {
+    botsPost(id, "skip", {}, null).then(function (r) {
+      if (r) { toast("Next run skipped", false, { label: "Undo", fn: function () { botUnskip(id); } }); }
+    });
+  }
+  function botUnskip(id) { botsPost(id, "unskip", {}, "Skipped run is back"); }
   function abtn(label, cls, disabled, fn) { return h("button", { class: "btn " + cls, type: "button", disabled: !!disabled, onclick: fn }, label); }
 
   // ---- the list
   function buildBotsPane() {
     var ui = { back: h("a", { class: "btn ghost bots-back", href: "#/", "aria-label": "Back to agents" }, "\u25c0 agents"), count: h("span", { class: "n" }) };
-    ui.title = h("h2", { class: "bots-title", tabindex: "-1" }, "Bots", ui.count);
+    ui.titleText = h("span", null, "Bots");
+    ui.title = h("h2", { class: "bots-title", tabindex: "-1" }, ui.titleText, ui.count);
     ui.add = h("button", { class: "btn ghost icon write", type: "button", "aria-label": "New bot", onclick: function () { openBotForm(null); } }, "+");
     ui.note = h("div", { class: "bots-note", role: "status", hidden: true });
     ui.empty = h("div", { class: "empty", hidden: true }, h("strong", null, "No bots yet"),
       "A bot runs an omp agent on a schedule, in the background, and talks to you here. Use + to make one.");
     ui.briefSeen = h("button", { class: "btn ghost bseen write", type: "button", onclick: briefSeen }, "Mark all seen");
     ui.briefCount = h("span", { class: "n" });
+    ui.briefChev = h("span", { class: "chev", "aria-hidden": "true" }, "\u203a");
+    ui.briefLink = h("a", { class: "sec-link", href: "#/bots/briefing", "aria-label": "Briefing: all reports" }, "Briefing", ui.briefCount, ui.briefChev);
     ui.briefList = h("ul", { class: "blist", role: "list", "aria-label": "Briefing" });
     ui.brief = h("section", { class: "brief", "aria-label": "Briefing" },
-      h("div", { class: "sec-h" }, "Briefing", ui.briefCount, h("span", { class: "spacer" }), ui.briefSeen), ui.briefList);
+      h("div", { class: "sec-h" }, ui.briefLink, h("span", { class: "spacer" }), ui.briefSeen), ui.briefList);
     ui.botsH = h("div", { class: "sec-h" }, "Bots");
     ui.grid = h("ul", { class: "bgrid", role: "list", "aria-label": "Bots" });
     ui.scroll = h("div", { class: "bots-scroll" }, ui.brief, ui.botsH, ui.empty, ui.grid);
@@ -3562,34 +3606,142 @@ APP_JS = r"""(function () {
       h("span", { class: "knob", "aria-hidden": "true" }), on ? "on" : "off");
     var acts = h("div", { class: "bact" }, tgl,
       abtn("Run now", "write", !can.run, function () { botRun(b); }),
-      abtn("Skip next", "write", !can.skip, function () { botsPost(b.id, "skip", {}, "Next run skipped"); }),
+      b.skipped_at ? abtn("Undo skip", "write", !can.unskip, function () { botUnskip(b.id); })
+        : abtn("Skip next", "write", !can.skip, function () { botSkip(b.id); }),
       abtn("Edit", "write", !can.edit, function () { openBotForm(b.id); }));
     var cur = BT.page && BT.page.id === b.id;
-    return h("li", { class: "bli" }, h("div", { class: "bcard s-" + v.kind + (cur ? " cur" : "") }, main, acts));
+    var skipLine = b.skipped_at ? h("div", { class: "bskip" }, "Skipped " + fmtWhenAt(b.skipped_at) + " \u00b7 ",
+      h("button", { class: "link write", type: "button", disabled: !can.unskip, onclick: function () { botUnskip(b.id); } }, "Undo")) : null;
+    return h("li", { class: "bli" }, h("div", { class: "bcard s-" + v.kind + (cur ? " cur" : "") }, main, skipLine, acts));
   }
   // ---- the briefing: important reports of every bot, newest first
   function briefSeen() {
-    post("/api/bots/briefing/seen", {}, null).then(function (r) { if (r && briefLoop.wanted) { briefLoop.go(); } });
+    post("/api/bots/briefing/seen", { all: true }, null).then(function (r) { if (r && briefLoop.wanted) { briefLoop.go(); } });
+  }
+  // One entry of the Briefing slides away under a finger (touch or pen) or by its Mark read button (mouse, keyboard, screen readers; Delete on a
+  // focused entry does it too), then the gap closes. The report is marked read on the server; the toast takes that back.
+  function briefMark(e, undo) {
+    return post("/api/bots/briefing/seen", undo ? { id: e.bot_id, run: e.run, unseen: true } : { id: e.bot_id, run: e.run }, null);
+  }
+  function briefSetSeen(e, seen) {
+    var b = BT.brief;
+    if (!b) { return; }
+    b.entries.forEach(function (x) {
+      if (x.bot_id === e.bot_id && x.run === e.run && x.seen !== seen) { x.seen = seen; b.unseen += seen ? -1 : 1; }
+    });
+    BT.briefEtag = null;
+  }
+  function briefDismiss(e, wrap, dir) {
+    briefSetSeen(e, true);
+    BT.anim += 1;
+    var gone = false;
+    function removed() {
+      if (gone) { return; }
+      gone = true;
+      BT.anim -= 1;
+      if (wrap.parentNode) { wrap.parentNode.removeChild(wrap); }
+      BT.stale = false;
+      renderBrief();
+    }
+    if (REDUCED || !wrap.parentNode) { removed(); }
+    else {
+      var row = wrap.firstChild;
+      var w = wrap.offsetWidth || window.innerWidth;
+      wrap.style.height = wrap.offsetHeight + "px";
+      wrap.classList.add("out");
+      row.style.transform = "translateX(" + (dir < 0 ? -w : w) + "px)";
+      row.style.opacity = "0";
+      window.setTimeout(function () {
+        wrap.style.height = "0px";
+        wrap.addEventListener("transitionend", removed, { once: true });
+        window.setTimeout(removed, 260);
+      }, 170);
+    }
+    briefMark(e, false).then(function (r) {
+      if (!r) { briefSetSeen(e, false); renderBrief(); return; }
+      toast("Marked read", false, { label: "Undo", fn: function () {
+        briefSetSeen(e, false);
+        renderBrief();
+        briefMark(e, true).then(function (u) { if (!u) { briefSetSeen(e, true); renderBrief(); } });
+      } });
+    });
   }
   function briefItem(e) {
     var line = [h("span", { class: "bname" }, e.bot_name), " \u00b7 ", e.status && e.status !== "ok" ? [h("span", { class: "rchip rs-" + rstat(e.status) }, RSTAT[e.status] || e.status), " \u00b7 "] : null,
       typeof e.ended === "number" ? agoNode(e.ended) : null];
-    return h("li", { class: "bri" + (e.seen ? "" : " unseen") },
-      h("a", { class: "bri-a", href: "#/bots/" + encodeURIComponent(e.bot_id) + "/" + e.run },
-        h("span", { class: "bri-dot", "aria-hidden": "true" }, e.seen ? "" : "\u25cf"),
-        h("span", { class: "bri-h" }, e.headline || "(no headline)"),
-        h("span", { class: "bri-m" }, line)));
+    var a = h("a", { class: "bri-a", href: "#/bots/" + encodeURIComponent(e.bot_id) + "/" + e.run },
+      h("span", { class: "bri-dot", "aria-hidden": "true" }, e.seen ? "" : "\u25cf"),
+      h("span", { class: "bri-h" }, e.headline || "(no headline)"),
+      h("span", { class: "bri-m" }, line));
+    var wrap = h("li", { class: "bw" });
+    var row = h("div", { class: "bri" + (e.seen ? " seen" : " unseen") }, a);
+    wrap.appendChild(row);
+    if (e.seen) { return wrap; }
+    var x = h("button", { class: "bri-x write", type: "button", "aria-label": "Mark read: " + (e.headline || e.bot_name), title: "Mark read", onclick: function () { briefDismiss(e, wrap, 1); } }, "\u2713");
+    row.appendChild(x);
+    a.addEventListener("keydown", function (ev) { if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); briefDismiss(e, wrap, 1); } });
+    wrap.insertBefore(h("div", { class: "bri-bg", "aria-hidden": "true" }, "\u2713 read"), row);
+    var sx = 0;
+    var sy = 0;
+    var dx = 0;
+    var t0 = 0;
+    var mode = null;
+    var pid = null;
+    var blockClick = 0;
+    row.addEventListener("pointerdown", function (ev) {
+      if ((ev.pointerType !== "touch" && ev.pointerType !== "pen") || mode !== null || (meta && meta.readonly)) { return; }
+      sx = ev.clientX; sy = ev.clientY; dx = 0; t0 = ev.timeStamp; mode = "wait"; pid = ev.pointerId;
+    });
+    row.addEventListener("pointermove", function (ev) {
+      if (mode === null || ev.pointerId !== pid) { return; }
+      var mx = ev.clientX - sx;
+      var my = ev.clientY - sy;
+      if (mode === "wait") {
+        var c = pagerClassify(mx, my);
+        if (c === "cancel") { mode = null; return; }                 // the list is being scrolled
+        if (c !== "lock") { return; }
+        mode = "drag";
+        swipeDrag = true;
+        wrap.classList.add("drag");
+        try { row.setPointerCapture(pid); } catch (err) { /* the pointer is gone */ }
+      }
+      dx = mx;
+      row.style.transform = "translateX(" + dx + "px)";
+      row.style.opacity = String(Math.max(0.25, 1 - Math.abs(dx) / Math.max(wrap.offsetWidth, 1)));
+    });
+    function end(ev, cancelled) {
+      if (mode === null || ev.pointerId !== pid) { return; }
+      var was = mode;
+      mode = null;
+      if (was !== "drag") { return; }
+      swipeDrag = false;
+      wrap.classList.remove("drag");
+      blockClick = Date.now() + 400;                       // the click that ends a drag must not open the report
+      if (!cancelled && briefCommit(dx, wrap.offsetWidth || window.innerWidth, ev.timeStamp - t0)) { briefDismiss(e, wrap, dx < 0 ? -1 : 1); }
+      else { row.style.transform = ""; row.style.opacity = ""; }
+      if (BT.stale) { BT.stale = false; renderBrief(); }
+    }
+    row.addEventListener("pointerup", function (ev) { end(ev, false); });
+    row.addEventListener("pointercancel", function (ev) { end(ev, true); });
+    row.addEventListener("click", function (ev) { if (Date.now() < blockClick) { ev.preventDefault(); ev.stopPropagation(); } }, true);
+    return wrap;
   }
   function renderBrief() {
     var ui = BT.ui;
     if (!ui) { return; }
+    if (swipeDrag || BT.anim > 0) { BT.stale = true; return; }       // not rebuilt under a finger or a closing gap; the next change does it
     var b = BT.brief;
     clear(ui.briefList);
     if (!b) { ui.briefCount.textContent = ""; ui.briefSeen.hidden = true; ui.briefList.appendChild(h("li", { class: "note-line" }, BT.briefErr ? "briefing unavailable: " + BT.briefErr : "loading\u2026")); return; }
-    ui.briefCount.textContent = b.unseen > 0 ? " \u00b7 " + b.unseen + " new" : "";
+    ui.briefLink.setAttribute("href", BT.hist ? "#/bots" : "#/bots/briefing");
+    ui.briefChev.textContent = BT.hist ? "\u2039" : "\u203a";
+    ui.briefLink.setAttribute("aria-label", BT.hist ? "Briefing: back to unread" : "Briefing: all reports");
+    var unread = b.entries.filter(function (e) { return !e.seen; });
+    ui.briefCount.textContent = (b.unseen > 0 ? " \u00b7 " + b.unseen + " new" : "") + (b.total > 0 ? " \u00b7 all " + b.total : "");
     ui.briefSeen.hidden = !(b.unseen > 0);
-    if (!b.entries.length) { ui.briefList.appendChild(h("li", { class: "note-line" }, "Nothing important. Quiet runs stay in each bot\u2019s own history.")); return; }
-    b.entries.forEach(function (e) { ui.briefList.appendChild(briefItem(e)); });
+    var shown = BT.hist ? b.entries : unread;
+    if (!shown.length) { ui.briefList.appendChild(h("li", { class: "note-line calm" }, BT.hist ? "No important reports yet. Quiet runs stay in each bot\u2019s own history." : "Nothing new")); return; }
+    shown.forEach(function (e) { ui.briefList.appendChild(briefItem(e)); });
   }
   function briefStep(L, run) {
     return api("/api/bots/briefing?wait=" + WAIT, { etag: BT.briefEtag, timeout: (WAIT + 8) * 1000, loop: L }).then(function (r) {
@@ -3615,6 +3767,10 @@ APP_JS = r"""(function () {
     var keep = ui.scroll.scrollTop;
     clear(ui.grid);
     var back = meta && meta.terminal ? ["#/term", "\u25c0 terminals", "Back to terminals"] : ["#/", "\u25c0 agents", "Back to agents"];
+    if (BT.hist) { back = ["#/bots", "\u25c0 bots", "Back to the bots"]; }
+    ui.titleText.textContent = BT.hist ? "Briefing" : "Bots";
+    ui.add.hidden = BT.hist;
+    U.bots.classList.toggle("hist", BT.hist);
     ui.back.setAttribute("href", back[0]);
     ui.back.textContent = back[1];
     ui.back.setAttribute("aria-label", back[2]);
@@ -3628,8 +3784,9 @@ APP_JS = r"""(function () {
     ui.note.hidden = !note;
     var list = d ? d.bots : [];
     ui.count.textContent = "";
-    ui.empty.hidden = !d || list.length > 0;
-    ui.botsH.hidden = !d || list.length === 0;
+    ui.empty.hidden = BT.hist || !d || list.length > 0;
+    ui.botsH.hidden = BT.hist || !d || list.length === 0;
+    ui.grid.hidden = BT.hist;
     list.forEach(function (b) { ui.grid.appendChild(botCard(b)); });
     ui.add.disabled = !!d && !d.can.create;
     ui.add.setAttribute("title", d && !d.can.create && !(meta && meta.readonly) ? "at most " + botsLimits().max_bots + " bots" : "");
@@ -3711,6 +3868,8 @@ APP_JS = r"""(function () {
     if (want && !hasBots()) { if (!EMBED) { setHash("#/", true); } return; }
     var mode = !want ? null : (want.id === null ? "list" : (want.run === null ? "bot" : "run"));
     var prev = botsMode;
+    var hist = !!(want && want.brief);
+    if (hist !== BT.hist) { BT.hist = hist; renderBots(); renderBrief(); }
     if (openNew && mode !== null) { openNew = false; window.setTimeout(function () { if (inApp && !sheet) { openBotForm(null); } }, 0); }
     var app = document.getElementById("app");
     app.classList.toggle("bots-on", mode !== null);
@@ -3875,7 +4034,9 @@ APP_JS = r"""(function () {
         s.body.appendChild(aRow({ glyph: "\u270e", title: "Edit", disabled: !can.edit, onclick: function () { closeSheet(true); openBotForm(id); } }));
         s.body.appendChild(aRow({ glyph: on ? "\u23f8" : "\u25b6", title: on ? "Pause" : "Resume", disabled: !(on ? can.pause : can.resume), onclick: function () { closeSheet(true); botsPost(id, on ? "pause" : "resume", {}, on ? "Paused" : "Resumed"); } }));
         s.body.appendChild(aRow({ glyph: "\u21bb", title: "Run now", disabled: !can.run, onclick: function () { closeSheet(true); botRun(b); } }));
-        s.body.appendChild(aRow({ glyph: "\u23ed", title: "Skip next run", disabled: !can.skip, onclick: function () { closeSheet(true); botsPost(id, "skip", {}, "Next run skipped"); } }));
+        s.body.appendChild(b.skipped_at
+          ? aRow({ glyph: "\u21b6", title: "Bring back skipped run", meta: fmtWhenAt(b.skipped_at), disabled: !can.unskip, onclick: function () { closeSheet(true); botUnskip(id); } })
+          : aRow({ glyph: "\u23ed", title: "Skip next run", disabled: !can.skip, onclick: function () { closeSheet(true); botSkip(id); } }));
         if (b.running) {
           s.body.appendChild(aRow({ glyph: "\u25a0", title: "Stop the run", danger: true, disabled: !can.cancel, onclick: function () {
             closeSheet(true);
@@ -3928,7 +4089,7 @@ APP_JS = r"""(function () {
       var def = det.definition;
       s.body.appendChild(kvRows([
         ["kind", def.kind === "agent" ? "agent (standing task, identity, memory)" : "task"], ["when", def.when_text + (def.tz && def.tz !== "local" ? " (" + def.tz + ")" : "")],
-        ["folder", def.dir], ["account", def.account || "automatic"], ["mode", def.mode === "visible" ? "visible (in a pane)" : "headless (background)"],
+        ["folder", def.dir], ["account", def.account || "automatic"], ["mode", def.mode === "visible" ? "visible (Bots window on the laptop)" : def.mode === "hybrid" ? "hybrid (background; a failure opens a pane)" : "headless (background)"],
         ["permissions", def.permissions], ["limits", fmtRunDur(def.max_time_s) + " and $" + Number(def.max_cost_usd).toFixed(2) + " per run"],
         ["notify", def.notify.length ? def.notify.join(", ") : "off"], ["made on", def.origin],
         ["runs", String(det.total_runs || 0) + (det.state.consec_failures ? " \u00b7 " + det.state.consec_failures + " failed in a row" : "")]]));
@@ -4136,7 +4297,7 @@ APP_JS = r"""(function () {
     body.appendChild(group("Account", [[null, "Auto"]].concat((ns.profiles || []).map(function (p) { return [p.label, p.label]; })), f.account, function (v) { f.account = v; }));
     label("mode");
     body.appendChild(group("Mode", [["headless", "Headless"], ["visible", "Visible"]], f.mode, function (v) { f.mode = v; }));
-    body.appendChild(hint(f.mode === "visible" ? "The run is shown in a pane of the Hivegrid window." : "Runs in the background; its result lands in Bots."));
+    body.appendChild(hint(f.mode === "visible" ? "An interactive agent in the Bots window on the laptop: it can ask you, and you can answer there. Needs Hivegrid open; otherwise it runs in the background." : "Runs in the background; its result lands in Bots."));
     label("permissions");
     body.appendChild(group("Permissions", [["readonly", "Read only"], ["edit", "Edit"]], f.perms, function (v) { f.perms = v; }));
     body.appendChild(hint(f.perms === "readonly" ? "Reads files and searches the web; changes nothing." : "Reads and writes files; shell commands are refused. Full access is set on the laptop only."));

@@ -82,6 +82,16 @@ class TestPlacement(unittest.TestCase):
         finally:
             A.foreground_by_tty = orig
 
+    def test_the_bots_window_is_never_the_origin_of_new_agents(self):
+        bots = dict(pane(9, "omp"), tab_id=5, window_id=2, tty_name="/dev/pts/9", tab_title=A.BOT_TAB_PREFIX + "Digest #1", is_active=True)
+        main = dict(pane(3, "π > ready"), tab_id=1, window_id=1, tty_name="/dev/pts/3")
+        orig = A.foreground_by_tty
+        A.foreground_by_tty = self.fg({})
+        try:
+            self.assertEqual(A.origin(FakeMux([main, bots]))[0], 3)
+        finally:
+            A.foreground_by_tty = orig
+
     def test_the_first_terminal_opens_a_window_and_the_next_splits_it(self):
         main = dict(pane(3, "π"), tab_id=1, window_id=1, tty_name="/dev/pts/3")
         calls = []

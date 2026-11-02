@@ -332,13 +332,16 @@ class Firing(SchedulerCase):
         title, = [n[1] for n in self.notes]
         self.assertEqual(title, "Hivegrid bot: Digest missed")
 
-    def test_visible_and_hybrid_modes_run_headless_and_say_so(self):
-        rec = self.add(run={"mode": "visible"})
-        sch = self.scheduler()
-        sch.tick()
-        self.settle(sch)
-        run, = self.runs(rec)
-        self.assertEqual((run["mode"], run["status"]), ("headless/visible", "ok"))
+    def test_visible_and_hybrid_modes_without_a_hivegrid_window_run_headless_and_say_so(self):
+        # the real GUI lookup: no `gui-sock-*` in the (temp) runtime dir, so no window to open a pane in
+        for mode in ("visible", "hybrid"):
+            rec = self.add(name=mode, run={"mode": mode})
+            sch = self.scheduler()
+            sch.tick()
+            self.settle(sch)
+            run, = self.runs(rec)
+            self.assertEqual((run["mode"], run["status"]), (f"headless/{mode}", "ok"))
+            self.assertIn("no running Hivegrid window", run["mode_fallback"])
 
 
 class Overlap(SchedulerCase):
@@ -837,6 +840,17 @@ class Inbox(SchedulerCase):
         self.clock.t = BASE
         self.assertEqual(sch.tick(), 0)
         self.assertEqual(self.calls(), [])
+
+    def test_unskip_brings_the_skipped_slot_back(self):
+        rec = self.add(baseline=E(2026, 11, 2, 8))
+        self.clock.t = E(2026, 11, 2, 8, 30)
+        sch = self.scheduler()
+        S.send_command(S.command_dir(self.env), {"op": "skip", "id": rec["id"]})
+        sch.tick()
+        self.assertEqual(self.state(rec)["last_slot"], SLOT)
+        S.send_command(S.command_dir(self.env), {"op": "unskip", "id": rec["id"]})
+        sch.tick()
+        self.assertIsNone(self.state(rec)["last_slot"])
 
     def test_cancel_stops_the_live_run(self):
         self.env["FAKE_OMP_SEQ"] = "hang"

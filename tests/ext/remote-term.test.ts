@@ -1209,7 +1209,7 @@ const ui = fs.readFileSync(path.join(import.meta.dir, "../../bin/hivegrid_remote
 const pagerMatch = ui.match(/\/\/ pager-logic:begin\n([\s\S]*?)\/\/ pager-logic:end/);
 if (!pagerMatch) throw new Error("pager-logic block not found");
 const pager = new Function(
-	`${pagerMatch[1]}\nreturn { pagerClassify, pagerAllows, pagerCommit, pagerDest, pagerStripOf, termHash, botsHash, PAGER_EDGE };`,
+	`${pagerMatch[1]}\nreturn { pagerClassify, pagerAllows, pagerCommit, pagerDest, pagerStripOf, termHash, botsHash, briefCommit, PAGER_EDGE };`,
 )() as {
 	pagerClassify(dx: number, dy: number): "wait" | "lock" | "cancel";
 	pagerAllows(zone: string, dx: number, strip: string[]): boolean;
@@ -1217,7 +1217,8 @@ const pager = new Function(
 	pagerDest(zone: string, dx: number, strip: string[], hash: string): string;
 	pagerStripOf(terminal: boolean, bots: boolean): string[];
 	termHash(hash: string): { n: number | null } | null;
-	botsHash(hash: string): { id: string | null; run: number | null } | null;
+	botsHash(hash: string): { id: string | null; run: number | null; brief?: boolean } | null;
+	briefCommit(dx: number, width: number, ms: number): boolean;
 	PAGER_EDGE: number;
 };
 
@@ -1330,5 +1331,23 @@ describe("pager gesture rules", () => {
 		for (const bad of ["#/", "#/bots/", "#/bots/ab", "#/bots/UPPER", "#/bots/a-b-c/x", "#/bots/a-b-c/1/2", "#/botsx", "#/bots/a-b-c/1234567890", "#/term", "#/bots?x"]) {
 			expect(pager.botsHash(bad)).toBeNull();
 		}
+	});
+});
+
+describe("the Briefing's swipe away", () => {
+	test("far enough (a third of the width, at least 72 px) or a short flick commits, a short slow drag springs back", () => {
+		expect(pager.briefCommit(-80, 390, 600)).toBe(false);
+		expect(pager.briefCommit(-137, 390, 600)).toBe(true);
+		expect(pager.briefCommit(150, 390, 600)).toBe(true);
+		expect(pager.briefCommit(-40, 390, 50)).toBe(true);
+		expect(pager.briefCommit(-40, 390, 400)).toBe(false);
+		expect(pager.briefCommit(-300, 1000, 900)).toBe(false);
+		expect(pager.briefCommit(-360, 1000, 900)).toBe(true);
+	});
+
+	test("the history of the Briefing is a state of the Bots list, not a bot", () => {
+		expect(pager.botsHash("#/bots/briefing")).toEqual({ id: null, run: null, brief: true });
+		expect(pager.botsHash("#/bots/digest-k3x")).toEqual({ id: "digest-k3x", run: null });
+		expect(pager.pagerDest("bot", 80, ["agents", "bots"], "#/bots/briefing")).toBe("#/bots");
 	});
 });

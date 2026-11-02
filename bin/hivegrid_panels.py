@@ -1914,7 +1914,7 @@ def bot_state(sched, st, runs):
     unseen = [r for r in runs if r.get("seen") is False]
     bad = [r for r in unseen if r.get("status") in HS.ATTENTION_STATUS]
     if st.get("running"):
-        return "working"
+        return "attention" if isinstance(st["running"], dict) and st["running"].get("waiting") else "working"
     if st.get("paused_reason") or bad:
         return "limit" if not st.get("paused_reason") and bad[-1].get("status") == "limit" else "attention"
     if any(r.get("status") == "ok" for r in unseen):
@@ -1937,7 +1937,7 @@ def load_bots(store, env, now):
             "enabled": s["enabled"], "when_text": HS.describe(s["when"], now), "next_at": HS.next_run(s, st, now),
             "last": runs[-1] if runs else None, "unseen": sum(1 for r in runs if r.get("seen") is False),
             "running": st.get("running") or None, "paused_reason": st.get("paused_reason"),
-            "done": bool(st.get("done")), "run_count": len(runs),
+            "done": bool(st.get("done")), "run_count": len(runs), "skipped_at": HS.skipped_slot(s, st, now),
         })
     rows.sort(key=lambda r: (BOT_SORT[r["state"]], r["next_at"] or 1 << 60, r["name"].lower()))
     return rows
@@ -2079,7 +2079,7 @@ BOT_HELP = [
     ("m", "show / edit the bot's memory.md in $EDITOR"),
     ("space", "pause or resume (a breaker pause is cleared by resume)"),
     ("r", "run now"),
-    ("s", "skip the next scheduled run"),
+    ("s", "skip the next scheduled run; pressed again while it is still ahead, bring it back"),
     ("c", "cancel the live run"),
     ("d", "delete the bot and its history"),
     ("↑↓", "choose;  Esc goes back, q closes"),
@@ -2094,8 +2094,9 @@ class BotWizard:
     KINDS = ["task – runs its prompt on schedule", "agent – standing task, identity, memory"]
     PERMS = [("edit", "edit – read and write files (default)"), ("readonly", "readonly – read and search only"),
              ("full", "full – also shell commands (opt-in)")]
-    MODES = [("headless", "headless – in the background (default)"), ("visible", "visible – runs headless for now"),
-             ("hybrid", "hybrid – runs headless for now")]
+    MODES = [("headless", "headless – in the background (default)"),
+             ("visible", "visible – an interactive agent in the Bots window, you can watch and answer"),
+             ("hybrid", "hybrid – headless; if it fails, the session opens in the Bots window for you")]
 
     def __init__(self, page, ui, cwd="", profile=""):
         self.page, self.ui = page, ui
@@ -2333,7 +2334,7 @@ class BotsPage(U.Page):
             return "↑↓ report  ↵ read  a all seen  Esc back  ? help  q close"
         if self.detail:
             return "↑↓ run  v report  r run now  Esc back  ? help  q close"
-        return "n new  ↵ details  space pause  r run  e edit  m memory  s skip  d delete  ? help  q close"
+        return "n new  ↵ details  space pause  r run  e edit  m memory  s skip/undo  d delete  ? help  q close"
 
     def captures(self, mods, key):
         if mods and mods != {"SHIFT"}:
@@ -2413,14 +2414,25 @@ class BotsPage(U.Page):
                                      on_no=mark_only))
 
     def skip_next(self, ui, row):
+        """`s`: skips the next run; pressed again while that skip is still ahead it brings the run back."""
+        if row.get("skipped_at"):
+            if self.tell("unskip", row["id"]):
+                ui.say(f"asked the scheduler to bring back the skipped run of {row['name']}")
+                return
+            sched = row["sched"]
+            st = HS.update_state(self.state_dir(row), lambda s: HS.unskip(sched, s, self.now()))
+            self.refresh()
+            nxt = HS.next_run(sched, st, self.now())
+            ui.say(f"skip undone; next {clock_text(nxt, sched['when'].get('tz', 'local'), self.now()) if nxt else 'none'}")
+            return
         if self.tell("skip", row["id"]):
-            ui.say(f"asked the scheduler to skip the next run of {row['name']}")
+            ui.say(f"asked the scheduler to skip the next run of {row['name']} (s again undoes it)")
             return
         sched = row["sched"]
         st = HS.update_state(self.state_dir(row), lambda s: HS.skip_next(sched, s, self.now()))
         self.refresh()
         nxt = HS.next_run(sched, st, self.now())
-        ui.say(f"skipped; next {clock_text(nxt, sched['when'].get('tz', 'local'), self.now()) if nxt else 'none'}")
+        ui.say(f"skipped; next {clock_text(nxt, sched['when'].get('tz', 'local'), self.now()) if nxt else 'none'} (s again undoes it)")
 
     def cancel_run(self, ui, row):
         if not row["running"]:
@@ -2971,6 +2983,8 @@ class BotsPage(U.Page):
         cv.put(pos + 2, y, f"{glyph} {label}", gcolor)
         run = sched["run"]
         nxt = f"next in {span_text(r['next_at'] - now)}" if r["next_at"] and r["enabled"] and not r["paused_reason"] else "no next run"
+        if r.get("skipped_at"):
+            nxt += f" (the run at {clock_text(r['skipped_at'], sched['when'].get('tz', 'local'), now)} is skipped, s undoes it)"
         facts = [f"{r['when_text']}", nxt, U.home_path(run["cwd"]), f"account {run['account'] or 'default'}",
                  f"{run['permissions']} · {run['mode']}"]
         cv.put(x + 2, y + 1, U.fit_cells(" · ".join(facts), w - 4), p["muted"])

@@ -52,7 +52,7 @@ TRIGGERS = ("cron", "manual", "retry", "catchup", "self", "chat")
 RUN_STATUS = ("ok", "failed", "limit", "timeout", "cost", "skipped", "missed", "cancelled", "deferred")
 ATTENTION_STATUS = ("failed", "limit", "missed", "timeout", "cost")
 NO_ATTENTION_STATUS = ("skipped", "deferred", "cancelled")  # recorded already seen
-COMMAND_OPS = ("run-now", "skip", "cancel", "reload", "chat")
+COMMAND_OPS = ("run-now", "skip", "unskip", "cancel", "reload", "chat")
 LEVELS = ("none", "info", "important")
 OVERRIDE_STATUS = ("failed", "limit", "timeout", "cost", "missed", "deferred")  # always `important`
 CANCELLED_BY_USER = "cancelled by the user"  # error text of a run the user stopped (level `none`)
@@ -74,6 +74,10 @@ MAX_NAME = 80
 
 PREAMBLE = ("You are an unattended scheduled agent run by Hivegrid. Nobody can answer questions while you "
             "work: never ask, decide sensibly yourself. Finish with a short report.")
+# A visible run (and the takeover of a hybrid one) is an interactive omp in a pane: the user may be watching.
+PREAMBLE_VISIBLE = ("You are a scheduled agent run by Hivegrid in a visible pane: the user may be watching and may "
+                    "answer if you ask. Ask only when you cannot decide sensibly yourself, otherwise decide and go on. "
+                    "Whatever happens, finish with the short report file.")
 
 
 class ScheduleError(OSError):
@@ -1153,10 +1157,11 @@ def init_state_dir(sched, now=None, env=None):
     return sdir
 
 
-def sync_identity(sched, env=None):
-    """Write `identity.md` (the text for `--append-system-prompt`) when it differs from identity_text."""
-    path = os.path.join(state_dir(sched["id"], env), "identity.md")
-    text = identity_text(sched)
+def sync_identity(sched, env=None, visible=False):
+    """Write `identity.md` (`identity-visible.md` for a visible run), the text for `--append-system-prompt`, when it
+    differs from identity_text."""
+    path = os.path.join(state_dir(sched["id"], env), "identity-visible.md" if visible else "identity.md")
+    text = identity_text(sched, visible)
     try:
         if _read_text_trusted(path, 1 << 20) == text:
             return path
@@ -1192,10 +1197,41 @@ def advance(sched, state, slot, trigger):
 
 
 def skip_next(sched, state, now):
-    """The state with the next scheduled slot marked handled, so it never fires."""
+    """The state with the next scheduled slot marked handled, so it never fires. What the skip changed is
+    remembered in `state["skips"]` (newest last, at most 5) so `unskip` can take it back."""
     after = max(int(now), state.get("last_slot") or 0)
     slot = next_fire(sched["when"], after, state.get("last_slot_local"))
-    return state if slot is None else advance(sched, state, slot, "cron")
+    if slot is None:
+        return state
+    st = advance(sched, state, slot, "cron")
+    skips = [s for s in (state.get("skips") or []) if isinstance(s, dict)][-4:]
+    st["skips"] = skips + [{"slot": int(slot), "last_slot": state.get("last_slot"),
+                            "last_slot_local": state.get("last_slot_local")}]
+    return st
+
+
+def skipped_slot(sched, state, now):
+    """The epoch of the skipped run that `unskip` would bring back, else None. Only a skip that is still
+    ahead counts, and only while nothing was handled after it (a later run, skip or missed slot)."""
+    skips = state.get("skips")
+    top = skips[-1] if isinstance(skips, list) and skips and isinstance(skips[-1], dict) else None
+    if top is None or not isinstance(top.get("slot"), int) or top["slot"] <= int(now):
+        return None
+    return top["slot"] if state.get("last_slot") == top["slot"] else None
+
+
+def unskip(sched, state, now):
+    """The state with the newest skip undone: the skipped slot is due again. The state is returned unchanged
+    when `skipped_slot` finds nothing to undo."""
+    slot = skipped_slot(sched, state, now)
+    if slot is None:
+        return state
+    st = copy.deepcopy(state)
+    top = st["skips"].pop()
+    st["last_slot"], st["last_slot_local"] = top.get("last_slot"), top.get("last_slot_local")
+    if not st["skips"]:
+        del st["skips"]
+    return st
 
 
 def next_run(sched, state, now):
@@ -1315,7 +1351,7 @@ def breaker(state, sched):
 
 _RUN_KEYS = ("run", "schedule", "trigger", "mode", "started", "ended", "status", "attempt", "exit", "profile",
              "model", "session_file", "session_id", "cost_usd", "tokens", "summary", "report_path", "error",
-             "reset_at", "seen", "level", "headline")
+             "reset_at", "seen", "level", "headline", "mode_fallback", "takeover")
 
 _BIDI = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _STATUS_WORDS = {"failed": "failed", "limit": "hit its usage limit", "timeout": "timed out",
@@ -1489,6 +1525,11 @@ def normalize_run(rec, name=None):
         "error": error,
         "reset_at": _opt_num(rec.get("reset_at"), "reset_at"),
     }
+    if rec.get("mode_fallback"):    # why a visible or hybrid run was headless / could not open its pane
+        out["mode_fallback"] = _opt_str(rec["mode_fallback"], "mode_fallback", 300)
+    tk = rec.get("takeover")        # a hybrid run's pane the user took over in: {"pane": id}
+    if isinstance(tk, dict) and isinstance(tk.get("pane"), int) and not isinstance(tk["pane"], bool):
+        out["takeover"] = {"pane": tk["pane"]}
     out["level"], out["headline"] = level, headline
     seen = rec.get("seen")
     out["seen"] = (status in NO_ATTENTION_STATUS or level == "none") if seen is None else _bool(seen, "seen")
@@ -1574,8 +1615,9 @@ def unseen(sdir=None, *, env=None):
     return out
 
 
-def _mark_dir(sdir, pred):
-    """Mark seen the unseen runs of a state directory for which `pred(record)` holds; returns how many."""
+def _mark_dir(sdir, pred, seen=True):
+    """Set `seen` to `seen` on the runs of a state directory that have the opposite value and for which `pred(record)`
+    holds; returns how many changed."""
     if not os.path.isdir(sdir):
         return 0
     ensure_private_dir(sdir)
@@ -1583,8 +1625,8 @@ def _mark_dir(sdir, pred):
         runs = read_runs(sdir)
         n = 0
         for r in runs:
-            if r.get("seen") is False and pred(r):
-                r["seen"] = True
+            if r.get("seen") is (not seen) and pred(r):
+                r["seen"] = seen
                 n += 1
         if n:
             atomic_write(os.path.join(sdir, "runs.jsonl"),
@@ -1595,6 +1637,11 @@ def _mark_dir(sdir, pred):
 def mark_seen(schedule_id, run=None, *, env=None):
     """Mark one run (or every run when `run` is None) of a schedule seen; returns how many changed."""
     return _mark_dir(state_dir(schedule_id, env), lambda r: run is None or r.get("run") == run)
+
+
+def mark_unseen(schedule_id, run, *, env=None):
+    """Undo `mark_seen` for one run (the briefing's undo); returns how many changed."""
+    return _mark_dir(state_dir(schedule_id, env), lambda r: r.get("run") == run, seen=False)
 
 
 # ---------------------------------------------------------------- briefing
@@ -1691,10 +1738,10 @@ def enforce_memory_cap(sched, env=None):
     return True
 
 
-def identity_text(sched):
-    """The text for `--append-system-prompt`: a fixed unattended-agent preamble, the agent's name when it
-    is a persistent agent, and `identity.system`."""
-    parts = [PREAMBLE]
+def identity_text(sched, visible=False):
+    """The text for `--append-system-prompt`: a fixed preamble (unattended, or for a visible run that the user may
+    be watching and may answer), the agent's name when it is a persistent agent, and `identity.system`."""
+    parts = [PREAMBLE_VISIBLE if visible else PREAMBLE]
     if sched["kind"] == "agent":
         parts.append(f"Your name is {sched['name']}.")
     system = sched["identity"]["system"].strip()
@@ -1825,10 +1872,13 @@ def self_note(schedule_id, text, *, now=None, env=None):
 
 def _item_state(sched, state, runs):
     unseen_runs = [r for r in runs if r.get("seen") is False]
-    attention = bool(state.get("paused_reason")) or any(r.get("status") in ATTENTION_STATUS for r in unseen_runs)
-    running = bool(state.get("running"))
+    live = state.get("running")
+    running = bool(live)
+    waiting = running and isinstance(live, dict) and bool(live.get("waiting"))   # a visible run asks for the user
+    attention = (bool(state.get("paused_reason")) or waiting
+                 or any(r.get("status") in ATTENTION_STATUS for r in unseen_runs))
     if running:
-        kind = "working"
+        kind = "attention" if waiting else "working"
     elif attention:
         kind = "attention"
     elif any(r.get("status") == "ok" for r in unseen_runs):
@@ -1850,7 +1900,8 @@ def _chat_info(state):
 def build_summary(now, scheduler=None, *, env=None, schedules=None):
     """The document the panel, the phone and the header read: `{ts, scheduler, counts, items, briefing}`.
     `scheduler` (heartbeat, pid, ... of the daemon) comes from the caller. Item `state`: `working`
-    (a run or a chat turn is live), `attention` (unseen failed/limit/timeout/cost/missed run, or paused),
+    (a run or a chat turn is live), `attention` (unseen failed/limit/timeout/cost/missed run, a run opened for the user's
+    takeover, a visible run waiting for an answer, or paused),
     `done` (unseen ok), `schedule` (waiting for its next run), `idle` (disabled or finished). `last` is the
     newest run that is not a chat turn, with its `level` and `headline`; `chat` is `{active, queue, error}`.
     `briefing` is `{unseen, newest: [up to 3 briefing entries]}`."""
@@ -1874,7 +1925,9 @@ def build_summary(now, scheduler=None, *, env=None, schedules=None):
                 "seen": bool(last.get("seen")),
                 "level": effective_level(last.get("status"), last.get("trigger"), last.get("error"), last.get("level")),
                 "headline": _run_headline(s["name"], last)},
-            "running": running, "attention": attention, "paused_reason": st.get("paused_reason"),
+            "running": running, "waiting": bool(isinstance(st.get("running"), dict) and st["running"].get("waiting")),
+            "attention": attention, "paused_reason": st.get("paused_reason"),
+            "skipped_at": skipped_slot(s, st, now),
             "chat": _chat_info(st),
         })
     order = {"attention": 0, "working": 1, "done": 2, "schedule": 3, "idle": 4}
@@ -2261,6 +2314,20 @@ def _cmd_skip(ctx, args):
     return 0
 
 
+def _cmd_unskip(ctx, args):
+    rec = _resolve(Store(env=ctx.env), args.id)
+    st = load_state(init_state_dir(rec, ctx.now, ctx.env))
+    if skipped_slot(rec, st, ctx.now) is None:
+        ctx.say(f"nothing to undo: no skipped run of {rec['id']} is still ahead", True)
+        return 1
+    if _notify_daemon(ctx, "unskip", rec["id"]):
+        ctx.say(f"asked the scheduler to bring back the skipped run of {rec['id']}")
+        return 0
+    st = update_state(init_state_dir(rec, ctx.now, ctx.env), lambda s: unskip(rec, s, ctx.now))
+    ctx.say(f"skip undone; next: {_fmt_time(next_run(rec, st, ctx.now), rec['when'].get('tz', 'local'))}")
+    return 0
+
+
 def _cmd_logs(ctx, args):
     rec = _resolve(Store(env=ctx.env), args.id)
     sdir = state_dir(rec["id"], ctx.env)
@@ -2529,7 +2596,10 @@ def build_parser():
         p.add_argument("--account", help="account label (an omp profile)")
         p.add_argument("--model")
         p.add_argument("--thinking", choices=THINKING)
-        p.add_argument("--mode", choices=MODES)
+        p.add_argument("--mode", choices=MODES, help="headless (background, default), visible (an interactive omp in "
+                       "the Bots window of the running Hivegrid, you can watch and answer) or hybrid (headless first; "
+                       "when it fails or times out the same session opens in a pane for you). Without a running "
+                       "Hivegrid window the run is headless and its record says so")
         p.add_argument("--permissions", choices=PERMISSIONS)
         p.add_argument("--kind", choices=KINDS, default="task" if adding else None)
         p.add_argument("--max-time", type=int, help="seconds per run (60 to 86400, default 1800)")
@@ -2551,7 +2621,7 @@ def build_parser():
     rm.add_argument("id")
     rm.add_argument("--keep-state", action="store_true", help="keep memory, runs and notes")
     for name, helptext in (("pause", "stop scheduling it"), ("resume", "schedule it again (clears a breaker pause)"),
-                           ("run", "run it now"), ("skip", "skip its next run")):
+                           ("run", "run it now"), ("skip", "skip its next run"), ("unskip", "undo the last skip")):
         sub.add_parser(name, help=helptext).add_argument("id")
     lg = sub.add_parser("logs", help="run history, or one run's report")
     lg.add_argument("id")
@@ -2591,7 +2661,7 @@ def build_parser():
 
 
 _COMMANDS = {"add": _cmd_add, "list": _cmd_list, "show": _cmd_show, "edit": _cmd_edit, "rm": _cmd_rm,
-             "pause": _cmd_pause, "resume": _cmd_resume, "run": _cmd_run, "skip": _cmd_skip, "logs": _cmd_logs,
+             "pause": _cmd_pause, "resume": _cmd_resume, "run": _cmd_run, "skip": _cmd_skip, "unskip": _cmd_unskip, "logs": _cmd_logs,
              "seen": _cmd_seen, "parse": _cmd_parse, "next": _cmd_next, "doctor": _cmd_doctor, "self": _cmd_self,
              "briefing": _cmd_briefing, "say": _cmd_say, "chat": _cmd_chat}
 

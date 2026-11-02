@@ -455,7 +455,14 @@ def section_bots():
     st, brief = bapi("GET", "/api/bots/briefing")
     check("10 briefing: the failed run is in, the quiet run is not", st == 200 and [e["headline"] for e in brief["entries"]] == ["12 mails summarized, 2 need an answer", "watcher failed: omp exited with status 1"] or (st == 200 and sorted(e["headline"] for e in brief["entries"]) == ["12 mails summarized, 2 need an answer", "watcher failed: omp exited with status 1"]), str(brief)[:300])
     check("10 briefing: counts, the read one is seen", st == 200 and brief["total"] == 2 and brief["unseen"] == 1, str({k: brief.get(k) for k in ("total", "unseen")}))
-    check("10 briefing: marking all seen clears the count", bapi("POST", "/api/bots/briefing/seen", {})[0] == 200 and bapi("GET", "/api/bots/briefing")[1]["unseen"] == 0)
+    unread = [e for e in brief["entries"] if not e["seen"]]
+    one = unread[0] if unread else None
+    st_one, got_one = bapi("POST", "/api/bots/briefing/seen", {"id": one["bot_id"], "run": one["run"]}) if one else (0, {})
+    after = bapi("GET", "/api/bots/briefing")[1]
+    check("10 briefing: one report swiped away is read, the rev moves for other devices", st_one == 200 and got_one.get("marked") == 1 and after["unseen"] == brief["unseen"] - 1 and after["rev"] != brief["rev"], f"{st_one} {got_one}")
+    check("10 briefing: undo brings the report back unread", bool(one) and bapi("POST", "/api/bots/briefing/seen", {"id": one["bot_id"], "run": one["run"], "unseen": True})[0] == 200 and bapi("GET", "/api/bots/briefing")[1]["unseen"] == brief["unseen"])
+    check("10 briefing: a bad body is 400, an unknown report 404", bapi("POST", "/api/bots/briefing/seen", {})[0] == 400 and bapi("POST", "/api/bots/briefing/seen", {"id": ids["watcher"], "run": 99})[0] == 404)
+    check("10 briefing: marking all seen clears the count", bapi("POST", "/api/bots/briefing/seen", {"all": True})[0] == 200 and bapi("GET", "/api/bots/briefing")[1]["unseen"] == 0)
     st, conv = bapi("GET", f"/api/bots/{ids['watcher']}/conversation")
     check("10 conversation: the bot's session file as chat items", st == 200 and "the fixture build is green" in json.dumps(conv["items"]) and conv["session"] is True, str(conv)[:300])
     check("10 conversation: the path never leaves the server", HOME not in json.dumps(conv))
@@ -494,9 +501,14 @@ def section_bots():
     cmds = sch.read_commands(sch.command_dir(BOT_ENV)) if os.path.isdir(sch.command_dir(BOT_ENV)) else []
     check("10 say with a live scheduler: a chat command in the inbox and {queued, position}", st == 200 and "queued" in say and "position" in say and
           any(c.get("op") == "chat" and c.get("id") == ids["watcher"] and c.get("text") == "any news?" for c in cmds), f"{st} {say} {cmds}")
+    st, nope = bapi("POST", f"/api/bots/{ids['digest']}/unskip", {})
+    check("10 unskip with nothing skipped: 409", st == 409, f"{st} {nope}")
     st_skip = bapi("POST", f"/api/bots/{ids['watcher']}/skip", {})
     cmds = sch.read_commands(sch.command_dir(BOT_ENV)) if os.path.isdir(sch.command_dir(BOT_ENV)) else []
     check("10 skip goes to the live scheduler as a command", {"op": "skip", "id": ids["watcher"]} in cmds, f"{st_skip} {cmds}")
+    st, doc = bapi("POST", f"/api/bots/{ids['watcher']}/unskip", {})
+    cmds = sch.read_commands(sch.command_dir(BOT_ENV)) if os.path.isdir(sch.command_dir(BOT_ENV)) else []
+    check("10 unskip with a live scheduler goes as a command", st in (200, 409) and (st == 409 or {"op": "unskip", "id": ids["watcher"]} in cmds), f"{st} {doc} {cmds}")
     st, _ = bapi("POST", f"/api/bots/{ids['watcher']}/pause", {})
     check("10 pause disables, resume enables again", st == 200 and not sch.Store(env=BOT_ENV).get(ids["watcher"])["enabled"] and bapi("POST", f"/api/bots/{ids['watcher']}/resume", {})[0] == 200 and sch.Store(env=BOT_ENV).get(ids["watcher"])["enabled"])
     check("10 delete needs confirm", bapi("POST", f"/api/bots/{created['id']}/delete", {})[0] == 409)
@@ -522,11 +534,11 @@ def bots_readonly():
     """10, the last part: a `--read-only` server (already started) refuses every write of the Bots and still lists them."""
     if "digest" not in BOT_IDS:
         return
-    for verb, b in (("run", {}), ("skip", {}), ("pause", {}), ("resume", {}), ("cancel", {}), ("ack", {}), ("delete", {"confirm": True})):
+    for verb, b in (("run", {}), ("skip", {}), ("unskip", {}), ("pause", {}), ("resume", {}), ("cancel", {}), ("ack", {}), ("delete", {"confirm": True})):
         st, _ = bapi("POST", f"/api/bots/{BOT_IDS['digest']}/{verb}", b)
         check(f"10 read-only: {verb} is 403", st == 403, str(st))
     check("10 read-only: create is 403", bapi("POST", "/api/bots", BOT_IDS["_body"])[0] == 403)
-    check("10 read-only: say and briefing/seen are 403", bapi("POST", f"/api/bots/{BOT_IDS['digest']}/say", {"text": "hi"})[0] == 403 and bapi("POST", "/api/bots/briefing/seen", {})[0] == 403)
+    check("10 read-only: say and briefing/seen are 403", bapi("POST", f"/api/bots/{BOT_IDS['digest']}/say", {"text": "hi"})[0] == 403 and bapi("POST", "/api/bots/briefing/seen", {"all": True})[0] == 403)
     check("10 read-only: the briefing and the conversation can be read", bapi("GET", "/api/bots/briefing")[0] == 200 and bapi("GET", f"/api/bots/{BOT_IDS['watcher']}/conversation")[0] == 200)
     check("10 read-only: the list still works", bapi("GET", "/api/bots")[0] == 200)
 

@@ -511,6 +511,23 @@ class ActionTest(BotsCase):
         self.assertEqual(self.commands(), [{"op": "skip", "id": self.rec["id"]}])
         self.assertIsNone(H.load_state(self.sdir)["last_slot"])
 
+    def test_s_again_while_the_skip_is_ahead_brings_the_run_back(self):
+        before = H.next_run(self.rec, H.load_state(self.sdir), self.now)
+        self.press("s")
+        self.assertEqual(H.load_state(self.sdir)["last_slot"], before)
+        self.press("s")
+        st = H.load_state(self.sdir)
+        self.assertIsNone(st["last_slot"])
+        self.assertEqual(H.next_run(self.rec, st, self.now), before)
+        self.assertIn("skip undone", self.ui.message)
+
+    def test_undoing_a_skip_with_a_scheduler_sends_the_command(self):
+        H.update_state(self.sdir, lambda s: H.skip_next(self.rec, s, self.now))
+        self.alive()
+        self.page.refresh()
+        self.press("s")
+        self.assertEqual(self.commands(), [{"op": "unskip", "id": self.rec["id"]}])
+
     def test_cancel_needs_a_live_run_and_a_scheduler(self):
         self.press("c")
         self.assertIn("is not running", self.ui.message)

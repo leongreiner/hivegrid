@@ -4,9 +4,12 @@ The definitions, state files, policies and run records are `hivegrid_schedule`; 
 that starts `omp` for them. One `Scheduler` is a tick: reload the definitions, read the control inbox,
 reap finished runs, stop runs past their deadline, decide what is due (catch-up, overlap, retries,
 guards) and start it within `schedule.max_parallel`, write the summary with a fresh heartbeat. Nothing
-inside a tick blocks on a child: every run is a `subprocess.Popen` in its own session whose JSON-lines
-stream is read by two threads. The clock, the account lookup, the quota reader, the notifier and the
-jitter are injectable, so the tests drive ticks with a fake clock and a fake `omp` script.
+inside a tick blocks on a child: a headless run is a `subprocess.Popen` in its own session whose JSON-lines
+stream is read by two threads; a visible run (and the takeover of a hybrid one) is an interactive `omp` in a
+tab of the Bots window of the running Hivegrid (`wezterm cli`, found like hivegrid-remote does), observed through
+its agent state file and session file and never signalled. The clock, the account lookup, the quota reader, the
+notifier, the GUI and the jitter are injectable, so the tests drive ticks with a fake clock, a fake `omp` script
+and a fake `wezterm cli`.
 
 Standard library only (the other hivegrid modules are imported when needed).
 """
@@ -18,12 +21,14 @@ import glob
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import threading
 import time
 
+import hivegrid_agents as A
 import hivegrid_schedule as S
 
 TICK_S = 2.0                  # longest sleep between ticks (a finished run or a signal wakes the loop at once)
@@ -57,6 +62,19 @@ NOTIFY_LOOK = {  # status -> (ntfy priority, ntfy tag)
     "ok": ("3", "white_check_mark"), "failed": ("4", "x"), "timeout": ("4", "alarm_clock"),
     "cost": ("4", "moneybag"), "limit": ("3", "hourglass_flowing_sand"), "missed": ("3", "calendar"),
 }
+# Visible runs: an interactive omp in a tab of the Bots window of the running Hivegrid, observed through the pane's
+# agent state file (ext/hivegrid-agent-state.ts) and its session file.
+BOT_TAB_PREFIX = A.BOT_TAB_PREFIX   # tab title of every visible run; the window that holds such a tab is the Bots window
+VISIBLE_SETTLE_S = 4           # a finished turn must stay finished this long (omp may start the next one at once)
+VISIBLE_START_S = 60           # omp has this long to report a state; an agent that has not started working then needs you
+VISIBLE_WAIT_CAP_S = 12 * 3600  # all the time one run waits for the user, at most; then it is recorded `timeout`
+VISIBLE_LIST_EVERY_S = 5.0     # how often the panes of the GUI are listed to see that the run's pane is still there
+VISIBLE_MUX_DOWN_S = 20.0      # the GUI does not answer this long: the pane is gone with it
+VISIBLE_EXIT_GRACE_S = 5.0     # omp has quit (state exited): its pane's shell writes the exit status within this time
+VISIBLE_DT_MAX_S = 30.0        # one observation counts at most this much time (a suspended machine did not work)
+VISIBLE_SAVE_S = 60.0          # the observation's counters are written to state.json this often (a restart goes on)
+VISIBLE_SESSION_READ = 8 << 20
+PROMPTS_KEPT = 10
 
 
 # ---------------------------------------------------------------- settings (tolerant)
@@ -133,6 +151,20 @@ class Stream:
         self.model = None
         self.refusals = 0
         self.lines = 0
+
+    def feed_entry(self, entry):
+        """One entry of a session file (an interactive run has no JSON stream): the assistant messages feed the
+        same cost, text, model and stop-reason bookkeeping as the stream's `turn_end` does."""
+        if not isinstance(entry, dict):
+            return
+        if entry.get("type") == "session":
+            if isinstance(entry.get("id"), str) and self.session_id is None:
+                self.session_id = entry["id"]
+        elif entry.get("type") == "message" and isinstance(entry.get("message"), dict):
+            msg = entry["message"]
+            if msg.get("role") == "assistant":
+                self._usage(msg)
+                self._assistant(msg)
 
     def feed(self, raw):
         line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else raw.strip()
@@ -246,6 +278,10 @@ class Run:
         self.killed = None
         self.kill_sent = None
         self.hard_killed = False
+        self.vis = None             # an interactive run in a pane (no process of ours): see Scheduler._open_visible
+        self.hybrid = False         # headless first; a failure opens the session in a pane for the user
+        self.mode_fallback = None   # why a visible or hybrid run was headless, or could not open its pane
+        self.no_retry = False       # the pane is the user's now: the retry policy leaves it alone
 
 
 def _pid_alive(pid):
@@ -275,11 +311,97 @@ def _hhmm(epoch):
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
+# ---------------------------------------------------------------- the GUI (visible runs)
+
+class GuiError(Exception):
+    """The running Hivegrid cannot be reached or refused to open a pane; the text is the reason a record shows."""
+
+
+class Gui:
+    """The running Hivegrid window as the scheduler needs it, over `wezterm cli` like hivegrid-remote: the daemon is a
+    systemd user unit with no WEZTERM_* variables, so `hivegrid_remote.Mux` finds the GUI socket itself (and again
+    after a failed call, a GUI that restarted). `run(*args) -> stdout | None` replaces the Mux in the tests."""
+
+    def __init__(self, env, run=None):
+        self.env = env
+        self._run = run
+
+    def call(self, *args):
+        if self._run is None:
+            try:
+                import hivegrid_remote as R
+            except ImportError as exc:  # noqa: BLE001 - a broken install must not stop the scheduler
+                raise GuiError(f"cannot load hivegrid_remote ({exc})") from None
+            self._run = R.Mux(locate=lambda: R.discover_gui_socket(R.runtime_dir(self.env))).run
+        return self._run(*args)
+
+    def panes(self):
+        """The panes of every window of the GUI (`wezterm cli list`), or None when no GUI answers."""
+        out = self.call("list", "--format", "json")
+        try:
+            panes = json.loads(out) if out else None
+        except ValueError:
+            return None
+        if not isinstance(panes, list):
+            return None
+        return [p for p in panes if isinstance(p, dict) and isinstance(p.get("pane_id"), int)]
+
+    def problem(self):
+        """None when a Hivegrid window answers, else why a visible run cannot open its pane."""
+        try:
+            return None if self.panes() is not None else "no running Hivegrid window answers (is Hivegrid open?)"
+        except GuiError as exc:
+            return str(exc)
+
+    def open_tab(self, command, cwd, title):
+        """Run `command` (an argv) in a new tab of the Bots window and return its pane id. The Bots window is the
+        window that holds a tab titled `Bot · ...`; the first run opens it (`spawn --new-window`, where the canvas
+        grid is never touched), every later run adds a tab to it. Raises GuiError."""
+        panes = self.panes()
+        if panes is None:
+            raise GuiError("no running Hivegrid window answers (is Hivegrid open?)")
+        win = next((p.get("window_id") for p in panes if str(p.get("tab_title") or "").startswith(BOT_TAB_PREFIX)
+                    and isinstance(p.get("window_id"), int)), None)
+        pane = None
+        for _ in range(2):
+            where = ("--window-id", str(win)) if win is not None else ("--new-window",)
+            out = self.call("spawn", *where, "--cwd", cwd, "--", *command)
+            m = re.match(r"\s*(\d+)\s*$", out or "")
+            if m:
+                pane = int(m.group(1))
+                break
+            if win is None:
+                break
+            win = None   # the Bots window was closed meanwhile: open a new one
+        if pane is None:
+            raise GuiError("wezterm cli could not open a pane for the run")
+        self.call("set-tab-title", "--pane-id", str(pane), title)   # best effort: the title is what finds the window again
+        return pane
+
+    def state_file(self, pane):
+        base = self.env.get("XDG_RUNTIME_DIR") or "/tmp"
+        return os.path.join(base, "hivegrid-agents", f"{int(pane)}.json")
+
+    def agent(self, pane):
+        """The pane's agent state file (ext/hivegrid-agent-state.ts) as a dict with `alive` (its omp process is
+        there), or None while omp has written none."""
+        doc = A._read_json(self.state_file(pane))
+        if not isinstance(doc, dict) or doc.get("state") not in A.STATES:
+            return None
+        return dict(doc, alive=A._pid_alive(doc.get("pid")))
+
+    def forget(self, pane):
+        """Remove a state file left under this pane id by a GUI that ran before (pane ids start again at 0)."""
+        with contextlib.suppress(OSError):
+            os.unlink(self.state_file(pane))
+
+
+
 # ---------------------------------------------------------------- the scheduler
 
 class Scheduler:
     def __init__(self, env=None, *, clock=time.time, accounts=None, quota=None, notify=None, notify_async=False,
-                 jitter=None, log=None, settings=None, push=None):
+                 jitter=None, log=None, settings=None, push=None, gui=None):
         self.env = dict(os.environ if env is None else env)
         self.clock = clock
         self.accounts_fn = accounts or (lambda: default_accounts(self.env))
@@ -304,6 +426,7 @@ class Scheduler:
         self._budget_noted = None
         self._cmd_error = None
         self._pushes = []
+        self._gui = gui
 
     # ---- small helpers
 
@@ -340,6 +463,8 @@ class Scheduler:
             run = st.get("running")
             if not run:
                 continue
+            if isinstance(run, dict) and run.get("visible") and self._adopt_visible(sched, run, self.t0):
+                continue
             self._close_stale(sched, run)
         self._dirty = True
 
@@ -361,8 +486,11 @@ class Scheduler:
                 status, error = "cancelled", "the scheduler restarted: the run left over from before was stopped"
             else:
                 error = "the scheduler stopped while this run was live (its pid now belongs to another process)"
+        visible = isinstance(run, dict) and bool(run.get("visible"))
+        if visible:
+            error = "the scheduler restarted and the pane of this visible run is gone"
         rec = {"run": no if isinstance(no, int) else self._alloc_run(self.sdir(sid)), "schedule": sid,
-               "trigger": "chat" if is_chat else "cron", "mode": "headless",
+               "trigger": "chat" if is_chat else "cron", "mode": "visible" if visible else "headless",
                "started": run.get("started") if isinstance(run, dict) else None,
                "ended": now, "status": status, "attempt": 1, "error": error}
         rec = S.append_run(self.sdir(sid), rec)
@@ -390,7 +518,10 @@ class Scheduler:
     def shutdown(self, reason="stop"):
         """Stop every live run (SIGTERM to its group, SIGKILL after a few seconds), record them cancelled and
         publish a summary without heartbeat so panels see the scheduler is gone."""
-        for run in self.live.values():
+        for sid, run in list(self.live.items()):
+            if run.vis is not None:   # the pane is the user's: it stays, and the next scheduler observes the run again
+                del self.live[sid]
+                continue
             run.killed = run.killed or "stop"
             if run.kill_sent is None:
                 run.kill_sent = self.clock()
@@ -501,6 +632,8 @@ class Scheduler:
             S.update_state(sdir, lambda st: st.update(run_now=True))
         elif op == "skip":
             S.update_state(sdir, lambda st: S.skip_next(sched, st, now))
+        elif op == "unskip":
+            S.update_state(sdir, lambda st: S.unskip(sched, st, now))
         elif op == "chat":
             self._chat_message(sdir, (cmd or {}).get("text"), now)
         elif op == "cancel":
@@ -514,7 +647,8 @@ class Scheduler:
             S.update_state(sdir, fn)
             if live is not None and live.kill_sent is None:
                 live.killed, live.kill_sent = "cancel", now
-                _killpg(live.proc.pid, signal.SIGTERM)
+                if live.vis is None:
+                    _killpg(live.proc.pid, signal.SIGTERM)   # a visible run is only recorded cancelled; its pane stays
 
     def _chat_message(self, sdir, text, now):
         """Queue a user message for the bot (at most CHAT_QUEUE_MAX waiting; a full queue refuses the new one and
@@ -536,6 +670,8 @@ class Scheduler:
 
     def _watchdog(self, now):
         for run in self.live.values():
+            if run.vis is not None:   # a visible run keeps its own clock (working time, see _observe); nothing is killed
+                continue
             if run.kill_sent is None and now >= run.deadline:
                 run.killed, run.kill_sent = "watchdog", now
                 self.log(f"{run.sched['id']}: run #{run.run_no} passed max_time_s + {WATCHDOG_GRACE_S} s; killing it")
@@ -546,6 +682,12 @@ class Scheduler:
 
     def _reap(self, now):
         for sid, run in list(self.live.items()):
+            if run.vis is not None:
+                try:
+                    self._observe(run, now)
+                except (OSError, ValueError, KeyError, TypeError) as exc:   # a broken file or pane must not stop the daemon
+                    self.log(f"{sid}: cannot observe run #{run.run_no}: {exc!r}")
+                continue
             rc = run.proc.poll()
             if rc is None:
                 continue
@@ -561,7 +703,8 @@ class Scheduler:
 
     def _plan(self, now):
         cfg = self.settings()
-        capacity = int(cfg["max_parallel"]) - len(self.live)
+        # a visible run that waits for the user does not hold a slot: the others go on
+        capacity = int(cfg["max_parallel"]) - sum(1 for r in self.live.values() if not (r.vis and r.vis["waiting"]))
         candidates = []
         for sched in self.scheds:
             if not self._ensure_state(sched):
@@ -767,8 +910,12 @@ class Scheduler:
                 return fail(f"account {label!r}: {profile!r} is not a valid omp profile name")
         note = None
         resume, note = self._resume_file(sched, state, retry, profile, label, chat=chat is not None)
-        mode = "headless" if run["mode"] == "headless" else f"headless/{run['mode']}"  # visible and hybrid fall back
-        sync = S.sync_identity(sched, self.env)
+        want = run["mode"] if chat is None else "headless"   # a talk turn is always headless
+        mode, fallback = want, None
+        if want != "headless":   # the exception: no Hivegrid window to show it in
+            fallback = self._gui_problem()
+            if fallback:
+                mode = f"headless/{want}"
         runs = S.read_runs(sdir)
         mem = None
         if sched["identity"]["memory"]:
@@ -778,13 +925,30 @@ class Scheduler:
         if retry and retry.get("resume_file") and resume:
             prompt = ("Your previous attempt stopped because the account hit its usage limit; the conversation so far "
                       "is that attempt. Continue it and finish the task.\n\n" + prompt)
-        argv = self._argv(sched, profile, sync, sdir, resume, self._session_spend(resume) if resume else 0.0)
-        env = self._child_env(sched, run_no, profile)
         cwd = os.path.expanduser(run["cwd"])
         if not os.path.isdir(cwd):
             return fail(f"cwd {cwd} does not exist")
         started = self.clock()
+        if mode == "visible":
+            try:
+                pane, argv, exit_file = self._open_pane(sched, run_no, profile, resume, sdir, prompt, cwd)
+            except (GuiError, OSError) as exc:
+                mode, fallback = "headless/visible", str(exc) or type(exc).__name__
+            else:
+                r = Run(sched, run_no, trigger, attempt, started, profile, label, argv, mode, resume, note)
+                r.vis = self._new_vis(pane, started, resume, exit_file)
+                r.no_retry = True   # the pane stays open for the user: the retry policy would open a second one
+                self.live[sid] = r
+                S.update_state(sdir, lambda st: st.update(running={"run": run_no, "pid": None, "started": started,
+                                                                   "visible": self._vis_doc(r)}))
+                self.log(f"{sid}: started run #{run_no} ({trigger}, attempt {attempt}) in pane {pane} of the Bots window")
+                return
+        sync = S.sync_identity(sched, self.env)
+        argv = self._argv(sched, profile, sync, sdir, resume, self._session_spend(resume) if resume else 0.0)
+        env = self._child_env(sched, run_no, profile)
         r = Run(sched, run_no, trigger, attempt, started, profile, label, argv, mode, resume, note)
+        r.hybrid = mode == "hybrid"
+        r.mode_fallback = fallback
         try:
             proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, start_new_session=True, close_fds=True)
@@ -819,14 +983,20 @@ class Scheduler:
             return 0.0
         return total
 
-    def _argv(self, sched, profile, identity_path, sdir, resume, spent=0.0):
+    def _argv(self, sched, profile, identity_path, sdir, resume, spent=0.0, interactive=False):
+        """The omp command line of a run. `interactive` is the attended one (a visible run, a hybrid takeover): no
+        `--mode json -p` (the pane is the UI) and no `--max-time` (the daemon counts the working time); the
+        permissions, thinking, model, identity and directories are the same as the headless run's."""
         run = sched["run"]
         argv = [self.omp_bin()]
         if profile:
             argv += ["--profile", profile]
         cap = run["max_cost_usd"] + spent   # a resumed session counts what it already cost
-        argv += ["--mode", "json", "-p", "--max-time", str(int(run["max_time_s"])),
-                 "--max-cost", f"{cap:g}" if not spent else f"{cap:.4f}"]
+        cost = f"{cap:g}" if not spent else f"{cap:.4f}"
+        if interactive:
+            argv += ["--max-cost", cost]
+        else:
+            argv += ["--mode", "json", "-p", "--max-time", str(int(run["max_time_s"])), "--max-cost", cost]
         perms = run["permissions"]
         if perms == "readonly":
             argv += ["--tools", READONLY_TOOLS, "--approval-mode", "write"]
@@ -844,14 +1014,71 @@ class Scheduler:
             argv += ["--resume", resume]
         return argv
 
+    def _run_vars(self, sched, run_no):
+        return {"HIVEGRID_SCHEDULE": sched["id"], "HIVEGRID_RUN": str(run_no),
+                "HIVEGRID_RUN_REPORT": S.report_path(sched["id"], run_no, self.env)}
+
     def _child_env(self, sched, run_no, profile):
         env = {k: v for k, v in self.env.items() if not k.startswith("WEZTERM_")}
         for k in SCRUB:
             env.pop(k, None)
-        env["HIVEGRID_SCHEDULE"] = sched["id"]
-        env["HIVEGRID_RUN"] = str(run_no)
-        env["HIVEGRID_RUN_REPORT"] = S.report_path(sched["id"], run_no, self.env)
+        env.update(self._run_vars(sched, run_no))
         return env
+
+    # ---- a pane for the user (visible runs and takeovers)
+
+    def gui(self):
+        if self._gui is None:
+            self._gui = Gui(self.env)
+        return self._gui
+
+    def _gui_problem(self):
+        try:
+            return self.gui().problem()
+        except (GuiError, OSError, ValueError) as exc:
+            return str(exc) or type(exc).__name__
+
+    def _pane_line(self, argv, sched, run_no, exit_file):
+        """The shell line a pane runs: `argv` under the run's environment (the pane has the GUI's own: WEZTERM_PANE for
+        the state extension stays, the parent omp's profile variables go) and its exit status in `exit_file`."""
+        words = ["env"]
+        for k in SCRUB:
+            words += ["-u", k]
+        words += [f"{k}={v}" for k, v in self._run_vars(sched, run_no).items()]
+        line = " ".join(shlex.quote(w) for w in words + argv)
+        return f"{line}; rc=$?; printf '%s\\n' \"$rc\" > {shlex.quote(exit_file)}"
+
+    def _write_prompt(self, sdir, run_no, name, text):
+        """The first message of a pane's omp (`omp ... @file`), kept in `prompts/` (the newest PROMPTS_KEPT runs)."""
+        pdir = os.path.join(sdir, "prompts")
+        S.ensure_private_dir(pdir)
+        path = os.path.join(pdir, name)
+        S.atomic_write(path, text)
+        try:
+            nums = sorted({int(m.group(1)) for n in os.listdir(pdir) if (m := re.match(r"run-(\d+)", n))})
+            for n in os.listdir(pdir):
+                m = re.match(r"run-(\d+)", n)
+                if m and int(m.group(1)) in nums[:-PROMPTS_KEPT]:
+                    os.unlink(os.path.join(pdir, n))
+        except OSError:
+            pass
+        return path
+
+    def _open_pane(self, sched, run_no, profile, resume, sdir, prompt, cwd, takeover=False):
+        """Open the interactive omp of a run in the Bots window. Returns (pane id, argv, exit file); GuiError when
+        the pane cannot be opened."""
+        sync = S.sync_identity(sched, self.env, visible=True)
+        tag = "-takeover" if takeover else ""
+        argv = self._argv(sched, profile, sync, sdir, resume, self._session_spend(resume) if resume else 0.0,
+                          interactive=True) + ["@" + self._write_prompt(sdir, run_no, f"run-{run_no}{tag}.md", prompt)]
+        exit_file = os.path.join(sdir, f"run-{run_no}{tag}.exit")
+        with contextlib.suppress(OSError):
+            os.unlink(exit_file)
+        title = S.clean_line(f"{BOT_TAB_PREFIX}{sched['name']} #{run_no}{' takeover' if takeover else ''}", 48)
+        gui = self.gui()
+        pane = gui.open_tab(["bash", "-ic", self._pane_line(argv, sched, run_no, exit_file) + "; exec bash"], cwd, title)
+        gui.forget(pane)
+        return pane, argv, exit_file
 
     def _spawn_threads(self, run, prompt):
         proc = run.proc
@@ -969,7 +1196,6 @@ class Scheduler:
     @staticmethod
     def _session_limit(path):
         """`A.limit_of_entry` of the last message entry of a session file (its last SESSION_TAIL bytes)."""
-        import hivegrid_agents as A
         try:
             size = os.path.getsize(path)
             with open(path, "rb") as f:
@@ -1007,7 +1233,6 @@ class Scheduler:
         if run.killed is None and rc != 3 and (rc != 0 or stream.last_stop in ("error", "aborted")):
             limit = self._session_limit(session_file) if session_file else None
             if limit is None and stream.last_assistant:
-                import hivegrid_agents as A
                 limit = A.limit_of_entry({"type": "message", "message": stream.last_assistant})
         elapsed = ended - run.started
         killed = run.killed or ("stop" if self.stopping and rc is not None and rc < 0 else None)
@@ -1018,6 +1243,14 @@ class Scheduler:
             error = f"{error}: {hint[:300]}" if hint else error
         if run.note:
             error = f"{error}; {run.note}" if error else run.note
+        return self._record(run, rc, ended, status, error, session_file, limit)
+
+    def _record(self, run, rc, ended, status, error, session_file, limit):
+        """Write down a finished run: its report, the record, the state (breaker, retry plan) and the notification.
+        The headless runs come here from `_finish`, the visible ones from `_end_visible`."""
+        sched, sid = run.sched, run.sched["id"]
+        sdir = self.sdir(sid)
+        stream = run.stream
         if run.chat:   # a chat turn: the reply is its summary; no report file, no level, nothing for the briefing
             report_file, report, parsed = None, None, None
             summary = stream.text[:200] if stream.text else None
@@ -1032,6 +1265,9 @@ class Scheduler:
                        else report if report else stream.text) or None
         self._write_log(sdir, run, rc, error)
         headline = (parsed["headline"] or None) if parsed else None   # a failed run gets its automatic one in append_run
+        takeover = None
+        if run.hybrid and not run.chat and status in ("failed", "timeout"):
+            takeover = self._takeover(run, status, error, session_file)   # the unattended run could not go on
         rec = {"run": run.run_no, "schedule": sid, "trigger": run.trigger, "mode": run.mode, "started": run.started,
                "ended": ended, "status": status, "attempt": run.attempt, "exit": rc, "profile": run.profile,
                "model": sched["run"]["model"] or stream.model, "session_file": session_file,
@@ -1039,7 +1275,10 @@ class Scheduler:
                "tokens": dict(stream.tokens) or None, "summary": summary[:S.SUMMARY_MAX] if summary else None,
                "report_path": report_file if report is not None else None, "error": error,
                "reset_at": limit["reset_at"] if limit else None,
-               "level": parsed["level"] if parsed else "none", "headline": headline}
+               "level": parsed["level"] if parsed else "none", "headline": headline,
+               "mode_fallback": run.mode_fallback}
+        if takeover is not None:   # failed and timeout are always `important` and unseen: the bot needs a look
+            rec["takeover"] = {"pane": takeover}
         rec = S.append_run(sdir, rec, sched["name"])
         accounts, fallback = None, None
         if status == "limit":
@@ -1066,7 +1305,7 @@ class Scheduler:
             if st.get("paused_reason"):
                 st["retry"] = None
                 return st
-            at = S.retry_plan(sched, rec, run.attempt, ended, self.jitter)
+            at = None if (run.no_retry or takeover is not None) else S.retry_plan(sched, rec, run.attempt, ended, self.jitter)
             if at is not None:
                 retry = {"at": int(at), "attempt": run.attempt + 1, "account": None, "resume_file": None,
                          "from_profile": None}
@@ -1085,6 +1324,251 @@ class Scheduler:
         if not run.chat and (not retrying or status == "limit"):
             self._notify(sched, rec, retry_at=retrying[0] if retrying else None)
         return rec
+
+    # ---- hybrid: the session goes to the user
+
+    def _takeover(self, run, status, error, session_file):
+        """The pane id of the Bots window tab that now holds the unattended run's session (`omp --resume`, first message
+        "The unattended run stopped: ..."), or None when no pane could be opened (the reason lands in the record's
+        `mode_fallback` and the retry policy goes on as for any headless run)."""
+        sched = run.sched
+        why = S.clean_line(error or status, 300).rstrip(".")
+        prompt = f"The unattended run stopped: {why}. Please continue or tell me what you need.\n"
+        resume = session_file if session_file and os.path.isfile(session_file) else None
+        cwd = os.path.expanduser(sched["run"]["cwd"])
+        if not os.path.isdir(cwd):
+            cwd = self.env.get("HOME") or os.path.expanduser("~")
+        try:
+            pane, _argv, _exit = self._open_pane(sched, run.run_no, run.profile, resume, self.sdir(sched["id"]), prompt,
+                                                 cwd, takeover=True)
+        except (GuiError, OSError) as exc:
+            run.mode_fallback = f"no pane for the takeover: {exc or type(exc).__name__}"
+            return None
+        self.log(f"{sched['id']}: run #{run.run_no} {status}; its session is open in pane {pane} for you")
+        return pane
+
+    # ---- visible runs: observed, never signalled
+
+    def _new_vis(self, pane, started, resume, exit_file):
+        size0 = 0
+        if resume:
+            with contextlib.suppress(OSError):
+                size0 = os.path.getsize(resume)   # a resumed session: only what happens now is this run's cost
+        return {"pane": pane, "opened": started, "last": started, "worked": 0.0, "waited": 0.0, "seen_working": False,
+                "done_since": None, "gone_at": None, "waiting": False, "session": resume, "session_id": None,
+                "offset": size0, "offset0": size0, "list_at": started, "mux_down": None, "saved": started,
+                "exit_file": exit_file, "cat": None}
+
+    @staticmethod
+    def _vis_doc(run):
+        """What state.json keeps of a visible run, so a restarted scheduler picks it up again."""
+        v = run.vis
+        doc = {k: v[k] for k in ("pane", "opened", "worked", "waited", "seen_working", "session", "offset0", "exit_file")}
+        doc.update(trigger=run.trigger, attempt=run.attempt, profile=run.profile, label=run.label, mode=run.mode,
+                   resume=run.resume_file, note=run.note)
+        return doc
+
+    def _vis_save(self, run, now):
+        v = run.vis
+        v["saved"] = now
+        doc, waiting = self._vis_doc(run), v["waiting"]
+
+        def fn(st):
+            cur = st.get("running")
+            if isinstance(cur, dict) and cur.get("run") == run.run_no:
+                cur = dict(cur, visible=doc)
+                if waiting:
+                    cur["waiting"] = True   # the Bots summary shows the bot as needing the user
+                else:
+                    cur.pop("waiting", None)
+                st["running"] = cur
+        S.update_state(self.sdir(run.sched["id"]), fn)
+        self._dirty = True
+
+    def _adopt_visible(self, sched, running, now):
+        """A visible run a previous scheduler left in `running`: observed again when its pane is still there."""
+        doc = running.get("visible")
+        if not isinstance(doc, dict) or isinstance(doc.get("pane"), bool) or not isinstance(doc.get("pane"), int):
+            return False
+        ids = self._pane_ids()
+        if ids is None or doc["pane"] not in ids:
+            return False
+        started = running.get("started") if isinstance(running.get("started"), (int, float)) else now
+        r = Run(sched, running["run"], doc.get("trigger") or "cron", int(doc.get("attempt") or 1), started,
+                doc.get("profile"), doc.get("label"), [], doc.get("mode") or "visible", doc.get("resume"), doc.get("note"))
+        v = self._new_vis(doc["pane"], now, doc.get("resume"), doc.get("exit_file") or "")
+        v.update(opened=doc.get("opened") or started, worked=float(doc.get("worked") or 0),
+                 waited=float(doc.get("waited") or 0), seen_working=bool(doc.get("seen_working")),
+                 session=doc.get("session"), offset=int(doc.get("offset0") or 0), offset0=int(doc.get("offset0") or 0),
+                 waiting=bool(running.get("waiting")))
+        r.vis, r.no_retry = v, True
+        self.live[sched["id"]] = r
+        self.log(f"{sched['id']}: run #{r.run_no} is still open in pane {v['pane']}; observing it again")
+        return True
+
+    def _pane_ids(self):
+        try:
+            panes = self.gui().panes()
+        except (GuiError, OSError, ValueError):
+            return None
+        return None if panes is None else {p["pane_id"] for p in panes}
+
+    @staticmethod
+    def _exit_status(v):
+        """The exit status the pane's shell line wrote when omp quit, else None."""
+        try:
+            with open(v["exit_file"], encoding="utf-8") as f:
+                return int(f.read(32).strip())
+        except (OSError, ValueError):
+            return None
+
+    def _ingest(self, run, doc):
+        """Feed the entries the session file gained since the last look into the run's stream (cost, text, stop reason)."""
+        v = run.vis
+        if doc:
+            sf = doc.get("sessionFile")
+            if isinstance(sf, str) and os.path.isabs(sf) and sf.endswith(".jsonl") and "\0" not in sf and sf != v["session"]:
+                v["session"], v["offset"] = sf, 0
+            if isinstance(doc.get("sessionId"), str):
+                v["session_id"] = doc["sessionId"]
+        path = v["session"]
+        if not path:
+            return
+        try:
+            size = os.path.getsize(path)
+            if size <= v["offset"]:
+                return
+            with open(path, "rb") as f:
+                f.seek(v["offset"])
+                data = f.read(min(size - v["offset"], VISIBLE_SESSION_READ))
+        except OSError:
+            return
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return
+        v["offset"] += cut + 1
+        for raw in data[:cut].split(b"\n"):
+            if b'"message"' not in raw and b'"session"' not in raw:
+                continue
+            try:
+                run.stream.feed_entry(json.loads(raw))
+            except (ValueError, RecursionError):
+                continue
+
+    def _visible_limit(self, run, doc):
+        v, stream = run.vis, run.stream
+        limit = self._session_limit(v["session"]) if v["session"] else None
+        if limit is None and doc and isinstance(doc.get("limit"), dict):
+            limit = A.parse_limit(doc["limit"])
+        if limit is None and stream.last_assistant:
+            limit = A.limit_of_entry({"type": "message", "message": stream.last_assistant})
+        return limit
+
+    def _turn_outcome(self, run, rc, doc):
+        """(status, error, limit) of a visible run whose agent finished its turn (rc 0) or quit (rc its exit status)."""
+        stream, max_time = run.stream, run.sched["run"]["max_time_s"]
+        if rc in (0, None) and stream.last_stop == "aborted":
+            return "cancelled", S.CANCELLED_BY_USER + " (the turn was interrupted)", None
+        failing = rc not in (0, None) or stream.last_stop in ("error", "aborted")
+        limit = self._visible_limit(run, doc) if failing and rc != 3 else None
+        status, error = classify(exit_code=0 if rc is None else rc, stream=stream, elapsed=None, max_time=max_time,
+                                 killed=None, limit=limit)
+        if status == "failed" and stream.has_cost and stream.cost >= 0.999 * run.sched["run"]["max_cost_usd"]:
+            status, error = "cost", "the run stopped at its max_cost_usd"
+        return status, error, limit
+
+    def _end_visible(self, run, now, status, error, rc=None, limit=None):
+        v, sid = run.vis, run.sched["id"]
+        self.live.pop(sid, None)
+        if run.stream.session_id is None:
+            run.stream.session_id = v.get("session_id")
+        session_file = v["session"] if v["session"] and os.path.isfile(v["session"]) else None
+        self._dirty = True
+        self.wake.set()
+        return self._record(run, rc, now, status, error, session_file, limit)
+
+    def _set_waiting(self, run, waiting, now):
+        if run.vis["waiting"] != waiting:
+            run.vis["waiting"] = waiting
+            self._vis_save(run, now)
+
+    def _observe(self, run, now):
+        """One look at a visible run: the time it worked and waited for the user, the session file, the pane's agent
+        state. The run is recorded (and True returned) when its agent finished, hit the usage limit or a cap, quit
+        or lost its pane. Nothing is ever sent to the pane, and nothing kills it."""
+        v, sched = run.vis, run.sched
+        gap = max(now - v["last"], 0.0)   # the time since the last look belonged to the state seen then
+        v["last"] = now
+        if v["cat"] == "work":
+            v["worked"] += min(gap, VISIBLE_DT_MAX_S)   # a machine that slept did not work
+        elif v["cat"] == "wait":
+            v["waited"] += gap
+        if run.killed == "cancel":    # the user cancelled the run in the Bots page: stop tracking, the pane stays
+            self._end_visible(run, now, "cancelled", S.CANCELLED_BY_USER)
+            return True
+        doc = self.gui().agent(v["pane"])
+        self._ingest(run, doc)
+        rc = self._exit_status(v)
+        state = doc["state"] if doc else None
+        if rc is not None or (doc is not None and (not doc["alive"] or state == "exited")):   # omp has quit
+            v["gone_at"] = v["gone_at"] or now
+            if rc is None and now - v["gone_at"] < VISIBLE_EXIT_GRACE_S:
+                return False   # its pane's shell is writing the exit status
+            finished = v["seen_working"] or v["done_since"] is not None or run.stream.last_stop is not None
+            if rc == 0 and not finished:
+                self._end_visible(run, now, "cancelled", S.CANCELLED_BY_USER + " (omp was quit before the run did anything)", rc)
+                return True
+            status, error, limit = self._turn_outcome(run, rc if rc is not None else (0 if finished else 1), doc)
+            if rc is None and not finished:
+                error = "omp left its pane before the run finished"
+            self._end_visible(run, now, status, error, rc, limit)
+            return True
+        if state == "limit":
+            self._end_visible(run, now, "limit", "usage limit of the account", limit=self._visible_limit(run, doc))
+            return True
+        if now - v["list_at"] >= VISIBLE_LIST_EVERY_S:   # is the pane still there?
+            v["list_at"] = now
+            ids = self._pane_ids()
+            v["mux_down"] = (v["mux_down"] or now) if ids is None else None
+            if (ids is not None and v["pane"] not in ids) or (v["mux_down"] is not None and now - v["mux_down"] >= VISIBLE_MUX_DOWN_S):
+                if v["done_since"] is not None:   # closed right after the turn ended
+                    status, error, limit = self._turn_outcome(run, 0, doc)
+                else:
+                    status, error, limit = "failed", "its pane was closed before the run finished", None
+                self._end_visible(run, now, status, error, limit=limit)
+                return True
+        v["cat"] = None
+        if state in ("working", "busy"):
+            v.update(seen_working=True, done_since=None, cat="work")
+            self._set_waiting(run, False, now)
+        elif state == "attention":   # the agent asked a question or for an approval: the user is needed, nothing failed
+            v.update(seen_working=True, done_since=None, cat="wait")
+            self._set_waiting(run, True, now)
+        elif state in ("done", "idle") and (state == "done" or v["seen_working"]):
+            self._set_waiting(run, False, now)
+            if v["done_since"] is None:
+                v["done_since"] = now
+            elif now - v["done_since"] >= VISIBLE_SETTLE_S:
+                status, error, limit = self._turn_outcome(run, 0, doc)
+                self._end_visible(run, now, status, error, rc=0 if status == "ok" else None, limit=limit)
+                return True
+        elif now - v["opened"] >= VISIBLE_START_S:
+            if state == "idle":   # omp never started the first message: it waits for the user (a login, a model to choose)
+                v["cat"] = "wait"
+                self._set_waiting(run, True, now)
+            else:                 # omp reports no state at all: only the time cap can end this run
+                v["cat"] = "work"
+        if v["worked"] >= sched["run"]["max_time_s"]:
+            self._end_visible(run, now, "timeout", f"the run used its max_time_s ({sched['run']['max_time_s']} s of working time); "
+                                                  "its pane is left open")
+            return True
+        if v["waited"] >= VISIBLE_WAIT_CAP_S:
+            self._end_visible(run, now, "timeout", f"no answer after waiting {VISIBLE_WAIT_CAP_S // 3600} h for you; "
+                                                  "its pane is left open")
+            return True
+        if now - v["saved"] >= VISIBLE_SAVE_S:
+            self._vis_save(run, now)
+        return False
 
     @staticmethod
     def _read_report(path):

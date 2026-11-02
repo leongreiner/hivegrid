@@ -36,6 +36,7 @@ AGENT_PROCS = {"omp", "claude", "codex", "gemini", "aider", "opencode"}
 # config/overview.lua) and the panels.
 CHROME_MARKERS = ("hivegrid-overview", "hivegrid-bar", "hivegrid-git", "hivegrid-panel", "hivegrid-remote attach")
 TERMINAL_MARKER = "hivegrid-remote attach"     # the pane that shows a phone terminal on the host (hivegrid_remote_attach.py)
+BOT_TAB_PREFIX = "Bot \u00b7 "                  # tab title of a visible bot run; the window holding such tabs is the Bots window (hivegrid_scheduler.py)
 CHROME_PROGS = {"yazi", "lazygit"}
 
 # Mirrors config/agentstatus.lua TITLE_WORKING / SPIN.
@@ -873,6 +874,8 @@ def origin(run=wezterm_cli):
         p = byid.get(pane_id)
         if p and TERMINAL_MARKER in fg.get(_tty(p), (None, "", 0, ""))[3]:
             return None     # a phone terminal's window is never where new agents go
+        if p and str(p.get("tab_title") or "").startswith(BOT_TAB_PREFIX):
+            return None     # nor the Bots window of the visible bot runs
         return (p["pane_id"], int(p.get("tab_id", 0)), int(p.get("window_id", 0))) if p else None
 
     for name in ("HIVEGRID_ORIGIN_PANE", "WEZTERM_PANE"):

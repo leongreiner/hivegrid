@@ -95,6 +95,7 @@ MAX_FONT = 16 * 1024 * 1024
 TAIL_TTL = 1.0             # a pane's screen text is reused this long by the held tail requests that watch it
 SESSION_BURST, SESSION_EVERY = 3, 5.0     # starting a session: 3 at once, then one per 5 seconds
 BOT_BURST, BOT_EVERY = 5, 3.0               # creating, editing and deleting bots: 5 at once, then one per 3 seconds
+BOT_SEEN_BURST, BOT_SEEN_EVERY = 8, 0.5        # swiping reports away: 8 at once, then two per second (inside the general write bucket)
 BOT_SAY_BURST, BOT_SAY_EVERY = 5, 4.0       # talking to a bot (each message is an omp turn): 5 at once, then one per 4 seconds
 SESSION_REPEAT = 10.0      # the same directory and account is not started twice within this many seconds
 ACCOUNT_BURST, ACCOUNT_EVERY = 2, 10.0   # moving a chat to another account: 2 at once, then one per 10 seconds
@@ -972,6 +973,7 @@ class App:
         self.session_bucket = Bucket(1.0 / SESSION_EVERY, SESSION_BURST, clock)
         self.bot_bucket = Bucket(1.0 / BOT_EVERY, BOT_BURST, clock)      # creating, editing and deleting bots
         self.bot_run_bucket = Bucket(1.0 / BOT_EVERY, BOT_BURST, clock)  # run now: every run costs money
+        self.bot_seen_bucket = Bucket(1.0 / BOT_SEEN_EVERY, BOT_SEEN_BURST, clock)   # reading and swiping away reports of the briefing
         self.bot_say_bucket = Bucket(1.0 / BOT_SAY_EVERY, BOT_SAY_BURST, clock)   # talking to a bot starts an omp turn
         self._session_lock = threading.Lock()
         self._session_recent = {}                   # (directory, profile) -> when it was last started
@@ -1183,7 +1185,7 @@ class App:
 
         fm = re.fullmatch(r"/api/agents/([^/]+)/files(?:/([^/]+))?", path)
         hm = re.fullmatch(r"/api/history/([0-9a-f]{24})/revive", path)
-        bm = re.fullmatch(r"/api/bots/([a-z0-9-]{3,32})(?:/(runs|run|pause|resume|skip|cancel|ack|delete|say|conversation)|/runs/([0-9]{1,9}))?", path)
+        bm = re.fullmatch(r"/api/bots/([a-z0-9-]{3,32})(?:/(runs|run|pause|resume|skip|unskip|cancel|ack|delete|say|conversation)|/runs/([0-9]{1,9}))?", path)
         m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|git|prompt|keys|plan|ack|model|thinking|account|quit|upload)", path)
         if path in self.GET_ROUTES or path in self.POST_ROUTES:
             action, ident = ("bot-create" if path == "/api/bots" and req.method == "POST" else path), None
@@ -1873,10 +1875,11 @@ class App:
                 self._written("bot-delete", ident, 0)
                 return Response(200, _json_body({"ok": True}))
             if action == "/api/bots/briefing/seen":
-                self._fields(body, ())
-                self._bot_gate()
-                result = self.bots.briefing_seen()
-                self._written("bot-briefing-seen", "-", 0)
+                if not body:
+                    raise HttpError("bad_request", "say what to mark: {\"all\": true} or {\"id\", \"run\"}")
+                self._spend(self.bot_seen_bucket, "too many reports marked: wait a moment")
+                result = self.bots.briefing_seen(body)
+                self._written("bot-briefing-seen", body.get("id", "all"), 0)
                 return Response(200, _json_body({"ok": True, **result}))
             if action == "bot-say":
                 self._fields(body, ("text",))

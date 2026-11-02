@@ -20,6 +20,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import time
@@ -54,7 +55,7 @@ CREATE_FIELDS = ("name", "kind", "prompt", "when", "dir", "account", "mode", "no
                  "max_cost_usd", "identity")
 EDIT_FIELDS = tuple(f for f in CREATE_FIELDS if f != "kind")
 REQUIRED = ("name", "prompt", "when", "dir", "max_time_s", "max_cost_usd")
-VERBS = ("run", "pause", "resume", "skip", "cancel", "ack")
+VERBS = ("run", "pause", "resume", "skip", "unskip", "cancel", "ack")
 
 
 class Refused(Exception):
@@ -129,13 +130,14 @@ class Bots:
         return {"alive": -CLOCK_SLACK_S <= age <= S.HEARTBEAT_MAX_AGE_S, "heartbeat": hb, "age_s": int(max(age, 0))}
 
     def _can(self, rec, st, item, alive, readonly):
-        keys = ("run", "skip", "pause", "resume", "cancel", "edit", "delete", "ack")
+        keys = ("run", "skip", "unskip", "pause", "resume", "cancel", "edit", "delete", "ack")
         if readonly:
             return {k: False for k in keys}
         running = item["running"]
         full = rec["run"]["permissions"] == "full"
         return {"run": not running,
                 "skip": bool(rec["enabled"]) and item["next_at"] is not None and not st.get("done"),
+                "unskip": item["skipped_at"] is not None,
                 "pause": bool(rec["enabled"]),
                 "resume": not rec["enabled"] or bool(st.get("paused_reason")) or bool(st.get("done")),
                 "cancel": running and alive, "edit": not full, "delete": not running, "ack": item["unseen"] > 0}
@@ -152,13 +154,15 @@ class Bots:
                                                "summary": san(last["summary"], 300), "seen": last["seen"],
                                                "level": last.get("level") if last.get("level") in LEVELS else None,
                                                "headline": san(last["headline"], HEADLINE_MAX) if last.get("headline") else None},
-            "running": summary_item["running"], "running_since": running.get("started") if running else None,
+            "running": summary_item["running"], "waiting": bool(summary_item.get("waiting")),
+            "running_since": running.get("started") if running else None,
             "attention": summary_item["attention"], "unseen": unseen,
             "paused_reason": san(summary_item["paused_reason"], 200) if summary_item["paused_reason"] else None,
             "done": bool(st.get("done")), "permissions": rec["run"]["permissions"], "mode": rec["run"]["mode"],
             "account": san(rec["run"]["account"], 100) if rec["run"]["account"] else None,
             "dir": san(D._shown(rec["run"]["cwd"], self.home), 200), "origin": rec["origin"],
             "notify": bool(rec["notify"]["on"]),
+            "skipped_at": S.skipped_slot(rec, st, self.wall()),
         }
         item["can"] = self._can(rec, st, item, alive, readonly)
         return item
@@ -493,6 +497,14 @@ class Bots:
             else:
                 S.update_state(S.init_state_dir(rec, now, self.env), lambda s: S.skip_next(rec, s, now))
             return {"queued": not alive}
+        if verb == "unskip":
+            if S.skipped_slot(rec, st, now) is None:
+                raise Refused("conflict", "there is no skipped run to bring back")
+            if alive:
+                self._poke("unskip", bid, now)
+            else:
+                S.update_state(S.init_state_dir(rec, now, self.env), lambda s: S.unskip(rec, s, now))
+            return {"queued": not alive}
         if verb == "cancel":
             if not running:
                 raise Refused("conflict", "no run is live")
@@ -591,13 +603,38 @@ class Bots:
     def briefing(self, now):
         """`GET /api/bots/briefing`: `{entries (newest first), unseen, total, rev}`. `rev` leaves out the clock."""
         try:
-            entries = [self._entry(e) for e in S.briefing(self.env, limit=BRIEFING_LIMIT, include_seen=True)]
+            every = S.briefing(self.env, limit=0)
+            unread = [e for e in every if not e["seen"]]
+            read = [e for e in every if e["seen"]][:max(0, BRIEFING_LIMIT - len(unread))]    # every unread one, then the newest read ones
+            entries = [self._entry(e) for e in sorted(unread + read, key=lambda e: (e["ended"] or 0, e["run"] or 0), reverse=True)]
             counts = S.briefing_counts(self.env)
         except S.ScheduleError:
             raise Refused("internal", "the schedules file cannot be used: run `hivegrid-schedule doctor` on the laptop") from None
         out = {"unseen": counts["unseen"], "total": counts["total"], "entries": entries}
         return {"v": 1, "now": now, "rev": _rev(out), **out}
 
-    def briefing_seen(self):
-        """`POST /api/bots/briefing/seen`: every report in the briefing is read."""
-        return {"marked": S.mark_briefing_seen(self.env)}
+    def briefing_seen(self, body):
+        """`POST /api/bots/briefing/seen`: `{"all": true}` marks every report read; `{"id", "run"}` one report (a swipe away);
+        `{"id", "run", "unseen": true}` takes that back (undo). Only reports that are in the briefing can be changed."""
+        extra = sorted(set(body) - {"all", "id", "run", "unseen"})
+        if extra:
+            raise Refused("bad_request", f"unknown field: {self.san_line(str(extra[0]), 40)}")
+        if body.get("all") is not None:
+            if body.get("all") is not True or set(body) != {"all"}:
+                raise Refused("bad_request", "all must be true and stand alone")
+            return {"marked": S.mark_briefing_seen(self.env)}
+        bid, run, undo = body.get("id"), body.get("run"), body.get("unseen", False)
+        if not isinstance(bid, str) or not re.fullmatch(r"[a-z0-9-]{3,32}", bid):
+            raise Refused("bad_request", "id must be the id of a bot")
+        if isinstance(run, bool) or not isinstance(run, int) or not 1 <= run < 1 << 30:
+            raise Refused("bad_request", "run must be the number of a run")
+        if not isinstance(undo, bool):
+            raise Refused("bad_request", "unseen must be true or false")
+        self._rec(bid)
+        try:
+            entries = S.briefing(self.env, limit=0)
+        except S.ScheduleError:
+            raise Refused("internal", "the schedules file cannot be used: run `hivegrid-schedule doctor` on the laptop") from None
+        if not any(e["bot_id"] == bid and e["run"] == run for e in entries):
+            raise Refused("not_found", "no such report")
+        return {"marked": S.mark_unseen(bid, run, env=self.env) if undo else S.mark_seen(bid, run, env=self.env)}

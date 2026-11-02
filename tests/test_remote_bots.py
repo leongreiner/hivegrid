@@ -87,8 +87,9 @@ class TestBotList(BotCase):
         self.assertEqual((item["last"]["status"], item["last"]["summary"], item["last"]["seen"]), ("ok", "all good", False))
         self.assertEqual((item["permissions"], item["mode"], item["dir"], item["notify"], item["origin"]), ("edit", "headless", "~/work", True, "cli"))
         self.assertIsInstance(item["next_at"], int)
-        self.assertEqual(item["can"], {"run": True, "skip": True, "pause": True, "resume": False, "cancel": False, "edit": True,
-                                       "delete": True, "ack": True})
+        self.assertEqual(item["can"], {"run": True, "skip": True, "unskip": False, "pause": True, "resume": False, "cancel": False,
+                                       "edit": True, "delete": True, "ack": True})
+        self.assertIsNone(item["skipped_at"])
         self.assertNotIn(self.home, json.dumps(data), "directories are shown as ~/...")
 
     def test_states_follow_the_scheduler_summary_and_count_unseen_runs(self):
@@ -565,6 +566,32 @@ class TestBotActions(BotCase):
         self.store.change(rec["id"], {"enabled": False}, now=NOW)
         self.assertEqual(self.do(rec, "skip")[0].status, 409)
 
+    def test_a_skipped_run_can_be_brought_back_through_the_state_or_the_scheduler(self):
+        rec = self.bot()
+        self.assertEqual(self.do(rec, "unskip")[0].status, 409, "nothing was skipped")
+        before = self.state(rec).get("last_slot")
+        self.do(rec, "skip")
+        item = self.call("GET", "/api/bots")[1]["bots"][0]
+        self.assertIsInstance(item["skipped_at"], int)
+        self.assertEqual((item["can"]["unskip"], item["can"]["skip"]), (True, True))
+        r, data = self.do(rec, "unskip")
+        self.assertEqual((r.status, data), (200, {"ok": True, "queued": True}))
+        self.assertEqual(self.state(rec).get("last_slot"), before, "no scheduler: the slot is due again")
+        self.assertIsNone(self.call("GET", "/api/bots")[1]["bots"][0]["skipped_at"])
+        self.assertEqual(self.do(rec, "unskip")[0].status, 409)
+        self.do(rec, "skip")            # recorded in the state (no scheduler yet) ...
+        self.beat()                     # ... and now the scheduler is up: it is told to bring it back
+        self.assertEqual(self.do(rec, "unskip")[1], {"ok": True, "queued": False})
+        self.assertEqual(self.commands(), [{"op": "unskip", "id": rec["id"]}])
+
+    def test_unskip_needs_a_known_bot_and_is_refused_read_only(self):
+        rec = self.bot()
+        self.do(rec, "skip")
+        self.assertEqual(self.post("/api/bots/nope-abc/unskip", {})[0].status, 404)
+        r, data = self.do(rec, "unskip", app=self.readonly_app())
+        self.assertEqual((r.status, data["error"]), (403, "readonly"))
+        self.assertIsNotNone(self.call("GET", "/api/bots")[1]["bots"][0]["skipped_at"])
+
     def test_cancel_needs_a_live_run_and_a_live_scheduler(self):
         rec = self.bot()
         self.beat()
@@ -636,7 +663,7 @@ class TestBotActions(BotCase):
     def test_read_only_refuses_every_action(self):
         rec = self.bot()
         app = self.readonly_app()
-        for verb, body in (("run", {}), ("skip", {}), ("cancel", {}), ("pause", {}), ("resume", {}), ("ack", {}), ("delete", {"confirm": True})):
+        for verb, body in (("run", {}), ("skip", {}), ("unskip", {}), ("cancel", {}), ("pause", {}), ("resume", {}), ("ack", {}), ("delete", {"confirm": True})):
             r, data = self.do(rec, verb, body, app=app)
             self.assertEqual((r.status, data["error"]), (403, "readonly"), verb)
         self.assertEqual((self.state(rec)["run_now"], self.store.get(rec["id"])["enabled"]), (False, True))
@@ -673,7 +700,7 @@ class TestBotBriefing(BotCase):
         self.run_record(self.a, 1, level="important", headline="one", seen=False)
         self.run_record(self.b, 1, level="info", headline="quiet", seen=False)
         self.assertEqual(self.call("GET", "/api/agents")[1]["bots"]["unseen"], 1, "an info report is not a reason for the dot")
-        r, data = self.post("/api/bots/briefing/seen", {})
+        r, data = self.post("/api/bots/briefing/seen", {"all": True})
         self.assertEqual((r.status, data["ok"]), (200, True))
         got = self.call("GET", "/api/bots/briefing")[1]
         self.assertEqual((got["unseen"], got["total"], got["entries"][0]["seen"]), (0, 1, True))
@@ -694,11 +721,58 @@ class TestBotBriefing(BotCase):
         after = self.call("GET", "/api/bots/briefing", headers={"if-none-match": r.headers["ETag"]})[0]
         self.assertEqual(after.status, 200)
 
+    def seen(self, body, **kw):
+        return self.post("/api/bots/briefing/seen", body, **kw)
+
+    def test_one_report_can_be_marked_read_and_taken_back(self):
+        self.run_record(self.a, 1, level="important", headline="one", seen=False)
+        self.run_record(self.a, 2, level="important", headline="two", seen=False)
+        rev0 = self.call("GET", "/api/bots/briefing")[1]["rev"]
+        r, data = self.seen({"id": self.a["id"], "run": 1})
+        self.assertEqual((r.status, data), (200, {"ok": True, "marked": 1}))
+        got = self.call("GET", "/api/bots/briefing")[1]
+        self.assertEqual((got["unseen"], got["total"]), (1, 2))
+        self.assertNotEqual(got["rev"], rev0, "the long poll wakes for the other devices")
+        self.assertEqual({e["run"]: e["seen"] for e in got["entries"]}, {1: True, 2: False})
+        self.assertEqual(self.seen({"id": self.a["id"], "run": 1})[1]["marked"], 0, "already read: nothing changes")
+        self.assertEqual(self.seen({"id": self.a["id"], "run": 1, "unseen": True})[1], {"ok": True, "marked": 1})
+        self.assertEqual(self.call("GET", "/api/bots/briefing")[1]["unseen"], 2)
+        self.assertEqual(self.logs[-1], f"write bot-briefing-seen label={self.a['id']} bytes=0")
+
+    def test_bad_requests_change_nothing(self):
+        self.run_record(self.a, 1, level="important", headline="one", seen=False)
+        self.run_record(self.a, 2, level="info", headline="quiet", seen=False)
+        for body, code in (({}, 400), ({"id": self.a["id"]}, 400), ({"run": 1}, 400), ({"id": "X", "run": 1}, 400), ({"id": self.a["id"], "run": "1"}, 400),
+                           ({"id": self.a["id"], "run": True}, 400), ({"id": self.a["id"], "run": 0}, 400), ({"id": self.a["id"], "run": 1, "unseen": "yes"}, 400),
+                           ({"all": False}, 400), ({"all": True, "id": self.a["id"]}, 400), ({"id": self.a["id"], "run": 1, "x": 1}, 400),
+                           ({"id": "nope-abc", "run": 1}, 404), ({"id": self.a["id"], "run": 99}, 404),
+                           ({"id": self.a["id"], "run": 2}, 404)):
+            self.assertEqual(self.seen(body)[0].status, code, body)
+        self.assertEqual(self.call("GET", "/api/bots/briefing")[1]["unseen"], 1, "an info report is not part of the briefing, so it cannot be marked here either")
+        self.assertEqual(self.seen({"all": True})[1]["marked"], 1)
+
+    def test_swiping_reports_away_has_its_own_bucket(self):
+        for n in range(1, R.BOT_SEEN_BURST + 2):
+            self.run_record(self.a, n, level="important", headline=f"r{n}", seen=False)
+        self.tick = 0
+        codes = [self.seen({"id": self.a["id"], "run": n})[0].status for n in range(1, R.BOT_SEEN_BURST + 2)]
+        self.assertEqual(codes, [200] * R.BOT_SEEN_BURST + [429])
+        self.assertEqual(self.post(f"/api/bots/{self.a['id']}/pause", {})[0].status, 200, "editing is another bucket")
+
+    def test_unread_reports_always_make_the_list_however_many_old_ones_there_are(self):
+        for n in range(1, B.BRIEFING_LIMIT + 6):
+            self.run_record(self.a, n, level="important", headline=f"r{n}", seen=True, ended=NOW - 5000 + n)
+        self.run_record(self.b, 1, level="important", headline="old unread", seen=False, ended=NOW - 9000)
+        got = self.call("GET", "/api/bots/briefing")[1]
+        self.assertEqual(len(got["entries"]), B.BRIEFING_LIMIT)
+        self.assertIn("old unread", [e["headline"] for e in got["entries"]])
+        self.assertEqual((got["unseen"], got["total"]), (1, B.BRIEFING_LIMIT + 6))
+
     def test_seen_is_a_write_and_the_briefing_is_readable_read_only(self):
         self.run_record(self.a, 1, level="important", headline="one", seen=False)
         app = self.readonly_app()
         self.assertEqual(self.call("GET", "/api/bots/briefing", app=app)[0].status, 200)
-        r, data = self.post("/api/bots/briefing/seen", {}, app=app)
+        r, data = self.post("/api/bots/briefing/seen", {"all": True}, app=app)
         self.assertEqual((r.status, data["error"]), (403, "readonly"))
         self.assertEqual(self.call("GET", "/api/bots/briefing")[1]["unseen"], 1)
 
