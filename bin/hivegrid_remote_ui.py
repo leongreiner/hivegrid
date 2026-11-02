@@ -336,6 +336,8 @@ a { color: var(--accent); text-decoration: none; }
 .foot .k { color: var(--text); font-weight: 700; }
 .foot .spacer { flex: 1; }
 .foot button { background: none; border: 0; padding: 0; color: inherit; cursor: pointer; min-height: 44px; display: inline-flex; align-items: center; gap: 1ch; }
+.foot .newbtn { width: 44px; justify-content: center; font-size: 30px; line-height: 1; margin-left: -6px; }
+.foot .newbtn .k { font-weight: 400; }
 
 /* ---------------------------------------------------------------- chat header */
 .chead {
@@ -1385,6 +1387,7 @@ APP_JS = r"""(function () {
     var app = document.getElementById("app");
     app.classList.toggle("ro", !!meta.readonly);
     if (U.ro) { U.ro.hidden = !meta.readonly; }
+    if (U.agentsBtn) { U.agentsBtn.hidden = !(meta.terminal || hasBots()); }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
     if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
     pagerSet((!!meta.terminal || hasBots()) && !EMBED);
@@ -1458,11 +1461,12 @@ APP_JS = r"""(function () {
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
     U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u2261");
+    U.agentsBtn = h("a", { class: "btn ghost icon", href: "#/", "aria-label": "Agents", hidden: !((meta && meta.terminal) || hasBots()) }, "\u25a3");
     U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.termBtn, U.botsBtn, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1610,15 +1614,10 @@ APP_JS = r"""(function () {
     clear(U.foot);
     var needs = agents.filter(function (a) { return a.state === "attention"; }).length;
     var limited = agents.filter(function (a) { return a.state === "limit"; }).length;
-    U.foot.appendChild(h("button", { class: "write", type: "button", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+"), "new session"));
+    U.foot.appendChild(h("button", { class: "write newbtn", type: "button", "aria-label": "New session", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+")));
     U.foot.appendChild(h("span", { class: "spacer" }));
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
-    if (needs + limited === 0) {
-      var swipeHint = pagerOn && window.matchMedia && window.matchMedia("(pointer: coarse)").matches
-        ? " \u00b7 swipe left: " + [meta && meta.terminal ? "terminals" : null, hasBots() ? "bots" : null].filter(Boolean).join(" / ") : "";
-      U.foot.appendChild(h("span", null, "tap an agent to open" + swipeHint));
-    }
   }
 
   // ---------------------------------------------------------------- routing
@@ -1856,6 +1855,10 @@ APP_JS = r"""(function () {
   // A change of page: the pane that comes in slides from the side it sits on (to the right of the one that left, or to its left).
   function pageSwitch() {
     var next = stripPage();
+    if (U.agentsBtn) {
+      U.agentsBtn.classList.toggle("on", next === "agents");
+      if (next === "agents") { U.agentsBtn.setAttribute("aria-current", "page"); } else { U.agentsBtn.removeAttribute("aria-current"); }
+    }
     if (next === lastPage) { return; }
     var prev = lastPage;
     lastPage = next;
@@ -1949,6 +1952,38 @@ APP_JS = r"""(function () {
     f.call(document, "pointerup", pagerUp, { passive: true });
     f.call(document, "pointercancel", pagerCancel, { passive: true });
   }
+
+  // Vertical swipe: a finger moving down on the agent list (scrolled to its top) opens the menu, moving up on the open menu closes it.
+  var vs = null;
+  function menuSwipeStart(ev) {
+    vs = null;
+    if (!inApp || ev.touches.length !== 1 || sheet || document.getElementById("confirm").open) { return; }
+    var t = ev.target;
+    if (!t || !t.closest || t.closest("input, textarea, select, .rw.open")) { return; }
+    var y = ev.touches[0].clientY;
+    if (menuSec) {
+      var body = t.closest(".menu-body, #menu-body") || (M.body && M.body.contains(t) ? M.body : null);
+      if (body && body.scrollTop + body.clientHeight < body.scrollHeight - 1) { return; }   // the body still scrolls down: not a close
+      if (!M.root.contains(t)) { return; }
+      vs = { x: ev.touches[0].clientX, y: y, t: ev.timeStamp, open: false };
+      return;
+    }
+    if (document.querySelector(".term-page, .bot-page") || !t.closest(".top, .list-pane")) { return; }
+    if (U.list && U.list.scrollTop > 0) { return; }
+    vs = { x: ev.touches[0].clientX, y: y, t: ev.timeStamp, open: true };
+  }
+  function menuSwipeEnd(ev) {
+    var s = vs;
+    vs = null;
+    if (!s || !ev.changedTouches.length) { return; }
+    var dx = ev.changedTouches[0].clientX - s.x;
+    var dy = ev.changedTouches[0].clientY - s.y;
+    if (Math.abs(dy) < 80 || Math.abs(dy) < 2 * Math.abs(dx)) { return; }
+    if (s.open && dy > 0 && !menuSec) { openMenu("usage"); }
+    else if (!s.open && dy < 0 && menuSec) { closeMenu(); }
+  }
+  document.addEventListener("touchstart", menuSwipeStart, { passive: true });
+  document.addEventListener("touchend", menuSwipeEnd, { passive: true });
 
   // ---------------------------------------------------------------- chat state
   function newChat(id) {
