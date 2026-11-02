@@ -337,6 +337,12 @@ class ChatCache:
             if isinstance(value, str) and value:
                 label = "model" if kind == "model_change" else "thinking"
                 out.append(self._item(base, _entry_ts(entry, None), "note", "note", self.san_line(f"{label}: {value}", 200)))
+        elif kind == "custom" and entry.get("customType") == "jev.router.decision" and isinstance(entry.get("data"), dict):
+            d = entry["data"]
+            name, effort = d.get("name"), d.get("effort")
+            if isinstance(name, str) and name.strip():
+                label = f"jev: {name} \u00b7 {effort}" if isinstance(effort, str) and effort else f"jev: {name}"
+                out.append(self._item(base, _entry_ts(entry, None), "note", "note", self.san_line(label, 120)))
 
     def _parse(self, f, data, start):
         """Items of the complete lines of `data` (which begins at byte `start` of the file)."""

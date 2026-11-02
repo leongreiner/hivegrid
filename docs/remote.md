@@ -341,6 +341,8 @@ Static routes: `/logo.svg` and `/icon.png` (the Hivegrid icon, `no-cache` with a
 
 **Model and thinking.** The omp extension `ext/hivegrid-agent-state.ts` publishes the model, thinking level and context fill in the agent's state file, the switchable models in `<pane>.models.json` next to it, and executes `set_model` and `set_thinking` command files like the plan-review answers. An omp process that started before the extension was updated has the old extension: it shows no model and the page hides the controls until it is restarted.
 
+**Router decisions.** An omp extension that routes each prompt (for example a model router) may append a session entry of type `custom` with `customType: "jev.router.decision"` and `data: { name, effort }`. The chat shows it as one small note, `jev: <model name> · <effort>`, at the point of the prompt. Entries with other `customType` values stay hidden.
+
 ## Limits
 
 - Request body at most 16 KiB; a prompt at most 8000 characters; at most 8 keys per request; a tail at most 400 lines (64 KiB, lines cut at 500 characters). An upload body at most 25 MiB (see Files from the phone).

@@ -208,6 +208,15 @@ class TestChatParser(HomeCase):
         offset = len(jl(*head, lines[0]).encode())              # the assistant line starts here
         self.assertEqual([i["n"] for i in got[3:]], [offset * 16, offset * 16 + 1, offset * 16 + 2])
 
+    def test_jev_router_decision_is_one_tiny_note_and_other_custom_entries_stay_hidden(self):
+        path = self.session(body=jl(
+            {"type": "custom", "timestamp": TS, "customType": "jev.router.decision", "data": {"model": "anthropic/h", "name": "Haiku 5.5", "effort": "off"}},
+            {"type": "custom", "timestamp": TS, "customType": "jev.router.decision", "data": {"name": "Sonnet"}},
+            {"type": "custom", "timestamp": TS, "customType": "jev.router.decision", "data": {"effort": "high"}},
+            {"type": "custom", "timestamp": TS, "customType": "other.ext", "data": {"name": "X", "effort": "y"}}))
+        self.assertEqual([(i["role"], i["kind"], i["text"]) for i in self.items(path)],
+                         [("note", "note", "jev: Haiku 5.5 \u00b7 off"), ("note", "note", "jev: Sonnet")])
+
     def test_a_result_arriving_later_updates_the_tool_item_in_place(self):
         path = self.session(body=jl(msg("assistant", [call("c1", command="sleep 9")])))
         first = self.cache.window(path, 50)
