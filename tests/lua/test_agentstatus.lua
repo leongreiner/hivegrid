@@ -232,6 +232,33 @@ T.test('an extension record with state limit shows kind limit, reason and since;
   T.eq(as.pane_kind(151), 'limit')
 end)
 
+T.test('a limit agent that Hivegrid continues by itself says when, in the dock row reason', function(wz)
+  local as = load()
+  local at = T0 + 3600
+  write_ext(wz, 161, { state = 'limit', updated = T0 - 3, since = T0 - 90, reason = 'usage limit', limit = { hit_at = T0 - 90, reset_at = at - 30 } })
+  write_ext(wz, 162, { state = 'limit', updated = T0 - 3, since = T0 - 80, reason = 'usage limit', limit = { hit_at = T0 - 80 } })
+  local function ledger(heartbeat, enabled)
+    T.write(ext_dir() .. '/autocontinue.json', wz.json_encode { heartbeat = heartbeat, enabled = enabled, panes = {
+      ['161'] = { since = T0 - 90, status = 'waiting', at = at, fires = {} },
+      ['162'] = { since = T0 - 5, status = 'waiting', at = at, fires = {} } } })
+  end
+  local win, tab = grid2x2(wz, { omp(wz, 161, 'π > a'), omp(wz, 162, 'π > b'), omp(wz, 163, 'π > c'), omp(wz, 164, 'π > d') }, 4,
+    { focused = false })
+  T.eq(rows(as, win, tab)[161].reason, 'usage limit', 'no ledger')
+  ledger(T0 - 2, true)
+  advance(1)
+  local r = rows(as, win, tab)
+  T.eq(r[161].reason, 'continues at ' .. os.date('%H:%M', at))
+  T.eq(r[161].kind, 'limit', 'the state word is the same')
+  T.eq(r[162].reason, 'usage limit', 'another limit than the ledger knows')
+  ledger(T0 - 2, false)
+  advance(1)
+  T.eq(rows(as, win, tab)[161].reason, 'usage limit', 'switched off')
+  ledger(T0 - 100, true)
+  advance(1)
+  T.eq(rows(as, win, tab)[161].reason, 'usage limit', 'nobody keeps the ledger')
+end)
+
 T.test('a stale limit record falls back to the title like the other states', function(wz)
   local as = load()
   write_ext(wz, 155, { state = 'limit', updated = T0 - 21, since = T0 - 300, limit = { hit_at = T0 - 300 } })
@@ -590,4 +617,87 @@ T.test('tab name: explicit title, else the scanned directory with its agent, no 
   -- A pane never scanned (fresh, or a reload) in a tab never scanned: the shell's directory.
   T.eq(as.tab_parts { tab_id = 9999, tab_title = '', active_pane = {
     pane_id = 9998, title = 'bash', current_working_dir = { file_path = '/a/b' } } }, { name = 'b' })
+end)
+
+-- Pane edge ----------------------------------------------------------------------------------
+-- The Hivegrid build draws a frame from the user var hivegrid_edge; the scan sets it.
+
+local function edge_panes(wz)
+  write_ext(wz, 61, { state = 'done', updated = T0, since = 900 })
+  write_ext(wz, 62, { state = 'attention', updated = T0, since = 900 })
+  write_ext(wz, 63, { state = 'working', updated = T0, since = 900 })
+  write_ext(wz, 64, { state = 'limit', updated = T0, since = 900 })
+  local panes = { omp(wz, 61, 'π > a'), omp(wz, 62, 'π ! b'), omp(wz, 63, 'π ⠋ c'), omp(wz, 64, 'π > d') }
+  local win, tab = grid2x2(wz, panes, 3, { focused = false })
+  return panes, win, tab
+end
+
+local function edge_of(pane) return (pane:get_user_vars().hivegrid_edge or '') end
+
+T.test('base64 of the edge var matches the standard encoding for every tail length', function()
+  local b64 = load().internals.b64
+  T.eq(b64('#4ade80'), 'IzRhZGU4MA==')
+  T.eq(b64('#a78bfa'), 'I2E3OGJmYQ==')
+  T.eq({ b64(''), b64('a'), b64('ab'), b64('abc') }, { '', 'YQ==', 'YWI=', 'YWJj' })
+end)
+
+T.test('on the fork, done, needs you and limit panes get the colour of their state as edge; others none', function(wz)
+  wz.stub.fork = true
+  local as = load()
+  local panes, win, tab = edge_panes(wz)
+  rows(as, win, tab)
+  local STATES = require('theme').STATES
+  T.eq(edge_of(panes[1]), STATES.done.color, 'done: green')
+  T.eq(edge_of(panes[2]), STATES.attention.color, 'needs you: violet')
+  T.eq(edge_of(panes[4]), STATES.limit.color, 'limit: red')
+  T.eq(edge_of(panes[3]), '', 'working: no edge')
+  T.eq(#panes[3].injected, 0, 'a pane that never had an edge is not written to')
+  T.ok(edge_of(panes[1]) ~= edge_of(panes[2]), 'done and needs you read apart')
+end)
+
+T.test('the edge follows the state: cleared when the pane is seen, not rewritten while it is right', function(wz)
+  wz.stub.fork = true
+  local as = load()
+  local panes, win, tab = edge_panes(wz)
+  rows(as, win, tab)
+  advance(1)
+  rows(as, win, tab)
+  T.eq(#panes[1].injected, 1, 'one write for an unchanged state')
+  -- looking at the done pane acknowledges it: idle, so the frame goes
+  tab.rows[1].active = true
+  tab.rows[3].active = false
+  win.o.focused = true
+  advance(1)
+  rows(as, win, tab)
+  T.eq(edge_of(panes[1]), '', 'seen: no edge')
+  T.eq(edge_of(panes[2]), require('theme').STATES.attention.color, 'still needs you')
+end)
+
+T.test('an edge left on a pane by an earlier config is cleared by the next scan', function(wz)
+  wz.stub.fork = true
+  local as = load()
+  local stale = omp(wz, 65, 'π ⠋ busy', { user_vars = { hivegrid_edge = '#4ade80' } })
+  local win, tab = grid2x2(wz, { stale, omp(wz, 66, 'π > x') }, 2, { focused = false })
+  rows(as, win, tab)
+  T.eq(edge_of(stale), '')
+end)
+
+T.test('stock WezTerm: no edge is set and nothing fails', function(wz)
+  local as = load()
+  local panes, win, tab = edge_panes(wz)
+  local errors = {}
+  rows(as, win, tab)
+  for _, p in ipairs(panes) do T.eq(#p.injected, 0) end
+  for _, l in ipairs(wz.stub.logs) do
+    if l.level == 'error' then errors[#errors + 1] = l.message end
+  end
+  T.eq(errors, {})
+  -- a pane without inject_output (a pane kind that cannot take it) costs nothing either
+  wz.stub.fork = true
+  local as2 = load()
+  local p = omp(wz, 67, 'π > f')
+  p.inject_output = nil
+  write_ext(wz, 67, { state = 'done', updated = T0, since = 900 })
+  local win2, tab2 = grid2x2(wz, { p, omp(wz, 68, 'π > g') }, 2, { focused = false })
+  T.eq(rows(as2, win2, tab2)[67].kind, 'done')
 end)

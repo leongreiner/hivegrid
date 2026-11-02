@@ -352,7 +352,21 @@ return function(config, wezterm, deps)
     return (wezterm.GLOBAL.sidebar or {})[tostring(tab_id)] or {}
   end
 
+  -- A pane that shows a phone terminal (hivegrid-remote attach): its window belongs to the running
+  -- server, which opens a new one when the phone asks, so it is not saved.
+  local function is_phone_terminal(pane)
+    local ok, info = pcall(pane.get_foreground_process_info, pane)
+    if not ok or type(info) ~= 'table' or type(info.argv) ~= 'table' then return false end
+    local joined = table.concat(info.argv, ' ')
+    return joined:find('hivegrid-remote', 1, true) ~= nil and joined:find(' attach ', 1, true) ~= nil
+  end
+
   local function collect_window(mw, now, seen)
+    for _, mtab in ipairs(mw:tabs()) do
+      for _, info in ipairs(mtab:panes_with_info()) do
+        if is_phone_terminal(info.pane) then return nil end
+      end
+    end
     local tabs, active_tab = {}, mw:active_tab()
     local active_id = active_tab and active_tab:tab_id()
     local cols, rows

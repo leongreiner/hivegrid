@@ -177,6 +177,15 @@ T.test('save: layout, chats and directories are written; the bar and the dock ar
   T.ok(tab ~= nil)
 end)
 
+T.test('save: the window that shows the phone terminals is not saved', function(wz)
+  local api, file = setup(wz)
+  local term = wz.fake.pane { id = 31, process_info = { argv = { 'python3', '/x/hivegrid-remote', 'attach', '--port', '8787', 'sid' } } }
+  wz.fake.grid({ { id = 31, pane = term, left = 0, top = 0, width = 80, height = 24, active = true } }, {})
+  api.save(100)
+  local ok, text = pcall(function() local f = assert(io.open(file)); local d = f:read('a'); f:close(); return d end)
+  T.ok(not ok or not text:find('"windows":%s*%[%s*{'), 'no window of terminals in the snapshot')
+end)
+
 T.test('save: an open sidebar view, a closed dock, and the dragged widths come with it', function(wz)
   local api, file, facts = setup(wz)
   local _, tab = two_pane_window(wz, facts)

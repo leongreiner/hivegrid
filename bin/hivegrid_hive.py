@@ -185,11 +185,15 @@ def human_age(seconds):
     return f"{s // 86400}d"
 
 
-def limit_reset(agent, now):
+def limit_reset(agent, now, auto=None):
     """'resets in 2h05m' for a limit agent whose reset time is known; '' when it is unknown,
-    malformed or no longer ahead of `now`."""
+    malformed or no longer ahead of `now`. With `auto` (when Hivegrid continues the agent by itself,
+    epoch seconds, see hivegrid_agents.autocontinue_at) it reads 'continues in 2h05m', or 'continuing'
+    once that time has come."""
     if agent.state != "limit":
         return ""
+    if isinstance(auto, (int, float)) and not isinstance(auto, bool):
+        return "continues in " + human_age(auto - now) if auto > now else "continuing"
     info = getattr(agent, "limit", None)
     reset = info.get("reset_at") if isinstance(info, dict) else None
     if isinstance(reset, bool) or not isinstance(reset, (int, float)) or not abs(reset) < 1e12 or reset <= now:
@@ -317,6 +321,14 @@ class HivePage(U.Page):
         self.ry = None             # hex row pitch of the last layout (None: tiles)
         self.tile = None
         self._web = None           # does this WezTerm have the web pane? (asked once, web_available)
+
+    def autocontinue_at(self, agent):
+        """When Hivegrid continues this limit agent by itself (epoch seconds), else None."""
+        fn = getattr(self.core(), "autocontinue_at", None)
+        try:
+            return fn(agent, self.now()) if fn and agent.state == "limit" else None
+        except Exception:  # noqa: BLE001 - a missing ledger only hides the line
+            return None
 
     # core -------------------------------------------------------------------
     def core(self):
@@ -1151,7 +1163,8 @@ class HivePage(U.Page):
         age = human_age(self.now() - agent.since) if agent.since else ""
         state_text = f"{GLYPH.get(agent.state, '·')} {WORD.get(agent.state, agent.state)}"
         cv.put(ix, row, state_text, edge, bg, BOLD)
-        rest = " · ".join(t for t in (age, None if agent.state == "limit" else agent.reason, limit_reset(agent, self.now())) if t)
+        auto = self.autocontinue_at(agent)
+        rest = " · ".join(t for t in (age, None if agent.state == "limit" else agent.reason, limit_reset(agent, self.now(), auto)) if t)
         cv.put(ix + len(state_text), row, clip(" · " + " ".join(rest.split()) if rest else "", iw - len(state_text)), p["text"], bg)
         row += 1
         # The title names the agent by its number; the internal pane id would read as another one.
@@ -1189,7 +1202,7 @@ class HivePage(U.Page):
         elif agent.state == "exited":
             note = "Prompt off: the agent has exited"
         elif agent.state == "limit":
-            note = "Limit hit: switch account, then send"
+            note = "Continues by itself: or switch account, then send" if auto is not None else "Limit hit: switch account, then send"
         elif agent.state in ("working", "busy"):
             note = "Agent is busy: a message may be queued until it is done"
         else:

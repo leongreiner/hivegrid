@@ -1,6 +1,6 @@
 -- Per-pane agent state for grids of omp panes, in the hive panel's vocabulary
 -- (bin/hivegrid_hive.py): working, busy, attention ("needs you"), limit (the account hit its usage
--- limit; you must switch account or wait), done, idle, exited, plus
+-- limit; omp is continued by autocontinue.lua after the reset, or you switch account), done, idle, exited, plus
 -- bell, shell (a shell prompt in a pane where no agent ran) and other (any other program).
 -- Shown in the overview dock (overview.lua), the pane picker (LEADER+g) and, as a count of the
 -- agents that run or wait for you, in the header (api.running); Alt+n jumps to the next agent that needs you
@@ -44,6 +44,9 @@
 -- sequences, but it rewrites the pane's palette: omp's terminal-theme detection
 -- (OSC 11 query) would read the tint, a stale tint outlives the agent unless
 -- every exit path resets it, and none of it can be checked without the GUI.
+-- What is injected instead is the user var hivegrid_edge (see `paint_edge`): it changes
+-- no palette, the Hivegrid build draws a coloured frame from it, and each scan sets it
+-- from the pane's state, so a stale colour is corrected on the next tick.
 
 local wezterm = require 'wezterm'
 local panemap = require 'panemap'
@@ -252,6 +255,22 @@ local function ext_record(id, now)
   return doc
 end
 
+-- What config/autocontinue.lua publishes about a limit pane (autocontinue.json, kept fresh while it
+-- runs): 'continues at 14:05' while it waits for the reset, 'continuing' once that time has come
+-- (it types within seconds), else nil. Same rule as bin/hivegrid_agents.py autocontinue_at.
+local function autocontinue_note(id, since, now)
+  local doc = read_json(STATE_DIR .. '/autocontinue.json')
+  local beat = doc and doc.heartbeat
+  if type(beat) ~= 'number' or math.abs(now - beat) > 30 or doc.enabled ~= true then return nil end
+  local rec = type(doc.panes) == 'table' and doc.panes[tostring(id)] or nil
+  if type(rec) ~= 'table' or type(since) ~= 'number' or type(rec.since) ~= 'number' or math.abs(rec.since - since) > 1e-3 then
+    return nil
+  end
+  if rec.status ~= 'waiting' or type(rec.at) ~= 'number' then return nil end
+  if rec.at <= now then return 'continuing' end
+  return 'continues at ' .. os.date('%H:%M', math.floor(rec.at))
+end
+
 -- Marks a done as seen, the same record the hive's `a` writes (hivegrid_agents.ack).
 local function write_ack(id, since)
   local path = STATE_DIR .. '/acks.json'
@@ -314,6 +333,43 @@ local function scan_web(pane, st, now)
   st.kind, st.state, st.unseen, st.reason = 'web', nil, false, nil
   if st.kind ~= st.last_kind then
     st.last_kind, st.since = st.kind, now
+  end
+end
+
+-- The coloured frame around a pane that wants a look (the Hivegrid build draws it, see
+-- wezterm/HIVEGRID.md "Pane edge"): the user var hivegrid_edge holds the state's colour from
+-- the shared table (theme.STATES, the dock's and the hive's), set by injecting the OSC 1337
+-- SetUserVar into the pane's own terminal state. Only needs-you, limit and done have one; every
+-- other state clears it. The pane's own var is compared first, so nothing is written while it is
+-- right (also after a config reload, or when an app reset the terminal). Stock WezTerm draws
+-- nothing from the var, so it is not set there (theme.has_click).
+local EDGE_KINDS = { attention = true, limit = true, done = true }
+local B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+local function b64(s)
+  local out = {}
+  for i = 1, #s, 3 do
+    local a, b, c = s:byte(i, i + 2)
+    local n = (a << 16) | ((b or 0) << 8) | (c or 0)
+    for k = 0, 3 do
+      if k > (b and (c and 3 or 2) or 1) then
+        out[#out + 1] = '='
+      else
+        local v = (n >> (18 - 6 * k)) & 63
+        out[#out + 1] = B64:sub(v + 1, v + 1)
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+local function paint_edge(pane, kind)
+  if not theme.has_click then return end
+  local want = EDGE_KINDS[kind] and STATES[kind] and STATES[kind].color or ''
+  local ok, vars = pcall(pane.get_user_vars, pane)
+  local have = ok and type(vars) == 'table' and vars.hivegrid_edge or ''
+  if have ~= want then
+    pcall(pane.inject_output, pane, '\27]1337;SetUserVar=hivegrid_edge=' .. b64(want) .. '\7')
   end
 end
 
@@ -408,6 +464,7 @@ local function scan(window, force)
         if acks[tostring(id)] == ext.since then ext_state = 'idle' end
       end
       st.reason = ext and type(ext.reason) == 'string' and ext.reason or nil
+      if ext_state == 'limit' then st.reason = autocontinue_note(id, ext.since, now) or st.reason end
       -- tokens and cost as omp reported them; the dock formats them (bin/hivegrid_agents.py parse_usage)
       st.usage = ext and type(ext.usage) == 'table' and ext.usage or nil
       st.unseen = pane:has_unseen_output()
@@ -425,6 +482,7 @@ local function scan(window, force)
         st.since = ext and st.kind == ext_state and type(ext.since) == 'number' and ext.since or now
       end
       st.state = (not focused) and st.kind or nil
+      paint_edge(pane, st.kind)
 
       entries[#entries + 1] = { pane = pane, info = info, st = st, num = numbers[i] }
       ::next_pane::
@@ -445,7 +503,7 @@ local function scan(window, force)
   return list
 end
 
-local api = { internals = { markers = markers, step = step } }
+local api = { internals = { markers = markers, step = step, b64 = b64 } }
 
 -- Pieces of a tab title: the pane's directory and the agent/process running there (nil
 -- for a plain shell).

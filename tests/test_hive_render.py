@@ -392,6 +392,16 @@ class Popover(Base):
         self.assertIn("Limit hit: switch account, then send", body)
         self.assertTrue(self.page.prompt_enabled(self.page.by_pane[1]), "a prompt may be sent after switching account")
 
+    def test_limit_popover_says_when_hivegrid_continues_the_agent(self):
+        for at, said in ((NOW + 2 * 3600 + 300, "continues in 2h05m"), (NOW - 5, "continuing")):
+            self.make(agents=[self.limit_agent(limit={"hit_at": NOW - 90, "reset_at": NOW + 3600})])
+            self.core.autocontinue_at = lambda agent, now, at=at: at
+            self.page.select(1)
+            body = "\n".join(self.draw())
+            self.assertIn(said, body)
+            self.assertNotIn("resets in", body)
+            self.assertIn("Continues by itself", body)
+
     def test_limit_popover_survives_a_missing_or_malformed_reset(self):
         for info in (None, {}, {"hit_at": NOW}, {"reset_at": None}, {"reset_at": "soon"}, {"reset_at": float("nan")},
                      {"reset_at": float("inf")}, {"reset_at": NOW - 5}, {"reset_at": True}, [1, 2], "x"):
