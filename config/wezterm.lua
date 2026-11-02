@@ -165,6 +165,8 @@ local BRAND_DRAWN = pcall(function() config.tab_bar_brand = theme.BRAND_MARK end
 local as = require('agentstatus')(config, wezterm)
 local ss = require('sysstats')(config, wezterm)
 local cq = require('claudequota')(config, wezterm)
+local bots = require('bots')(config, wezterm)
+require('autocontinue')(config, wezterm) -- continues a limited omp agent after its reset (own update-status)
 local hd = require('header')(config, wezterm, as)
 cq.set_pane_kind(as.pane_kind)
 local sb = require('sidebar')(config, wezterm)
@@ -277,6 +279,15 @@ local function lead_pills(window)
   return full, compact
 end
 
+-- The page switcher of the header (config/pages.lua, created below once the web module exists): [Canvas] [Bots]
+-- with the Briefing's unseen count on Bots.
+local pages_ref
+local function pages_tiers(window)
+  if not pages_ref then return {} end
+  local b = bots.briefing()
+  return pages_ref.tiers(b and b.unseen or 0, pages_ref.current(window))
+end
+
 -- Right side of the header, in the cells the tabs leave over: [mode] A (project, branch and
 -- agents), B (Claude quota), C (system stats). Every group has tiers; header.PLAN says which
 -- one narrows first.
@@ -306,10 +317,11 @@ wezterm.on('update-status', function(window)
   local avail = total - used - 1
 
   cq.refresh_if_due(window)
+  bots.toast_check(window)
   ss.record() -- sample and log the system stats even when the header hides them
 
   -- Up to four visual groups: brand (left status), then right to left of the tabs
-  --   [mode] [zoom]   A: project, branch, agents   B: quota   C: system
+  --   [mode] [zoom]   P: pages (Canvas, Bots)   A: project, branch, agents   D: bots   B: quota   C: system
   -- A is the one pill and the strongest text; B and C are muted text that takes a colour
   -- only past a threshold. Each group has tiers, richest first; the tiers shrink in header.PLAN
   -- order until the groups fit the free cells.
@@ -317,8 +329,11 @@ wezterm.on('update-status', function(window)
     A = { tiers = hd.tiers(hd.context(window)) },
     B = { tiers = cq.visible() and cq.tiers(cq.active(window)) or {} },
     C = { tiers = ss.visible() and ss.tiers() or {} },
+    D = { tiers = bots.tiers(bots.summary()) },
+    P = { tiers = pages_tiers(window) },
   }
   sb.sync(window)
+  if pages_ref then pages_ref.sync(window) end
 
   local function width_of(list)
     local w = 0
@@ -337,7 +352,7 @@ wezterm.on('update-status', function(window)
     theme.extend(items, it)
     items[#items + 1] = { Text = ' ' }
   end
-  for _, name in ipairs { 'A', 'B', 'C' } do
+  for _, name in ipairs { 'P', 'A', 'D', 'B', 'C' } do
     local t = groups[name].tiers[groups[name].tier]
     if t then
       theme.extend(items, t.items)
@@ -369,6 +384,12 @@ local function open_hive(window, pane)
   window:perform_action(panel_action('hive'), pane)
 end
 local function hive_action() return panel_action('hive') end
+-- The Bots page: the web pane page when the fork and a browser are there, else the terminal panel.
+local function open_bots(window, pane, opts)
+  if pages_ref then return pages_ref.show_bots(window, pane, opts) end
+  local extra = opts and opts.new and { '--new' } or opts and opts.select and { '--select', opts.select } or nil
+  window:perform_action(panel_action('bots', extra), pane)
+end
 
 -- Clicks on the header's clickable segments (theme.click; needs the Hivegrid WezTerm
 -- fork, stock WezTerm never emits the event). Unknown ids are ignored.
@@ -386,6 +407,12 @@ wezterm.on('status-click', function(window, pane, id, button)
     end
   elseif id == 'system' then
     window:perform_action(panel_action('monitor'), pane)
+  elseif id == 'bots' then
+    open_bots(window, pane)
+  elseif id == 'page:canvas' then
+    if pages_ref then pages_ref.show_canvas(window, pane) end
+  elseif id == 'page:bots' then
+    open_bots(window, pane)
   elseif id == 'agents' then
     window:perform_action(as.picker, pane)
   elseif id == 'brand' then
@@ -447,10 +474,13 @@ local function plus_menu(window, pane)
     { 'Usage history', 'usage', 'usage_panel', 'LEADER+h' },
     { 'Agent overview', 'agents' },
     { 'System monitor', 'monitor' },
+    { 'Bots', 'bots', 'bots_panel', 'LEADER+t' },
+    { 'New bot…', 'bots', nil, nil, { new = true } },
   } do
     rows[#rows + 1] = { entry[1], entry[3] and key_hint(entry[3], entry[4]) or '', function(w, p)
       if entry[2] == 'hive' then return open_hive(w, p) end
-      w:perform_action(panel_action(entry[2]), p)
+      if entry[2] == 'bots' then return open_bots(w, p, entry[5]) end
+      w:perform_action(panel_action(entry[2], entry[5]), p)
     end }
   end
   local items = {}
@@ -554,12 +584,25 @@ end)
 table.insert(config.keys, bound('settings', 'LEADER+,', panel_action('settings')))
 table.insert(config.keys, bound('usage_panel', 'LEADER+h', panel_action('usage')))
 table.insert(config.keys, bound('hive_panel', 'LEADER+a', hive_action()))
+table.insert(config.keys, bound('bots_panel', 'LEADER+t', wezterm.action_callback(function(window, pane)
+  if pages_ref and pages_ref.current(window) == 'bots' then return pages_ref.show_canvas(window, pane) end
+  open_bots(window, pane)
+end)))
 
 -- Overview dock: LEADER+o by default (settings key overview_toggle).
 overview = require('overview')(config, wezterm, as, sb, layouts)
 
 -- Web pane: LEADER+w table, links into a web pane, "+" menu rows (Hivegrid build only).
 web = require('web')(config, wezterm, sb, layouts)
+
+-- Pages: the [Canvas] [Bots] switcher of the header and the Bots page (config/pages.lua).
+pages_ref = require('pages')(config, wezterm, {
+  web = web,
+  panel = function(window, pane, name, extra) window:perform_action(panel_action(name, extra), pane) end,
+})
+
+-- A click on a bot row of the dock opens that bot on the Bots page.
+overview.on_bot = function(window, pane, id) open_bots(window, pane, { select = id }) end
 
 -- Session snapshot and restore (config/session.lua): the layout and the omp chats survive a
 -- crash. Last, so it sees every module it reads from.

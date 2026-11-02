@@ -45,7 +45,7 @@ local function setup(wz, rows, o)
     end,
   }
   local config = { keys = {} }
-  require('overview')(config, wz, as, sb, layouts)
+  calls.api = require('overview')(config, wz, as, sb, layouts)
   local win, tab = wz.fake.grid(rows, o.wopts)
   return win, tab, calls, config
 end
@@ -370,6 +370,40 @@ T.test('a row click from the dock focuses that grid pane of the same tab only', 
   go_to(dock, 'garbage')
   go_to(dock, '999') -- gone
   T.eq(wz.stub.activations, { 2 })
+end)
+
+T.test('a click on a bots row opens the Bots panel on that schedule; bad ids are ignored', function(wz)
+  local rows = two_wide(wz, { { id = 77, left = 161, width = 39 } })
+  local win, tab = setup(wz, rows)
+  local key = tostring(tab:tab_id())
+  wz.GLOBAL.overview = { [key] = { pane = 77, last = 2 } }
+  local dock = wz.mux.get_pane(77)
+  local function bots(from, value) wz.emit('user-var-changed', win, from, 'hivegrid_overview_bots', value) end
+  bots(dock, 'daily-news:12')
+  T.eq(#win.actions, 1)
+  local a = win.actions[1].action
+  T.eq(a.kind, 'ShowOverlayCommand')
+  T.eq(a.args.args, { wz.home_dir .. '/.local/bin/hivegrid-panel', 'bots', '--origin', '2', '--select', 'daily-news' })
+  T.eq(a.args.cwd, wz.home_dir)
+  bots(dock, 'abc') -- no serial is fine
+  T.eq(#win.actions, 2)
+  bots(wz.mux.get_pane(1), 'daily-news:13') -- not from the dock
+  for _, bad in ipairs { '', ':1', 'Daily:1', 'a b:1', '../x:1', 'a;rm:1', ('a'):rep(70) .. ':1' } do bots(dock, bad) end
+  T.eq(#win.actions, 2)
+end)
+
+T.test('a click on a bots row goes to the Bots page when the config wired one in', function(wz)
+  local rows = two_wide(wz, { { id = 77, left = 161, width = 39 } })
+  local win, tab, calls = setup(wz, rows)
+  wz.GLOBAL.overview = { [tostring(tab:tab_id())] = { pane = 77, last = 2 } }
+  local opened = {}
+  calls.api.on_bot = function(_, pane, id) opened[#opened + 1] = { pane:pane_id(), id } end
+  local dock = wz.mux.get_pane(77)
+  wz.emit('user-var-changed', win, dock, 'hivegrid_overview_bots', 'daily-news:4')
+  T.eq(opened, { { 2, 'daily-news' } }, 'the pane the keyboard was in, the bot')
+  T.eq(#win.actions, 0, 'no panel overlay')
+  wz.emit('user-var-changed', win, dock, 'hivegrid_overview_bots', '../x:1')
+  T.eq(#opened, 1, 'a bad id is still ignored')
 end)
 
 T.test('the dock grid buttons equalize or arrange; the same request from elsewhere is ignored', function(wz)

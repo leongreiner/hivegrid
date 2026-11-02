@@ -197,3 +197,35 @@ T.test('without HIVEGRID_SETTINGS the file lives under ~/.config/hivegrid', func
   T.eq(S.path(), home() .. '/.config/hivegrid/settings.json')
   T.eq(S.key('arrange', 'CTRL+SHIFT+a'), { key = 'a', mods = 'ALT' })
 end)
+
+T.test('schedule: defaults, valid values, bad values fall back', function(wz)
+  T.eq(load(wz, nil).schedule, { max_parallel = 2, tz = 'local', allow_full = false, daily_budget_usd = 0,
+    notify_events = { 'failed', 'limit', 'missed' } })
+  T.fresh()
+  wz = require 'wezterm'
+  local S = load(wz, { schedule = { max_parallel = 8, tz = 'Europe/Berlin', allow_full = true,
+    daily_budget_usd = 2.5, notify_events = { 'done', 'failed' } } })
+  T.eq(S.schedule, { max_parallel = 8, tz = 'Europe/Berlin', allow_full = true, daily_budget_usd = 2.5,
+    notify_events = { 'failed', 'done' } })
+  T.fresh()
+  wz = require 'wezterm'
+  S = load(wz, { schedule = { max_parallel = 9, tz = 'nope', allow_full = 1, daily_budget_usd = -1,
+    notify_events = { 'failed', 'bogus' } } })
+  T.eq(S.schedule, { max_parallel = 2, tz = 'local', allow_full = false, daily_budget_usd = 0,
+    notify_events = { 'failed', 'limit', 'missed' } })
+end)
+
+T.test('auto_continue: on unless the file says "auto_continue": { "enabled": false }', function(wz)
+  T.eq(load(wz, nil).auto_continue, { enabled = true })
+  for _, v in ipairs { { auto_continue = { enabled = false } } } do
+    T.fresh()
+    wz = require 'wezterm'
+    T.eq(load(wz, v).auto_continue, { enabled = false })
+  end
+  for _, v in ipairs { { auto_continue = { enabled = true } }, { auto_continue = { enabled = 0 } }, { auto_continue = 'off' },
+    { auto_continue = {} }, 'not json' } do
+    T.fresh()
+    wz = require 'wezterm'
+    T.eq(load(wz, v).auto_continue, { enabled = true }, wz.json_encode { v })
+  end
+end)

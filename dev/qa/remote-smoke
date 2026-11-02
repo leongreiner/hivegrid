@@ -13,8 +13,12 @@ them through its HTTP API, and the sandbox HOME keeps the token away from the re
   7 a Chromium-family browser (when one is installed) renders hostile pane text as inert text
   8 the GUI restarts: 503 no_mux while it is down, 200 again without restarting the server
   9 --read-only: every POST is 403
+ 10 Bots (scheduled omp agents) through the API with fixture bots in the sandbox HOME: list, detail, runs, a report that is marked
+    seen when fetched, parse, create from the phone (never `full`, caps mandatory), edit, run now / skip / pause / resume, delete,
+    the scheduler's commands, and read-only refusing every write; the page shows the Bots button
 
   dev/qa/remote-smoke [--keep]     --keep leaves slot 14 running for a look (hgq down 14 stops it)
+  dev/qa/remote-smoke --bots       only 10, in a throwaway HOME and runtime dir: no window, no fork build, no sandbox slot
 
 Needs what hgq needs (Xvfb, xwininfo, ImageMagick, libXtst) and a fork build. Never runs
 tailscale, install.sh or sync.sh. Screenshots land in /tmp/hivegrid-qa/s14/shots/remote.
@@ -38,6 +42,10 @@ HOME = os.path.join(S, "home")
 WORK = os.path.join(S, "work")
 SHOTS = os.path.join(S, "shots", "remote")
 KEEP = "--keep" in sys.argv
+BOTS_ONLY = "--bots" in sys.argv
+BOT_IDS = {}
+STANDALONE = None    # --bots: (argv, env) of the throwaway server, started again by start_server
+BOT_ENV = None       # the environment hivegrid_schedule reads its paths from: the sandbox's (or the throwaway one's) HOME and runtime dir
 HOSTILE = "<img src=x onerror=alert(1)>"
 
 for k in ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET"):
@@ -159,6 +167,9 @@ def start_server(*extra):
     global server
     stop_server()
     log = open(os.path.join(S, "remote-server.log"), "wb")
+    if STANDALONE:
+        server = subprocess.Popen([*STANDALONE[0], *map(str, extra)], env=STANDALONE[1], stdout=log, stderr=log)
+        return waitfor(lambda: req("GET", "/healthz")[0] == 200, 10)
     server = subprocess.Popen(
         [HGQ, "sh", str(SLOT), "env", "-u", "WEZTERM_UNIX_SOCKET", "hivegrid-remote", "serve", "--port", str(PORT), *map(str, extra)],
         stdout=log, stderr=log)
@@ -306,8 +317,8 @@ def section_browser():
         url = f"http://127.0.0.1:{PORT}/#t={TOKEN}"
         r = subprocess.run([*base, "--dump-dom", url], capture_output=True, text=True, timeout=60)
         dom = r.stdout
-        check("7 the page rendered the agent rows (labels 1, 2, 3)",
-              all(re.search(r'class="num"[^>]*>' + n + "</span>", dom) for n in "123"), dom[:300])
+        check("7 the page rendered the agent rows (labels 1 and 2; 3 has exited)",
+              all(re.search(r'class="num"[^>]*>' + n + "</span>", dom) for n in "12"), dom[:300])
         check("7 the hostile title is text (&lt;img src=x)", "&lt;img src=x" in dom)
         check("7 the hostile <script> title is text", "&lt;script&gt;x&lt;/script&gt;" in dom)
         check("7 no <img src=x> element exists", re.search(r"<img[^>]*src=\"?x", dom) is None)
@@ -358,6 +369,187 @@ def section_restart():
     check("8 the same server process kept running", server is not None and server.poll() is None)
 
 
+def bapi(method, path, body=None, **kw):
+    """`api`, waiting out the server's own rate limits (a burst of writes is exactly what this section makes)."""
+    for _ in range(6):
+        st, doc = api(method, path, body, **kw)
+        if st != 429:
+            break
+        time.sleep(2.2)
+    return st, doc
+
+
+def bot_fixtures():
+    """Three bots with runs in the sandbox's own schedule store (never the real one): a task with an unread result and a report, an
+    agent with memory whose last run failed, and a task that is running now."""
+    import hivegrid_schedule as sch
+    env = BOT_ENV
+    cfg = sch.config_dir(env)
+    if os.path.isdir(cfg):
+        os.chmod(cfg, 0o700)       # the sandbox's own config dir is made group-writable; hivegrid_schedule refuses such a directory
+    store = sch.Store(env=env)
+    for rec in store.read():
+        store.remove(rec["id"])
+    now = int(time.time())
+    made = {}
+    for name, kind, run in (("digest", "task", {}), ("watcher", "agent", {}), ("slow job", "task", {})):
+        rec = store.add({"name": name, "kind": kind, "when": {"type": "cron", "expr": "0 9 * * 1-5", "tz": "local"},
+                         "task": {"prompt": f"Fixture task of {name}"}, "run": dict({"cwd": HOME}, **run)}, now=now, origin="cli")
+        sch.init_state_dir(rec, now, env)
+        made[name] = rec
+    d = sch.state_dir(made["digest"]["id"], env)
+    sch.append_run(d, {"run": 1, "schedule": made["digest"]["id"], "trigger": "cron", "status": "ok", "started": now - 400, "ended": now - 300,
+                       "summary": "Summarized **12** mails.", "cost_usd": 0.12, "level": "important", "headline": "12 mails summarized, 2 need an answer"})
+    with open(sch.report_path(made["digest"]["id"], 1, env), "w") as f:
+        f.write("# Digest\n\n- mail one\n- mail two\n")
+    w = sch.state_dir(made["watcher"]["id"], env)
+    sch.append_run(w, {"run": 1, "schedule": made["watcher"]["id"], "trigger": "cron", "status": "failed", "started": now - 900, "ended": now - 800,
+                       "error": "omp exited with status 1", "summary": "build is red", "level": "important", "headline": "watcher failed: omp exited with status 1"})
+    sch.append_run(w, {"run": 2, "schedule": made["watcher"]["id"], "trigger": "cron", "status": "ok", "started": now - 200, "ended": now - 100,
+                       "summary": "CI green, nothing to do", "level": "none", "headline": "CI green, nothing to do", "seen": True})
+    sess = os.path.join(HOME, ".omp", "agent", "sessions", "-fixture-")
+    os.makedirs(sess, exist_ok=True)
+    main_session = os.path.join(sess, "2026-11-02T08-00-00-000Z_aaaaaaaaaaaaaaaa.jsonl")
+    with open(main_session, "w") as f:
+        f.write(json.dumps({"type": "session", "version": 3, "id": "aaaaaaaaaaaaaaaa", "timestamp": "2026-11-02T08:00:00.000Z", "cwd": HOME}) + "\n")
+        f.write(json.dumps({"type": "message", "id": "m1", "parentId": None, "timestamp": "2026-11-02T08:00:01.000Z",
+                            "message": {"role": "user", "content": [{"type": "text", "text": "is the build green?"}]}}) + "\n")
+        f.write(json.dumps({"type": "message", "id": "m2", "parentId": "m1", "timestamp": "2026-11-02T08:00:02.000Z",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "Yes: the fixture build is green."}]}}) + "\n")
+    sch.update_state(w, lambda st: st.update(session_file=main_session))
+    with open(sch.memory_path(made["watcher"]["id"], env), "w") as f:
+        f.write("- build was red on Tuesday\n")
+    sch.update_state(sch.state_dir(made["slow job"]["id"], env), lambda st: st.update(running={"run": 1, "pid": os.getpid(), "started": now - 30}))
+    return made
+
+
+def section_bots():
+    print("-- 10 Bots")
+    import hivegrid_schedule as sch
+    made = bot_fixtures()
+    ids = {k: v["id"] for k, v in made.items()}
+    st, meta = bapi("GET", "/api/meta")
+    check("10 /api/meta lists the bots capability and the phone's limits", st == 200 and "bots" in meta.get("capabilities", []) and meta["limits"]["bots"]["max_bots"] == 50, str(meta)[:200])
+    st, doc = bapi("GET", "/api/bots")
+    check("10 the list has the three fixture bots", st == 200 and sorted(b["name"] for b in doc["bots"]) == ["digest", "slow job", "watcher"], str(doc)[:300])
+    if st != 200:
+        return
+    by = {b["name"]: b for b in doc["bots"]}
+    check("10 states: failed needs a look, a live run is working, an unread ok is done",
+          (by["watcher"]["state"], by["slow job"]["state"], by["digest"]["state"]) == ("attention", "working", "done"), str({k: v["state"] for k, v in by.items()}))
+    check("10 counts: 3 bots, 1 running, 1 attention, 2 unseen reports", doc["counts"] == {"total": 3, "enabled": 3, "running": 1, "attention": 1, "unseen": 2}, str(doc["counts"]))
+    check("10 the list carries the last headline and the unread reports of a bot", by["digest"]["unseen"] == 1 and by["watcher"]["last"]["headline"] == "CI green, nothing to do" and by["watcher"]["last"]["level"] == "none", str(by["watcher"]["last"]))
+    check("10 no scheduler yet: it reads as down, with plain data", doc["scheduler"]["alive"] is False)
+    check("10 directories are shown as ~/...", HOME not in json.dumps(doc))
+    st, agents_doc = bapi("GET", "/api/agents")
+    check("10 the agent list carries the unread-result counts for the menu dot", st in (200, 503) and (st == 503 or agents_doc.get("bots", {}).get("unseen") == 2), str(agents_doc)[:200])
+
+    st, det = bapi("GET", f"/api/bots/{ids['watcher']}")
+    check("10 an agent's detail has its memory and a failed run", st == 200 and det["memory"]["text"].startswith("- build was red") and any(r["status"] == "failed" for r in det["runs"]))
+    st, run = bapi("GET", f"/api/bots/{ids['digest']}/runs/1")
+    check("10 a run has its summary and report, and fetching it marks it seen",
+          st == 200 and run["was_unseen"] and "Digest" in run["run"]["report_text"]["text"] and run["run"]["seen"], str(run)[:300])
+    check("10 ... the result is no longer unseen", len(sch.unseen(sch.state_dir(ids["digest"], BOT_ENV))) == 0)
+    check("10 there is no pane revive any more: the route is gone", "can_open" not in run["run"] and bapi("POST", f"/api/bots/{ids['digest']}/runs/1/open", {"confirm": True})[0] == 404)
+
+    st, brief = bapi("GET", "/api/bots/briefing")
+    check("10 briefing: the failed run is in, the quiet run is not", st == 200 and [e["headline"] for e in brief["entries"]] == ["12 mails summarized, 2 need an answer", "watcher failed: omp exited with status 1"] or (st == 200 and sorted(e["headline"] for e in brief["entries"]) == ["12 mails summarized, 2 need an answer", "watcher failed: omp exited with status 1"]), str(brief)[:300])
+    check("10 briefing: counts, the read one is seen", st == 200 and brief["total"] == 2 and brief["unseen"] == 1, str({k: brief.get(k) for k in ("total", "unseen")}))
+    check("10 briefing: marking all seen clears the count", bapi("POST", "/api/bots/briefing/seen", {})[0] == 200 and bapi("GET", "/api/bots/briefing")[1]["unseen"] == 0)
+    st, conv = bapi("GET", f"/api/bots/{ids['watcher']}/conversation")
+    check("10 conversation: the bot's session file as chat items", st == 200 and "the fixture build is green" in json.dumps(conv["items"]) and conv["session"] is True, str(conv)[:300])
+    check("10 conversation: the path never leaves the server", HOME not in json.dumps(conv))
+    st, say = bapi("POST", f"/api/bots/{ids['watcher']}/say", {"text": "hello"})
+    check("10 say without a scheduler: 409 with a clear message", st == 409 and "scheduler is not running" in say.get("message", ""), f"{st} {say}")
+    check("10 say: text bounded at 4000", bapi("POST", f"/api/bots/{ids['watcher']}/say", {"text": "x" * 4001})[0] == 400)
+
+    st, parsed = bapi("POST", "/api/bots/parse", {"text": "weekdays 9am"})
+    check("10 parse: weekdays 09:00 with three next times", st == 200 and parsed["describe"] == "weekdays 09:00" and len(parsed["next"]) == 3, str(parsed))
+    check("10 parse: a repeat under five minutes is an error text", bapi("POST", "/api/bots/parse", {"text": "every 2m"})[1]["error"] is not None)
+
+    body = {"name": "from phone", "prompt": "Reply with pong", "when": "daily 8am", "dir": "~", "max_time_s": 600, "max_cost_usd": 0.5}
+    for what, extra in (("full permissions", {"permissions": "full"}), ("an unknown field", {"origin": "cli"}), ("a cost above the cap", {"max_cost_usd": 99}),
+                        ("a path outside the home", {"dir": "/etc"}), ("a repeat under five minutes", {"when": "every 1m"})):
+        st, doc = bapi("POST", "/api/bots", dict(body, **extra))
+        check(f"10 create with {what}: 400", st == 400, f"{st} {doc}")
+    no_cap = dict(body)
+    del no_cap["max_cost_usd"]
+    check("10 create without a cost cap: 400", bapi("POST", "/api/bots", no_cap)[0] == 400)
+    st, created = bapi("POST", "/api/bots", dict(body, permissions="readonly"))
+    check("10 a valid bot is created", st == 200 and created["ok"], f"{st} {created}")
+    rec = sch.Store(env=BOT_ENV).get(created.get("id", "x"))
+    check("10 ... as origin phone, read only, with its caps", bool(rec) and (rec["origin"], rec["run"]["permissions"], rec["run"]["max_time_s"], rec["run"]["max_cost_usd"]) == ("phone", "readonly", 600, 0.5), str(rec)[:300])
+    check("10 ... and `hivegrid-schedule` agrees (the store validates it again)", bool(rec) and sch.validate(rec)["id"] == rec["id"])
+    st, _ = bapi("POST", f"/api/bots/{created['id']}", {"permissions": "full"})
+    check("10 a phone cannot raise a bot to full", st == 400)
+    st, _ = bapi("POST", f"/api/bots/{created['id']}", {"name": "renamed", "max_cost_usd": 1})
+    check("10 an edit changes the name and the cap", st == 200 and sch.Store(env=BOT_ENV).get(created["id"])["name"] == "renamed")
+
+    st, r = bapi("POST", f"/api/bots/{ids['digest']}/run", {})
+    check("10 run now without a scheduler waits in the state file", st == 200 and r["queued"] and sch.load_state(sch.state_dir(ids["digest"], BOT_ENV))["run_now"])
+    sch.write_summary(sch.summary_path(BOT_ENV), {"ts": int(time.time()), "scheduler": {"heartbeat": time.time()}, "counts": {}, "items": []})
+    st, doc = bapi("GET", "/api/bots")
+    check("10 a fresh heartbeat reads as a live scheduler", st == 200 and doc["scheduler"]["alive"] is True)
+    st, say = bapi("POST", f"/api/bots/{ids['watcher']}/say", {"text": "any news?"})
+    cmds = sch.read_commands(sch.command_dir(BOT_ENV)) if os.path.isdir(sch.command_dir(BOT_ENV)) else []
+    check("10 say with a live scheduler: a chat command in the inbox and {queued, position}", st == 200 and "queued" in say and "position" in say and
+          any(c.get("op") == "chat" and c.get("id") == ids["watcher"] and c.get("text") == "any news?" for c in cmds), f"{st} {say} {cmds}")
+    st_skip = bapi("POST", f"/api/bots/{ids['watcher']}/skip", {})
+    cmds = sch.read_commands(sch.command_dir(BOT_ENV)) if os.path.isdir(sch.command_dir(BOT_ENV)) else []
+    check("10 skip goes to the live scheduler as a command", {"op": "skip", "id": ids["watcher"]} in cmds, f"{st_skip} {cmds}")
+    st, _ = bapi("POST", f"/api/bots/{ids['watcher']}/pause", {})
+    check("10 pause disables, resume enables again", st == 200 and not sch.Store(env=BOT_ENV).get(ids["watcher"])["enabled"] and bapi("POST", f"/api/bots/{ids['watcher']}/resume", {})[0] == 200 and sch.Store(env=BOT_ENV).get(ids["watcher"])["enabled"])
+    check("10 delete needs confirm", bapi("POST", f"/api/bots/{created['id']}/delete", {})[0] == 409)
+    st, _ = bapi("POST", f"/api/bots/{created['id']}/delete", {"confirm": True})
+    check("10 delete with confirm removes the bot and its state", st == 200 and sch.Store(env=BOT_ENV).get(created["id"]) is None and not os.path.exists(sch.state_dir(created["id"], BOT_ENV)))
+    check("10 no auth: 401", req("GET", "/api/bots")[0] == 401 and req("POST", "/api/bots/parse", {"text": "daily"})[0] == 401)
+    check("10 another site's Origin: 403", bapi("POST", "/api/bots/parse", {"text": "daily"}, headers={"Origin": "http://evil.example"})[0] == 403)
+
+    chrome = chrome_path()
+    if chrome:
+        with tempfile.TemporaryDirectory() as prof:
+            r = subprocess.run([chrome, "--headless=new", "--no-sandbox", "--disable-gpu", f"--user-data-dir={prof}", "--timeout=4000", "--dump-dom",
+                                f"http://127.0.0.1:{PORT}/#t={TOKEN}"], capture_output=True, text=True, timeout=60)
+        check("10 the page has a Bots button with the clock glyph", 'aria-label="Bots' in r.stdout and "\u25f7" in r.stdout, r.stdout[:200])
+    else:
+        print("skip no Chromium-family browser found for the page check")
+
+    BOT_IDS.update(ids)
+    BOT_IDS["_body"] = body
+
+
+def bots_readonly():
+    """10, the last part: a `--read-only` server (already started) refuses every write of the Bots and still lists them."""
+    if "digest" not in BOT_IDS:
+        return
+    for verb, b in (("run", {}), ("skip", {}), ("pause", {}), ("resume", {}), ("cancel", {}), ("ack", {}), ("delete", {"confirm": True})):
+        st, _ = bapi("POST", f"/api/bots/{BOT_IDS['digest']}/{verb}", b)
+        check(f"10 read-only: {verb} is 403", st == 403, str(st))
+    check("10 read-only: create is 403", bapi("POST", "/api/bots", BOT_IDS["_body"])[0] == 403)
+    check("10 read-only: say and briefing/seen are 403", bapi("POST", f"/api/bots/{BOT_IDS['digest']}/say", {"text": "hi"})[0] == 403 and bapi("POST", "/api/bots/briefing/seen", {})[0] == 403)
+    check("10 read-only: the briefing and the conversation can be read", bapi("GET", "/api/bots/briefing")[0] == 200 and bapi("GET", f"/api/bots/{BOT_IDS['watcher']}/conversation")[0] == 200)
+    check("10 read-only: the list still works", bapi("GET", "/api/bots")[0] == 200)
+
+
+def start_standalone():
+    """--bots: the real server in a throwaway HOME and runtime dir, bound to a loopback port, with no window to find."""
+    import shutil
+    global server, TOKEN, HOME, BOT_ENV, S, STANDALONE
+    tmp = tempfile.mkdtemp(prefix="hg-bots-smoke-")
+    HOME = os.path.join(tmp, "home")
+    run = os.path.join(tmp, "run")
+    os.makedirs(HOME)
+    os.makedirs(run, mode=0o700)
+    S = tmp
+    BOT_ENV = {"HOME": HOME, "XDG_RUNTIME_DIR": run}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": HOME, "XDG_RUNTIME_DIR": run, "LANG": "C.UTF-8"}
+    tfile = os.path.join(tmp, "token")
+    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "hivegrid-remote"), "token", "--token-file", tfile], env=env, capture_output=True, text=True, timeout=30)
+    TOKEN = open(tfile).read().strip()
+    STANDALONE = ([sys.executable, os.path.join(ROOT, "bin", "hivegrid-remote"), "serve", "--port", str(PORT), "--token-file", tfile], env)
+    return tmp if start_server() else None
+
+
 def section_readonly():
     print("-- 9 read-only")
     if not start_server("--read-only"):
@@ -368,9 +560,37 @@ def section_readonly():
         st, _ = api("POST", f"/api/agents/1/{name}", body)
         check(f"9 POST {name}: 403", st == 403, str(st))
     check("9 GET still works", api("GET", "/api/agents")[0] in (200, 503))
+    time.sleep(6)       # the write bucket refills
+    bots_readonly()
+
+
+def main_bots():
+    tmp = start_standalone()
+    try:
+        if not tmp:
+            check("the server starts", False)
+        else:
+            section_bots()
+            if start_server("--read-only"):
+                bots_readonly()
+    except Exception as e:
+        check("the run finished without an error", False, repr(e))
+    finally:
+        stop_server()
+        if tmp and not KEEP:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+    if fails:
+        print(f"remote-smoke --bots: {len(fails)} failed")
+        return 1
+    print("remote-smoke --bots passed")
+    return 0
 
 
 def main():
+    global BOT_ENV
+    if BOTS_ONLY:
+        return main_bots()
     hgq("down", SLOT, check=False)
     hgq("up", SLOT, 1280, 720)
     try:
@@ -379,9 +599,11 @@ def main():
         hgq("sh", SLOT, "omp-grid", 1, 3, "--tab")
         time.sleep(3)
         if section_setup() and section_auth_and_list():
+            BOT_ENV = {"HOME": HOME, "XDG_RUNTIME_DIR": os.path.join(S, "run")}
             section_actions()
             section_browser()
             shot("after-actions")
+            section_bots()
             section_restart()
             section_readonly()
     except Exception as e:

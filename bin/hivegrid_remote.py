@@ -4,7 +4,7 @@ A small HTTP server (standard library only) bound to loopback or a tailnet addre
 of the WezTerm mux, shows the tail of their screens and a chat built from their omp session files (long
 polls keep both live), sends them prompts, keys, plan-review answers and acknowledgements, switches their
 model and thinking level, starts a new omp session in a pane and reports accounts, quota and machine
-metrics. It never closes or focuses panes; it types only into agents, except that an account switch types
+metrics. It never focuses panes and closes one only after a quit (the plain shell omp left behind); it types only into agents, except that an account switch types
 one `cd … && omp …` line into the plain shell left after omp quit (appended to any text already typed at
 that prompt). The data behind the richer endpoints (session files, chat parser, accounts, metrics) is in
 hivegrid_remote_data.py.
@@ -48,9 +48,12 @@ import hivegrid_hive as HV  # noqa: E402
 import hivegrid_outbox as O  # noqa: E402
 import hivegrid_upload as X  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
+import hivegrid_remote_git as G  # noqa: E402
+import hivegrid_remote_bots as B  # noqa: E402
 import hivegrid_remote_history as HI  # noqa: E402
 import hivegrid_remote_notify as N  # noqa: E402
 import hivegrid_remote_pending as PQ  # noqa: E402
+import hivegrid_remote_push as RP  # noqa: E402
 import hivegrid_remote_term as T  # noqa: E402
 import hivegrid_remote_termjs as TJ  # noqa: E402
 import hivegrid_remote_ui as UI  # noqa: E402
@@ -91,11 +94,15 @@ SWITCH_WAIT = 3.0          # how long a model/thinking change waits for the stat
 MAX_FONT = 16 * 1024 * 1024
 TAIL_TTL = 1.0             # a pane's screen text is reused this long by the held tail requests that watch it
 SESSION_BURST, SESSION_EVERY = 3, 5.0     # starting a session: 3 at once, then one per 5 seconds
+BOT_BURST, BOT_EVERY = 5, 3.0               # creating, editing and deleting bots: 5 at once, then one per 3 seconds
+BOT_SAY_BURST, BOT_SAY_EVERY = 5, 4.0       # talking to a bot (each message is an omp turn): 5 at once, then one per 4 seconds
 SESSION_REPEAT = 10.0      # the same directory and account is not started twice within this many seconds
 ACCOUNT_BURST, ACCOUNT_EVERY = 2, 10.0   # moving a chat to another account: 2 at once, then one per 10 seconds
 QUIT_BURST, QUIT_EVERY = HI.QUIT_BURST, HI.QUIT_EVERY   # quitting sessions from the list: 4 at once, then one per 2 seconds
 TERM_IO_RATE, TERM_IO_BURST = 40.0, 80    # terminal requests per device: 40 a second, bursts of 80
 TERM_OPEN_EVERY, TERM_OPEN_BURST = 5.0, 3 # opening a terminal: 3 at once, then one every 5 seconds, per device
+PUSH_TEST_EVERY, PUSH_TEST_BURST = 10.0, 2   # "send a test notification": 2 at once, then one every 10 seconds
+GIT_REPOS_MAX = G.MAX_REPOS
 TERM_KEYS = 64                            # devices whose terminal allowance is remembered
 
 # Quick keys: name -> bytes. Each is sent in its own `send-text --no-paste` call, never concatenated
@@ -126,7 +133,7 @@ STATUS_TEXT = {
     "bad_request": 400, "unauthorized": 401, "forbidden_host": 403, "forbidden_origin": 403, "readonly": 403,
     "terminal_disabled": 403, "not_found": 404, "method_not_allowed": 405, "confirm_required": 409,
     "agent_not_ready": 409, "conflict": 409, "length_required": 411, "too_large": 413, "unsupported_media_type": 415,
-    "rate_limited": 429, "internal": 500, "mux_failed": 502, "no_mux": 503, "terminal_busy": 503,
+    "rate_limited": 429, "internal": 500, "mux_failed": 502, "no_mux": 503, "terminal_busy": 503, "push_disabled": 403,
 }
 
 THEME_VARS = ("deep", "base", "surface", "pill", "raised", "track", "border", "edge_hi", "text", "bright", "muted",
@@ -751,7 +758,7 @@ def state_vocabulary():
                 "rank": U.STATES[k].rank} for k in VOCAB}
 
 
-CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload")
+CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload", "bots")
 
 
 def meta_json(readonly, terminal=False):
@@ -760,7 +767,7 @@ def meta_json(readonly, terminal=False):
     capabilities = CAPABILITIES + (("terminal",) if terminal else ())
     states = state_vocabulary()
     limits = {"prompt": MAX_PROMPT, "keys": MAX_KEYS, "key_text": MAX_KEY_TEXT, "feedback": MAX_FEEDBACK,
-              "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX, "upload": X.MAX_UPLOAD}
+              "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX, "upload": X.MAX_UPLOAD, "bots": B.limits()}
     return {"v": API_VERSION, "readonly": bool(readonly), "terminal": terminal, "limits": limits,
             "states": states, "keys": list(KEYS), "dangerous": list(DANGEROUS_KEYS),
             "capabilities": list(capabilities),
@@ -932,14 +939,15 @@ class App:
     STATIC = {
         "/": ("text/html; charset=utf-8", "INDEX_HTML"), "/app.js": ("text/javascript; charset=utf-8", "APP_JS"),
         "/app.css": ("text/css; charset=utf-8", "APP_CSS"),
-        "/manifest.webmanifest": ("application/manifest+json", "MANIFEST"),
+        "/manifest.webmanifest": ("application/manifest+json", "MANIFEST"), "/sw.js": ("text/javascript; charset=utf-8", "SW_JS"),
     }
     TERM_STATIC = {"/term.js": ("text/javascript; charset=utf-8", "TERM_JS"), "/term.css": ("text/css; charset=utf-8", "TERM_CSS"),
                    "/term-view.js": ("text/javascript; charset=utf-8", "TERM_VIEW_JS")}
     GET_ROUTES = ("/api/meta", "/api/agents", "/api/accounts", "/api/system", "/api/sessions/options", "/api/sessions/dirs",
-                  "/api/history")
-    POST_ROUTES = ("/api/sessions",)
-    GET_ACTIONS = ("tail", "chat", "models", "accounts", "files")
+                  "/api/history", "/api/bots", "/api/bots/briefing")
+    POST_ROUTES = ("/api/sessions", "/api/bots/parse", "/api/bots/briefing/seen")
+    GET_ACTIONS = ("tail", "chat", "models", "accounts", "files", "git")
+    BOT_GETS = ("bot", "bot-runs", "bot-runinfo", "bot-conv")
 
     FONTS = {
         "/fonts/mono.ttf": ("~/.local/share/fonts/DejaVuSansMNerdFont/DejaVuSansMNerdFontMono-Regular.ttf",
@@ -950,7 +958,8 @@ class App:
 
     def __init__(self, mux, tokens, readonly=False, allow_hosts=(), clock=time.monotonic, wall=time.time,
                  log=None, theme_watch=None, sleep=None, fonts=None, home=None, sysstats=None, chat=None,
-                 terminal=False, terminals=None, switcher=None, outbox=None, quitter=None, history=None):
+                 terminal=False, terminals=None, switcher=None, outbox=None, quitter=None, history=None, bots_env=None,
+                 pusher=None):
         self.mux, self.tokens, self.readonly = mux, tokens, bool(readonly)
         self.allow_hosts = tuple(h.lower() for h in allow_hosts)
         self.clock, self.wall = clock, wall
@@ -961,6 +970,9 @@ class App:
         self.read_bucket = Bucket(15.0, 30, clock)
         self.write_bucket = Bucket(2.0, 10, clock)
         self.session_bucket = Bucket(1.0 / SESSION_EVERY, SESSION_BURST, clock)
+        self.bot_bucket = Bucket(1.0 / BOT_EVERY, BOT_BURST, clock)      # creating, editing and deleting bots
+        self.bot_run_bucket = Bucket(1.0 / BOT_EVERY, BOT_BURST, clock)  # run now: every run costs money
+        self.bot_say_bucket = Bucket(1.0 / BOT_SAY_EVERY, BOT_SAY_BURST, clock)   # talking to a bot starts an omp turn
         self._session_lock = threading.Lock()
         self._session_recent = {}                   # (directory, profile) -> when it was last started
         self._tails = {}                            # pane -> (when, lines, text)
@@ -978,6 +990,7 @@ class App:
         self._icon = None
         self._sessions_seen = {}
         self.terminal_flag = bool(terminal)         # --terminal: the terminal is on whatever settings.json says
+        self.attach_cmd = None                      # argv of `hivegrid-remote attach ...` without the session id; `serve` sets it
         self.term_io = KeyedBuckets(TERM_IO_RATE, TERM_IO_BURST, clock)
         self.term_open = KeyedBuckets(1.0 / TERM_OPEN_EVERY, TERM_OPEN_BURST, clock)
         self.terminals = terminals or T.Manager(clock=clock, log=self.log)
@@ -991,7 +1004,18 @@ class App:
         self.quit_bucket = Bucket(1.0 / QUIT_EVERY, QUIT_BURST, clock)
         self.quitter = quitter or HI.SessionQuitter(self.mux, clock=clock, sleep=self.sleep, foreground=_foreground)
         self.history = history or HI.History(sanitize_line, home=self.home, clock=clock)
+        self.git = G.Overview(sanitize_line, slots=_SLOTS, clock=clock)
         self._uploading = threading.BoundedSemaphore(UPLOADS_AT_ONCE)
+        # The schedules live where hivegrid_schedule says ($XDG_CONFIG_HOME, $XDG_STATE_HOME, $XDG_RUNTIME_DIR). With a
+        # `home` given (the tests) nothing but that home and the runtime dir is inherited, so no real schedule is reachable.
+        if bots_env is None and home is not None:
+            bots_env = {"HOME": home, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", "")}
+        self.bots = B.Bots(sanitize_line, sanitize_text, validate_text, MAX_PROMPT, env=bots_env, wall=wall, home=home)
+        self._pusher = pusher                       # None until first used: the store sits beside settings.json
+        self._pusher_lock = threading.Lock()
+        self.push_test_bucket = Bucket(1.0 / PUSH_TEST_EVERY, PUSH_TEST_BURST, clock)
+        self._push_owner = None                     # the token fingerprint the stored devices were last checked against
+        self._push_sweep_err = None                 # the last reason a sweep failed (logged once, not every round)
 
     # -- helpers
     def _error(self, err):
@@ -1154,21 +1178,40 @@ class App:
             raise HttpError("rate_limited", "slow down", {"Retry-After": str(max(math.ceil(wait), 1))})
         if terminal:
             return self._terminal(req, key, token, path, query)
+        if path == "/api/push" or path.startswith("/api/push/"):
+            return self._push_api(req, token, path)
 
         fm = re.fullmatch(r"/api/agents/([^/]+)/files(?:/([^/]+))?", path)
         hm = re.fullmatch(r"/api/history/([0-9a-f]{24})/revive", path)
-        m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|prompt|keys|plan|ack|model|thinking|account|quit|upload)", path)
+        bm = re.fullmatch(r"/api/bots/([a-z0-9-]{3,32})(?:/(runs|run|pause|resume|skip|cancel|ack|delete|say|conversation)|/runs/([0-9]{1,9}))?", path)
+        m = fm or re.fullmatch(r"/api/agents/([^/]+)/(tail|chat|models|accounts|git|prompt|keys|plan|ack|model|thinking|account|quit|upload)", path)
         if path in self.GET_ROUTES or path in self.POST_ROUTES:
-            action, ident = path, None
+            action, ident = ("bot-create" if path == "/api/bots" and req.method == "POST" else path), None
         elif hm:
             action, ident = "revive", hm.group(1)
+        elif bm:
+            bid, verb, number = bm.groups()
+            if number is not None:
+                action, ident = "bot-runinfo", (bid, int(number))
+            elif verb == "runs":
+                action, ident = "bot-runs", bid
+            elif verb == "delete":
+                action, ident = "bot-delete", bid
+            elif verb == "say":
+                action, ident = "bot-say", bid
+            elif verb == "conversation":
+                action, ident = "bot-conv", bid
+            elif verb:
+                action, ident = "bot-do", (bid, verb)
+            else:
+                action, ident = ("bot" if req.method == "GET" else "bot-edit"), bid
         elif fm:
             action, ident = "files", fm.group(1) + ("/" + fm.group(2) if fm.group(2) else "")
         elif m:
             action, ident = m.group(2), m.group(1)
         else:
             raise HttpError("not_found", "not found")
-        want = "GET" if action in self.GET_ROUTES or action in self.GET_ACTIONS else "POST"
+        want = "GET" if action in self.GET_ROUTES or action in self.GET_ACTIONS or action in self.BOT_GETS else "POST"
         if req.method != want:
             raise HttpError("method_not_allowed", "method not allowed")
         try:
@@ -1283,8 +1326,13 @@ class App:
     def _agents_doc(self):
         agents = self._listed(self._agents())
         limits = self._limits(agents)
-        return agents_json(agents, self.wall(), self.readonly, self._has_session, self.terminal_enabled(),
+        data = agents_json(agents, self.wall(), self.readonly, self._has_session, self.terminal_enabled(),
                            lambda a: limits.get(a.pane), lambda a: self.switcher.status(a.pane))
+        bots = self.bots.summary(self.wall())       # the menu button's dot; absent while there are no bots
+        if bots:
+            data["bots"] = bots
+            data["rev"] = rev_of([data["rev"], bots])
+        return data
 
     # -- long polls
     @staticmethod
@@ -1395,7 +1443,12 @@ class App:
             return Response(200, _json_body({"unchanged": True, "rev": rev}))
         queued = self._queued(agent, path, before)      # before the window: nothing that left the queue is missing from the items
         got = self.chat.window(path, limit, before) if path else None
-        if got is None:
+        if got is None and agent.source != "scrape" and D.session_path_pending(agent.session_file, self.home):
+            # a fresh omp: it has named its session file but writes it with the first message. The chat is
+            # simply empty (the page would otherwise show the pane's welcome screen as a "screen" fallback).
+            items, has_older, source, gen = [], False, "session", 0
+            rev = rev_of(["fresh", agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane), [f["id"] for f in self._files(agent)], queued])
+        elif got is None:
             items, has_older, source, gen = [], False, "screen", 0
             rev = rev_of(["screen", agent.state, agent.reason, pending_json(agent.pending), limit, before, self.switcher.status(agent.pane), [f["id"] for f in self._files(agent)], queued])
         else:
@@ -1409,6 +1462,14 @@ class App:
             "state_label": U.STATES[state].label, "reason": sanitize_line(agent.reason, 200), "since": agent.since,
             "limit": self._limits([agent]).get(agent.pane), "switch": self.switcher.status(agent.pane), "files": self._files(agent),
             "rev": rev, "gen": gen, "has_older": has_older, "older": before is not None, "items": items, "pending_prompts": queued}))
+
+    def _git(self, req, ident, q):
+        """`GET /api/agents/<id>/git?repo=N`: the git overview of the agent's working directory (see hivegrid_remote_git.py).
+        The directory is the agent's own and `repo` the number of a repository in the answer's list: the phone names no path."""
+        agent, _agents = self._find(ident, False)
+        index = self._int_param(q, "repo", 0, 0, GIT_REPOS_MAX - 1)
+        doc = self.git.overview(agent.cwd, index)
+        return self._json(req, {"id": agent.pane, **doc}, rev_of(doc))
 
     def _models(self, req, ident):
         agent, _agents = self._find(ident, False)
@@ -1447,6 +1508,8 @@ class App:
 
     def _get(self, req, action, ident, query):
         q = urllib.parse.parse_qs(query)
+        if action in ("/api/bots", "/api/bots/briefing") or action in self.BOT_GETS:
+            return self._bots_get(req, action, ident, q)
         if action == "/api/meta":
             meta = meta_json(self.readonly, self.terminal_enabled())
             return self._json(req, meta, meta["meta_rev"])
@@ -1484,6 +1547,8 @@ class App:
             return self._agent_accounts(ident)
         if action == "models":
             return self._models(req, ident)
+        if action == "git":
+            return self._git(req, ident, q)
         n = min(max(self._int_param(q, "lines", TAIL_DEFAULT, 0, 1 << 30), TAIL_MIN), TAIL_MAX)
         etag, wait = req.headers.get("if-none-match"), self._wait_param(q)
         looks = []
@@ -1683,6 +1748,151 @@ class App:
         self.log(f"write revive account={sanitize_line(labels.get(profile) or 'default', 40)}")
         return Response(200, _json_body({"ok": True, "id": pane}))
 
+    # -- bots (docs/remote.md, "Bots")
+    def _bots_get(self, req, action, ident, q):
+        try:
+            if action == "/api/bots":
+                etag = req.headers.get("if-none-match")
+                data = self._hold(self._wait_param(q), LIST_POLL, lambda: self.bots.listing(self.wall(), self.readonly),
+                                  lambda d: _etag_match(etag, d["rev"]), req.alive)
+                return self._json(req, data, data["rev"])
+            if action == "/api/bots/briefing":
+                etag = req.headers.get("if-none-match")
+                data = self._hold(self._wait_param(q), LIST_POLL, lambda: self.bots.briefing(self.wall()),
+                                  lambda d: _etag_match(etag, d["rev"]), req.alive)
+                return self._json(req, data, data["rev"])
+            if action == "bot-conv":
+                return self._bot_conversation(req, ident, q)
+            if action == "bot":
+                return self._json(req, self.bots.detail(ident, self.wall(), self.readonly))
+            if action == "bot-runs":
+                offset = self._int_param(q, "offset", 0, 0, 1 << 30)
+                limit = self._int_param(q, "limit", B.RUN_PAGE_DEFAULT, 1, B.RUN_PAGE_MAX)
+                return self._json(req, self.bots.runs(ident, offset, limit, self.readonly))
+            return self._json(req, self.bots.run_detail(ident[0], ident[1], self.readonly))
+        except B.Refused as exc:
+            raise HttpError(exc.code, exc.message) from None
+
+    def _bot_conv_look(self, bid, limit, before):
+        conv = self.bots.conversation(bid, self.wall())
+        path = conv["session_file"]
+        stamp = self.chat.stamp(path) if path else None
+        pending = conv["pending"] if before is None else []
+        rev = rev_of([stamp if stamp else "none", conv["live"], conv["busy"], conv["queue"], conv["error"], pending, limit, before])
+        return conv, (path if stamp else None), pending, rev
+
+    def _bot_conversation(self, req, bid, q):
+        """`GET /api/bots/<id>/conversation`: the bot's main session as the agent chat route gives it (same items, window,
+        `before`, `rev` and long-poll rules), plus `live`, `busy`, `queue`, `error` and the messages still waiting."""
+        limit = self._int_param(q, "limit", CHAT_DEFAULT, 1, CHAT_MAX)
+        before = self._int_param(q, "before", None, 0, 1 << 62)
+        if before is not None and before < 1:
+            raise HttpError("bad_request", "before must be the number of a chat item")
+        client_rev = q.get("rev", [None])[0]
+        if client_rev is not None and not re.fullmatch(r"[0-9a-f]{1,32}", client_rev):
+            raise HttpError("bad_request", "bad rev")
+        wait = self._wait_param(q) if before is None else 0
+        conv, path, pending, rev = self._hold(wait, CHAT_POLL, lambda: self._bot_conv_look(bid, limit, before),
+                                              lambda s: client_rev is not None and before is None and s[3] == client_rev, req.alive)
+        if client_rev is not None and before is None and rev == client_rev:
+            return Response(200, _json_body({"unchanged": True, "rev": rev}))
+        got = self.chat.window(path, limit, before) if path else None
+        items, has_older, gen = [], False, 0
+        if got is not None:
+            items, has_older, stamp = got
+            gen = stamp[0]
+            rev = rev_of([stamp, conv["live"], conv["busy"], conv["queue"], conv["error"], pending, limit, before])
+        working = conv["live"] or conv["busy"]
+        return Response(200, _json_body({
+            "id": bid, "name": conv["name"], "source": "session", "state": "working" if working else "idle",
+            "state_label": "working" if working else "idle", "reason": "", "since": None, "session": path is not None,
+            "live": conv["live"], "busy": conv["busy"], "queue": conv["queue"], "error": conv["error"], "files": [],
+            "rev": rev, "gen": gen, "has_older": has_older, "older": before is not None, "items": items, "pending_prompts": pending}))
+
+    def _spend(self, bucket, message):
+        wait = bucket.take()
+        if wait > 0:
+            raise HttpError("rate_limited", message, {"Retry-After": str(max(math.ceil(wait), 1))})
+
+    def _bot_gate(self):
+        self._spend(self.bot_bucket, "too many changes to bots: wait a few seconds")
+
+    def _bot_run_gate(self):
+        self._spend(self.bot_run_bucket, "too many runs started: wait a few seconds")
+
+    def _bot_say_gate(self):
+        self._spend(self.bot_say_bucket, "too many messages to bots: wait a few seconds")
+
+    def _bot_tz(self):
+        """The zone wall-clock words of a new bot mean: settings.json `schedule.tz` (an older settings module: local)."""
+        schedule = getattr(self.settings(), "schedule", None)
+        return schedule()["tz"] if schedule else "local"
+
+    def _bot_choices(self):
+        """(labels, resolve_dir) a bot's account and directory are checked against: the accounts and directories the new-session
+        page offers, and any folder below the home directory. Both look things up only when asked."""
+        cache = {}
+
+        def options():
+            if "o" not in cache:
+                cache["o"] = D.session_options(self.settings().accounts(), self._agents_or_none(), sanitize_line, self.home)
+            return cache["o"]
+
+        def labels():
+            return {p["label"] for p in options()[0]}
+
+        def resolve_dir(shown):
+            if not isinstance(shown, str):
+                return None
+            return options()[2].get(shown) or D.resolve_custom_dir(shown, self.home)
+        return labels, resolve_dir
+
+    def _bots_post(self, action, ident, body):
+        wall = self.wall()
+        try:
+            if action == "/api/bots/parse":
+                self._fields(body, ("text",))
+                if "text" not in body:
+                    raise HttpError("bad_request", "text is required")
+                return Response(200, _json_body(self.bots.parse(body["text"], self._bot_tz(), wall)))
+            if action == "bot-create":
+                labels, resolve_dir = self._bot_choices()
+                rec, upcoming = self.bots.create(body, labels, resolve_dir, self._bot_tz(), int(wall), gate=self._bot_gate)
+                self._written("bot-create", rec["id"], len(str(body.get("prompt", "")).encode("utf-8")))
+                return Response(200, _json_body({"ok": True, "id": rec["id"], "next": upcoming}))
+            if action == "bot-edit":
+                labels, resolve_dir = self._bot_choices()
+                rec, upcoming = self.bots.edit(ident, body, labels, resolve_dir, self._bot_tz(), int(wall), gate=self._bot_gate)
+                self._written("bot-edit", rec["id"], len(str(body.get("prompt", "")).encode("utf-8")))
+                return Response(200, _json_body({"ok": True, "id": rec["id"], "next": upcoming or []}))
+            if action == "bot-delete":
+                self._fields(body, ("confirm",))
+                if not isinstance(body.get("confirm", False), bool):
+                    raise HttpError("bad_request", "confirm must be true or false")
+                self.bots.delete(ident, body.get("confirm", False), int(wall), gate=self._bot_gate)
+                self._written("bot-delete", ident, 0)
+                return Response(200, _json_body({"ok": True}))
+            if action == "/api/bots/briefing/seen":
+                self._fields(body, ())
+                self._bot_gate()
+                result = self.bots.briefing_seen()
+                self._written("bot-briefing-seen", "-", 0)
+                return Response(200, _json_body({"ok": True, **result}))
+            if action == "bot-say":
+                self._fields(body, ("text",))
+                if "text" not in body:
+                    raise HttpError("bad_request", "text is required")
+                result = self.bots.say(ident, body["text"], int(wall), gate=self._bot_say_gate)
+                self._written("bot-say", ident, len(body["text"].encode("utf-8")))
+                return Response(200, _json_body({"ok": True, **result}))
+            bid, verb = ident                                  # bot-do
+            self._fields(body, ())
+            result = self.bots.act(bid, verb, int(wall), gate=self._bot_run_gate)
+            self._written("bot-" + verb, bid, 0)
+            return Response(200, _json_body({"ok": True, **result}))
+        except B.Refused as exc:
+            raise HttpError(exc.code, exc.message) from None
+
     def _new_session(self, body):
         self._fields(body, ("profile", "dir"))
         profile, shown = body.get("profile"), body.get("dir")
@@ -1729,6 +1939,8 @@ class App:
     def _post(self, action, ident, body):
         if action == "/api/sessions":
             return self._new_session(body)
+        if action in ("/api/bots/parse", "/api/bots/briefing/seen") or action.startswith("bot-"):
+            return self._bots_post(action, ident, body)
         if action == "quit":
             return self._quit(ident, body)
         if action == "revive":
@@ -1840,6 +2052,97 @@ class App:
             self.terminals.close_all("disabled")
         self.terminals.sweep(self.tokens.fingerprint())
 
+    # -- Web Push (hivegrid_remote_push.py)
+    def pusher(self):
+        """The sender for this server's push.json (beside settings.json); made on first use."""
+        with self._pusher_lock:
+            if self._pusher is None:
+                store = RP.Store(RP.push_path(self._watch().path), clock=self.wall)
+                self._pusher = RP.Pusher(store, lambda: self.terminal_settings()["push_contact"], clock=self.wall, log=self.log)
+            return self._pusher
+
+    def push_enabled(self):
+        return bool(self.terminal_settings()["push"])
+
+    def push_tick(self):
+        """Drops the devices that were registered with a token that has been replaced (`token --rotate`): a lost phone must
+        stop receiving the text of your agents' titles. Cheap: it looks only when the token changed."""
+        fp = self.tokens.fingerprint()
+        if fp is None or fp == self._push_owner or RP.unavailable():
+            return
+        try:
+            gone = self.pusher().store.sweep(fp)
+        except (RP.StoreError, OSError) as exc:
+            why = sanitize_line(str(exc), 160) if isinstance(exc, RP.StoreError) else type(exc).__name__
+            if why != self._push_sweep_err:       # said once per reason, not every 5 seconds; tried again next round
+                self._push_sweep_err = why
+                self.log(f"push sweep failed: {why}")
+            return
+        self._push_sweep_err = None
+        self._push_owner = fp
+        if gone:
+            self.log(f"push: {gone} device(s) of a replaced token were removed")
+
+    def _push_api(self, req, token, path):
+        """/api/push (GET), and POST /api/push/subscribe, /unsubscribe and /test. Allowed on a read-only server (they
+        touch no agent). The token, the Host and (for POST) the origin checks have passed."""
+        route = {"/api/push": "state", "/api/push/subscribe": "subscribe", "/api/push/unsubscribe": "unsubscribe",
+                 "/api/push/test": "test"}.get(path)
+        if route is None:
+            raise HttpError("not_found", "not found")
+        if (req.method == "GET") != (route == "state"):
+            raise HttpError("method_not_allowed", "method not allowed")
+        body = self._post_body(req) if req.method == "POST" else None
+        reason = RP.unavailable()
+        enabled = self.push_enabled()
+        if route == "state":
+            doc = {"ok": True, "enabled": enabled, "supported": reason is None, "reason": reason,
+                   "max_devices": RP.MAX_SUBS, "devices": [], "public_key": None}
+            if enabled and reason is None:
+                try:
+                    store = self.pusher().store
+                    doc["public_key"] = store.public_key()
+                    doc["devices"] = store.devices()
+                except (RP.StoreError, OSError, ValueError) as exc:
+                    doc["enabled"], doc["reason"] = False, sanitize_line(str(exc), 160) if isinstance(exc, RP.StoreError) else "push.json cannot be used"
+            return Response(200, _json_body(doc), headers={"Cache-Control": "no-store"})
+        if not enabled:
+            raise HttpError("push_disabled", "Web Push is off: set remote.push to true in settings.json")
+        if reason:
+            raise HttpError("internal", reason)
+        owner = _fingerprint(_token_digest(token))     # the token this request presented, not whatever the file says by now
+        store = self.pusher().store
+        try:
+            if route == "subscribe":
+                self._fields(body, ("endpoint", "keys", "label", "expirationTime"))
+                sub = RP.parse_subscription(body)
+                store.public_key()          # the key the device subscribed with exists before the device is stored
+                ident = store.add(sub, owner)
+                self._written("push-subscribe", "device", 0)
+                return Response(200, _json_body({"ok": True, "id": ident}))
+            if route == "unsubscribe":
+                self._fields(body, ("id",))
+                ident = body.get("id")
+                if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{16}", ident):
+                    raise HttpError("bad_request", "id must be a device id")
+                gone = store.remove([ident])
+                self._written("push-unsubscribe", "device", 0)
+                return Response(200, _json_body({"ok": True, "removed": gone}))
+            self._fields(body, ("id",))
+            ident = body.get("id")
+            if not (isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{16}", ident)):
+                raise HttpError("bad_request", "id must be a device id")
+            wait = self.push_test_bucket.take()
+            if wait > 0:
+                raise HttpError("rate_limited", "slow down", {"Retry-After": str(max(math.ceil(wait), 1))})
+            result = self.pusher().send_event({"title": "Hivegrid: test", "body": "Notifications work on this device.",
+                                               "tag": "test", "url": "#/", "test": True}, only=ident)
+            return Response(200, _json_body(dict(result, ok=True)))
+        except ValueError as exc:
+            raise HttpError("bad_request", sanitize_line(str(exc), 120)) from None
+        except (RP.StoreError, OSError) as exc:
+            raise HttpError("conflict", sanitize_line(str(exc), 160) if isinstance(exc, RP.StoreError) else "push.json cannot be written") from None
+
     def start_janitor(self, every=5.0):
         def run():
             while not self._stop.wait(every):
@@ -1847,14 +2150,20 @@ class App:
                     self.terminal_tick()
                 except Exception as exc:  # noqa: BLE001 - the janitor never dies of one bad round
                     self.log(f"terminal sweep failed: {type(exc).__name__}")
+                try:
+                    self.push_tick()
+                except Exception as exc:  # noqa: BLE001 - same
+                    self.log(f"push sweep failed: {type(exc).__name__}")
         threading.Thread(target=run, name="terminal-janitor", daemon=True).start()
 
     def start_notifier(self, every=5.0):
-        """Starts the ntfy notifier (hivegrid_remote_notify.py). It only does something while `remote.notify_url` is set."""
+        """Starts the phone notifier (hivegrid_remote_notify.py). It tells ntfy while `remote.notify_url` is set and Web Push
+        while `remote.push` is true."""
         def describe(agent, agents):
             return " \u00b7 ".join(p for p in (A.agent_label(agent, agents), sanitize_line(HV.calm_title(agent.title), 80),
                                               sanitize_line(U.home_path(agent.cwd), 80)) if p)
-        self.notifier = N.Notifier(self.terminal_settings, self._agents, describe, log=self.log)
+        self.notifier = N.Notifier(self.terminal_settings, self._agents, describe, log=self.log,
+                                   push_fn=lambda event, urgency: self.pusher().send_async(event, urgency))
         self.notifier.start(every)
 
     def _terminal_gate(self):
@@ -1921,7 +2230,22 @@ class App:
             session = self.terminals.open(cols, rows, owner)
         except T.TermError as exc:
             raise self._term_error(exc) from None
+        self._show_on_host(session)
         return Response(200, _json_body({"ok": True, **session.info(), "limits": self._term_limits()}))
+
+    def _show_on_host(self, session):
+        """Opens the terminal in a pane of the host's phone-terminals window (`hivegrid-remote attach`), when the server
+        knows how to be reached (`attach_cmd`, set by `serve`). A host without a window just has no pane: the phone
+        works the same."""
+        if not self.attach_cmd:
+            return
+        try:
+            pane = self.mux.act(lambda: A.spawn_terminal_pane([*self.attach_cmd, session.id], T.home_dir(os.environ), run=self.mux.run))
+        except Exception as exc:  # noqa: BLE001 - never a reason to fail the phone's request
+            self.log(f"terminal host pane failed: {type(exc).__name__}")
+            return
+        if pane is None:
+            self.log("terminal host pane failed: no window")
 
     def _term_out(self, req, session, q):
         pos = self._int_param(q, "from", 0, 0, 1 << 62)
@@ -2279,6 +2603,11 @@ def build_parser():
     g = t.add_mutually_exclusive_group()
     g.add_argument("--rotate", action="store_true", help="replace the token (the old one stops working at once)")
     g.add_argument("--show", action="store_true", help="print the existing token")
+    a = sub.add_parser("attach", help="show one of the phone's terminals in this terminal (started by the server in a pane of the host)")
+    a.add_argument("--host", default="127.0.0.1")
+    a.add_argument("--port", type=_port_arg, default=DEFAULT_PORT)
+    a.add_argument("--token-file")
+    a.add_argument("session")
     return p
 
 
@@ -2301,6 +2630,15 @@ def cmd_token(args):
     except OSError as exc:
         print(f"hivegrid-remote: cannot write {path}: {exc.strerror}", file=sys.stderr)
         return 1
+    if args.rotate and not args.token_file:
+        # Devices registered with the old token must not outlive it, also while the server is not running (the bot scheduler
+        # keeps pushing from push.json). A custom --token-file is some other server's: that server sweeps for itself.
+        try:
+            gone = RP.Store(RP.push_path()).sweep(_fingerprint(_token_digest(token)))
+            if gone:
+                print(f"hivegrid-remote: {gone} push device(s) of the old token were removed", file=sys.stderr)
+        except (RP.StoreError, OSError) as exc:
+            print(f"hivegrid-remote: push devices were not checked: {type(exc).__name__}", file=sys.stderr)
     print(token)
     return 0
 
@@ -2372,6 +2710,9 @@ def cmd_serve(args):
         print(f"hivegrid-remote: cannot listen on {args.bind}:{args.port}: {exc.strerror}", file=sys.stderr)
         return 1
     host, port = server.server_address[:2]
+    reach = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    app.attach_cmd = [sys.executable or "python3", os.path.realpath(os.path.join(os.path.dirname(__file__), "hivegrid-remote")), "attach",
+                      "--host", reach, "--port", str(port), "--token-file", store.path]
     note = " (read-only)" if args.read_only else (" (terminal on)" if app.terminal_enabled() else "")
     print(f"hivegrid-remote: listening on http://{f'[{host}]' if ':' in host else host}:{port}/" + note,
           file=sys.stderr, flush=True)
@@ -2390,8 +2731,15 @@ def cmd_serve(args):
     return 0
 
 
+def cmd_attach(args):
+    import hivegrid_remote_attach as AT
+    return AT.main(args.host, args.port, args.token_file or default_token_path(), args.session, read_token)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd == "attach":
+        return cmd_attach(args)
     return cmd_token(args) if args.cmd == "token" else cmd_serve(args)
 
 

@@ -42,6 +42,7 @@
 | Panels | `LEADER+,` | settings panel |
 | | `LEADER+h` | usage history panel |
 | | `LEADER+a` | agent hive panel |
+| | `LEADER+t` | Bots page (scheduled agents); again, or the header's `Canvas` button, goes back to the canvas |
 | | `LEADER+u`, then `1`-`9` | start (or, with omp, switch) the agent of the settings with that account |
 | Misc | `Ctrl+C` / `Ctrl+V` | smart copy or interrupt / paste |
 | | `Alt+s` | toggle system stats |

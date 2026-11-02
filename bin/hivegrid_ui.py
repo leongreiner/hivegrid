@@ -600,9 +600,10 @@ STATES = {
     "working": State("↻", "working", "accent", 6),
     "idle": State("·", "idle", "grey", 7),
     "exited": State("○", "exited", "muted", 8),
-    "web": State("◍", "web", "cyan", 9),
-    "other": State("›", "running", "dim", 10),
-    "shell": State("›", "shell", "dim", 11),
+    "schedule": State("◷", "waiting", "cyan", 9),
+    "web": State("◍", "web", "cyan", 10),
+    "other": State("›", "running", "dim", 11),
+    "shell": State("›", "shell", "dim", 12),
 }
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # drawn instead of ↻ while something runs, at 8 frames a second
 
@@ -1378,9 +1379,27 @@ class UI:
         data, self._pending = split_complete(pending + data)
         return decode(data)
 
+    def suspend(self):
+        """Hands the terminal back (cooked mode, main screen, no mouse reports) so a child such as
+        an editor can use it; resume() takes it again. Does nothing without a tty (tests, --dump)."""
+        if self.fd is None or getattr(self, "old_attrs", None) is None:
+            return
+        self.out.write("\x1b]22;\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l")
+        self.out.flush()
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_attrs)
+
+    def resume(self):
+        if self.fd is None or getattr(self, "old_attrs", None) is None:
+            return
+        tty.setraw(self.fd)
+        self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
+        self.out.flush()
+        self.hover = None
+        self.dirty = True
+
     def run(self):
         self.fd = sys.stdin.fileno()
-        old = termios.tcgetattr(self.fd)
+        old = self.old_attrs = termios.tcgetattr(self.fd)
         try:
             tty.setraw(self.fd)
             # 1003: pointer motion for the hover; 8800 (Hivegrid build): a report when the

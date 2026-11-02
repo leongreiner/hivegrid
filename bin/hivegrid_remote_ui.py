@@ -125,6 +125,7 @@ a { color: var(--accent); text-decoration: none; }
 .s-idle { --sc: var(--grey); }
 .s-exited { --sc: var(--muted); }
 .s-web { --sc: var(--cyan); }
+.s-schedule { --sc: var(--cyan); }
 .s-shell, .s-other { --sc: var(--dim); }
 .st { color: var(--sc, var(--dim)); }
 .glyph { display: inline-block; width: 2ch; text-align: center; font-weight: 700; color: var(--sc, var(--dim)); flex: none; }
@@ -569,6 +570,9 @@ details[open] > summary::before { content: "\25BE"; }
 .compose .btn.send { min-width: 6ch; }
 .compose .note { flex: 1 1 100%; margin: 0 0 2px 4px; font-size: 12px; color: var(--amber); }
 .compose-wrap { flex: none; }
+.skeys { flex: none; display: flex; gap: 6px; padding: 6px calc(10px + var(--sar)) 6px calc(10px + var(--sal)); background: var(--surface); border-top: 1px solid var(--rule-surface); }
+.skeys[hidden] { display: none; }
+.skeys .btn { flex: 1 1 0; min-width: 0; padding: 0; min-height: 40px; }
 .ro .write { display: none !important; }
 .d-body { display: contents; }
 kbd { font: inherit; }
@@ -621,6 +625,17 @@ kbd { font: inherit; }
 .arow .t { font-weight: 700; color: var(--bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arow .m { color: var(--dim); font-size: 12px; white-space: nowrap; }
 .arow .h { grid-column: 3 / -1; color: var(--muted); font-size: 12px; }
+.sheet-tools { display: flex; justify-content: flex-end; padding: 4px 0 8px; }
+.git-repo .g { font-size: 16px; color: var(--g, var(--muted)); }
+.git-repo .m span { color: var(--g, var(--muted)); font-weight: 700; }
+.git-file { display: grid; grid-template-columns: 2.4em 1fr auto; gap: 8px; padding: 5px 2px; font-size: 13px; border-bottom: 1px solid var(--border); }
+.git-code { font-family: ui-monospace, monospace; color: var(--amber); font-weight: 700; }
+.git-path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; color: var(--text); }
+.git-kind { color: var(--muted); font-size: 12px; }
+.git-commit { display: grid; grid-template-columns: 5.5em 1fr; gap: 2px 8px; padding: 6px 2px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.git-sha { font-family: ui-monospace, monospace; color: var(--accent); }
+.git-subj { color: var(--bright); overflow-wrap: anywhere; }
+.git-meta { grid-column: 2; color: var(--muted); font-size: 12px; }
 .arow:disabled { cursor: default; }
 .arow:disabled .t, .arow:disabled .g { color: var(--dim); }
 .arow.danger .g, .arow.danger .t { color: var(--red); }
@@ -769,15 +784,122 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
 @media (max-width: 470px) {
   .top .wide-only { display: none; }
 }
-/* swipe pager (only while the terminal is on, see pagerSet): horizontal moves reach the page, vertical ones scroll, pinch still zooms */
-#app.pg-on .top, #app.pg-on .list-pane, #app.pg-on .list, #app.pg-on .foot, #app.pg-on .tov-pane, #app.pg-on .tov-scroll { touch-action: pan-y pinch-zoom; }
+/* swipe pager (only while the terminal is on or the server has bots, see pagerSet): horizontal moves reach the page, vertical ones scroll, pinch still zooms */
+#app.pg-on .top, #app.pg-on .list-pane, #app.pg-on .list, #app.pg-on .foot, #app.pg-on .tov-pane, #app.pg-on .tov-scroll, #app.pg-on .bots-pane, #app.pg-on .bots-scroll, .bot-top { touch-action: pan-y pinch-zoom; }
 #app.pg-on .chips { touch-action: auto; }
-#app.pg-on .list-pane, #app.pg-on .tov-pane { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s ease-out; will-change: transform; }
+#app.pg-on .list-pane, #app.pg-on .tov-pane, #app.pg-on .bots-pane { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s ease-out; will-change: transform; }
 #app.pg-on .pg-drag { transition: none; }
 @keyframes pg-in-r { from { transform: translateX(32%); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes pg-in-l { from { transform: translateX(-32%); opacity: 0; } to { transform: none; opacity: 1; } }
 .pg-from-r { animation: pg-in-r .26s cubic-bezier(.2, .8, .2, 1) both; }
 .pg-from-l { animation: pg-in-l .26s cubic-bezier(.2, .8, .2, 1) both; }
+/* bots: the third page of the strip (#/bots), and a bot or a run as a full-screen page over it (#/bots/<id>, #/bots/<id>/<run>) */
+#app.bots-on .list-pane, #app.bots-on .detail-pane { display: none; }
+.bots-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--base); }
+.bots-head { flex: none; display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 calc(4px + var(--sar)) 0 calc(4px + var(--sal)); background: var(--base); border-bottom: 1px solid var(--rule-base); }
+.bots-back { display: inline-flex; align-items: center; padding: 0 10px; font-size: 13px; white-space: nowrap; }
+.bots-title { margin: 0; font: inherit; font-weight: 700; color: var(--bright); white-space: nowrap; outline: none; }
+.bots-title .n { color: var(--muted); font-weight: 400; }
+.bots-head .spacer { flex: 1; }
+.bots-note { flex: none; padding: 8px calc(12px + var(--sar)) 8px calc(12px + var(--sal)); background: var(--surface); border-bottom: 1px solid var(--rule-surface); color: var(--amber); font-size: 12px; overflow-wrap: anywhere; }
+.bots-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.bgrid { list-style: none; margin: 0; padding: 10px calc(10px + var(--sar)) 14px calc(10px + var(--sal)); display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 10px; }
+.bli { min-width: 0; display: flex; }
+.bcard { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--rule-surface); border-radius: 6px; box-shadow: inset 3px 0 0 var(--sc, var(--dim)); }
+.bmain { display: grid; grid-template-columns: 2ch minmax(0, 1fr) auto; column-gap: 1ch; align-items: baseline; padding: 8px 10px 6px; color: var(--text); }
+.bmain:active { background: var(--hover); border-radius: 6px 6px 0 0; }
+.bname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--bright); }
+.bend { display: inline-flex; align-items: baseline; gap: 1ch; white-space: nowrap; }
+.kchip { font-size: 11px; color: var(--muted); border: 1px solid var(--rule-surface); border-radius: 9px; padding: 0 1ch; }
+.bnew { font-size: 12px; color: var(--violet); font-weight: 700; }
+.bsub, .blast { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.bsub .st { font-weight: 700; }
+.blast { margin-top: 2px; }
+.rchip { font-weight: 700; }
+.rs-ok { color: var(--green); }
+.rs-failed, .rs-limit, .rs-timeout, .rs-cost { color: var(--red); }
+.rs-missed { color: var(--amber); }
+.rs-skipped, .rs-cancelled, .rs-deferred, .rs-other { color: var(--dim); }
+.bact { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 10px 10px; }
+.bact .btn { flex: 1 1 auto; min-height: 36px; min-width: 0; padding: 4px 10px; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+.tgl { gap: 0.8ch; color: var(--muted); }
+.tgl .knob { display: inline-block; width: 1.8ch; height: 1.8ch; border-radius: 50%; border: 1px solid var(--edge-hi); background: var(--track); }
+.tgl[aria-checked="true"] { color: var(--bright); border-color: var(--accent); }
+.tgl[aria-checked="true"] .knob { background: var(--accent); border-color: var(--accent); }
+.btn.has-dot { position: relative; }
+.bdot { position: absolute; top: 9px; right: 8px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 2px solid var(--deep); box-sizing: content-box; }
+.bdot.attn { background: var(--violet); }
+.bot-page { position: fixed; left: 0; right: 0; top: 0; height: 100dvh; z-index: 25; display: flex; flex-direction: column; background: var(--base); color: var(--text); }
+.bot-top { flex: none; display: flex; align-items: center; gap: 4px; min-height: 48px; padding: var(--sat) calc(4px + var(--sar)) 0 calc(4px + var(--sal)); background: var(--deep); border-bottom: 1px solid var(--rule); }
+.bot-top .ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--bright); }
+.bot-top .glyph { margin-left: 4px; }
+.bot-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-bottom: calc(16px + var(--sab)); }
+.bot-body { max-width: 760px; margin: 0 auto; }
+.bot-stat { padding: 10px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.bot-stat .st { font-weight: 700; }
+.bot-act { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
+.bot-act .btn { min-height: 40px; }
+.bot-det { margin: 8px calc(12px + var(--sar)) 0 calc(12px + var(--sal)); background: var(--surface); border: 1px solid var(--rule-surface); border-radius: 6px; }
+.bot-det > summary { min-height: 44px; padding: 0 10px; display: flex; align-items: center; cursor: pointer; color: var(--bright); font-weight: 700; }
+.bot-text { margin: 0; padding: 4px 10px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--text); }
+.bot-pre { margin: 0; padding: 4px 10px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; color: var(--text); }
+.brun { display: block; padding: 10px calc(12px + var(--sar)) 10px calc(12px + var(--sal)); border-bottom: 1px solid var(--rule-base); color: var(--text); }
+.brun:active { background: var(--hover); }
+.brun .rl { display: flex; align-items: baseline; gap: 1.2ch; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.brun .rl .rchip { font-size: 13px; }
+.brun .rs { margin-top: 2px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brun.unseen .rs { color: var(--bright); font-weight: 700; }
+.run-md { padding: 0 calc(12px + var(--sar)) 8px calc(12px + var(--sal)); }
+.fpad { padding: 0 calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
+.fhint { padding: 2px calc(12px + var(--sar)) 2px calc(12px + var(--sal)); color: var(--muted); font-size: 12px; }
+.fnum { display: flex; gap: 12px; }
+.fnum > label { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+textarea.field { resize: vertical; line-height: 1.4; min-height: 88px; }
+.pvw { padding: 4px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.pvw b { color: var(--green); }
+.pvw.err { color: var(--amber); }
+/* bots v2: the briefing, the conversation page, and the wide layout (briefing and list left, the open bot right) */
+.bots-none { display: none; flex: 1; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); background: var(--base); text-align: center; padding: 24px; }
+.bots-none .big { width: 72px; height: 72px; opacity: 0.85; }
+.sec-h .spacer { flex: 1; }
+.sec-h .n { color: var(--accent); }
+.bseen { min-height: 32px; padding: 0 8px; font-size: 12px; }
+.blist { list-style: none; margin: 0; padding: 0; }
+.bri { border-bottom: 1px solid var(--rule-base); }
+.bri-a { display: grid; grid-template-columns: 1.5ch minmax(0, 1fr); column-gap: 1ch; padding: 9px calc(12px + var(--sar)) 9px calc(12px + var(--sal)); color: var(--text); }
+.bri-a:active, .bri-a:hover { background: var(--hover); }
+.bri-dot { color: var(--violet); font-size: 12px; grid-row: 1 / 3; align-self: start; padding-top: 3px; }
+.bri-h { color: var(--text); overflow-wrap: anywhere; }
+.bri.unseen .bri-h { color: var(--bright); font-weight: 700; }
+.bri-m { grid-column: 2; margin-top: 2px; font-size: 12px; color: var(--muted); }
+.bri-m .bname { font-weight: 400; color: var(--muted); display: inline; }
+.bcard.cur { border-color: var(--accent); }
+.run-head { padding: 8px calc(12px + var(--sar)) 0 calc(12px + var(--sal)); color: var(--bright); font-weight: 700; overflow-wrap: anywhere; }
+.bot-page .chatbox { flex: 1; min-height: 0; }
+.bot-page .working { padding-left: 0; }
+.bot-info { flex: none; padding: 4px calc(12px + var(--sar)) 6px calc(12px + var(--sal)); font-size: 12px; color: var(--muted); background: var(--deep); border-bottom: 1px solid var(--rule); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-info .st { font-weight: 700; }
+.bot-info .err { color: var(--amber); margin-left: 1ch; }
+.bot-page .compose .note { color: var(--amber); }
+.compose textarea.field { min-height: 44px; resize: none; }
+.brief .sec-h::after { display: none; }
+.brief .sec-h { border-bottom: 0; }
+.bot-scroll .bot-body, .bot-scroll .run-md { max-width: 90ch; }
+@media (min-width: 900px) {
+  #app.bots-on > .top { display: flex; }
+  #app.bots-on .bots-pane { flex: none; width: clamp(360px, 32%, 520px); border-right: 1px solid var(--rule); }
+  #app.bots-on .bots-none { display: flex; }
+  #app.bots-on.bot-open .bots-none { display: none; }
+  #app.bots-on .bot-page { position: static; height: auto; flex: 1; min-width: 0; z-index: auto; }
+  #app.bots-on .bot-back { display: none; }
+  #app.bots-on .bot-page[aria-label="Report"] .bot-back { display: inline-flex; }
+  #app.bots-on .bgrid { grid-template-columns: 1fr; }
+}
+@media (min-width: 1500px) {
+  #app.bots-on .bots-pane { width: clamp(420px, 28%, 560px); }
+}
+#app.embed.bots-on > .top { display: none; }
+#app.embed .bots-back { display: none; }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
@@ -798,7 +920,8 @@ APP_JS = r"""(function () {
     exited: { glyph: "\u25cb", label: "exited" },
     bell: { glyph: "!", label: "bell" },
     web: { glyph: "\u25cd", label: "web" },
-    shell: { glyph: "\u203a", label: "shell" }
+    shell: { glyph: "\u203a", label: "shell" },
+    schedule: { glyph: "\u25f7", label: "waiting" }
   };
   var DEFAULT_LIMITS = { prompt: 8000, key_text: 256, feedback: 4000, upload: 25 * 1024 * 1024 };
   var DEFAULT_LEVELS = ["off", "minimal", "low", "medium", "high"];
@@ -806,7 +929,7 @@ APP_JS = r"""(function () {
   var WAIT = 20;
   var CHAT_LIMIT = 60;
   var TAIL_LINES = 200;
-  var SECTIONS = [["usage", "Usage"], ["new", "New session"], ["history", "History"], ["system", "System"], ["about", "About"]];
+  var SECTIONS = [["usage", "Usage"], ["new", "New session"], ["history", "History"], ["system", "System"], ["notify", "Alerts"], ["about", "About"]];
   var REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
   // ---------------------------------------------------------------- DOM helpers: text only, never markup
@@ -853,6 +976,9 @@ APP_JS = r"""(function () {
   var tokenSaved = token !== null;
   var authFailed = false;
   var inApp = false;
+  // Embedded mode (`/?embed=1#/bots`, the Bots page of the desktop Hivegrid in a web pane): only the Bots page, no top bar with the agent and terminal controls, no pager.
+  var EMBED = /(?:^|[?&])embed=1(?:&|$)/.test(window.location.search);
+  var openNew = false;
   var gen = 0;
   var clockOffset = 0;
   var metaTimer = null;
@@ -872,6 +998,8 @@ APP_JS = r"""(function () {
   var uploading = false;
   var pendKey = null;
   var limKey = null;
+  var swDismissed = {};              // agent id -> `since` of the switch result the user (or the timer) dismissed
+  var swTimer = null;
   var refineOpen = false;
   var lastOk = 0;
   var D = {};
@@ -885,6 +1013,9 @@ APP_JS = r"""(function () {
   var swipeStale = false;     // ... and a rebuild is due once it lets go
   var quitting = {};
   var reviving = false;
+  var BT = null;              // the bots: { data, etag, err, page, det, runs, open, form, ui } (see newBots)
+  var botsMode = null;        // "list" (#/bots), "bot" (#/bots/<id>), "run" (#/bots/<id>/<n>) or null: where the page is
+  var lastPage = "agents";    // the strip page shown last ("agents", "ov", "bots"), null while a full-screen page is open
   var ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", query: "", busy: false, err: null, found: [], searching: false, timer: null };
   var modelsCache = {};
 
@@ -939,8 +1070,6 @@ APP_JS = r"""(function () {
     return left > 0 ? "resets in " + fmtDur(left) : "reset due";
   }
   // "5-hour limit · resets in 2h05m": the countdown is kept current by refreshAges
-  var swDismissed = {};              // agent id -> `since` of the switch result the user (or the timer) dismissed
-  var swTimer = null;
   function limitLine(lim) {
     var out = [];
     var win = lim.window === "five_hour" ? "5-hour" : (lim.window === "seven_day" ? "weekly" : "");
@@ -971,9 +1100,18 @@ APP_JS = r"""(function () {
         if (rs[j].textContent !== rt) { rs[j].textContent = rt; }
       }
     }
+    var us = document.querySelectorAll("[data-until]");
+    for (var k = 0; k < us.length; k++) {
+      var u = parseFloat(us[k].getAttribute("data-until"));
+      if (isFinite(u)) {
+        var ut = untilText(u, us[k].getAttribute("data-pre") || "");
+        if (us[k].textContent !== ut) { us[k].textContent = ut; }
+      }
+    }
   }
   function composeMode(a) {
     var can = (a && a.can) || {};
+    if (can.keys && C && a && String(C.id) === String(a.id) && C.screen) { return "screen"; }
     return can.prompt ? "prompt" : (can.keys ? "answer" : "none");
   }
   function levelClass(pct) { return pct >= 90 ? "g-err" : (pct >= 70 ? "g-warn" : "g-ok"); }
@@ -1130,6 +1268,8 @@ APP_JS = r"""(function () {
   }
   var listLoop = Loop(listStep);
   var chatLoop = Loop(chatStep);
+  var botsLoop = Loop(botsStep);
+  var briefLoop = Loop(briefStep);
   var lastKick = 0;
   function kickAll() {
     if (!inApp || document.hidden) { return; }
@@ -1143,6 +1283,8 @@ APP_JS = r"""(function () {
     lastKick = Date.now();
     if (listLoop.wanted) { listLoop.go(); }
     if (chatLoop.wanted) { chatLoop.go(); }
+    if (botsLoop.wanted) { botsLoop.go(); }
+    if (briefLoop.wanted) { briefLoop.go(); }
   }
   window.setInterval(function () {
     if (document.hidden || !inApp) { return; }
@@ -1221,8 +1363,9 @@ APP_JS = r"""(function () {
     app.classList.toggle("ro", !!meta.readonly);
     if (U.ro) { U.ro.hidden = !meta.readonly; }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
-    pagerSet(!!meta.terminal);
-    routeTerm();
+    if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
+    pagerSet((!!meta.terminal || hasBots()) && !EMBED);
+    routePages();
     if (agents) { renderChips(); renderList(); updateDetail(); }
     if (menuSec === "about") { renderMenu(); }
   }
@@ -1293,8 +1436,10 @@ APP_JS = r"""(function () {
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
     U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u2261");
     U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
+    U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
+    U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.termBtn, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.termBtn, U.botsBtn, U.menuBtn);
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1334,6 +1479,12 @@ APP_JS = r"""(function () {
     D.send = h("button", { class: "btn primary send", type: "button", onclick: submit }, "send");
     D.plus = h("button", { class: "btn icon", type: "button", "aria-label": "Actions", "aria-haspopup": "dialog", onclick: openActions }, "+");
     D.note = h("p", { class: "note", hidden: true });
+    // The agent's screen with the keys a menu needs (omp's /resume, /model, /settings ... draw on the pane, not in the session file).
+    D.skeyBtns = [["\u2191", "up", "Up"], ["\u2193", "down", "Down"], ["\u2190", "left", "Left"], ["\u2192", "right", "Right"], ["\u21b5", "enter", "Enter"], ["esc", "esc", "Escape"], ["tab", "tab", "Tab"]].map(function (k) {
+      return h("button", { class: "btn key", type: "button", "aria-label": k[2], onclick: function () { if (selId !== null) { sendKeys(selId, [k[1]], false, null); } } }, k[0]);
+    });
+    D.skeys = h("div", { class: "skeys write", hidden: true, role: "group", "aria-label": "Keys for the agent's screen" },
+      D.skeyBtns.concat([h("button", { class: "btn primary", type: "button", onclick: function () { setScreen(false); } }, "chat")]));
     D.attach = h("button", { class: "btn icon", type: "button", "aria-label": "Attach a file", title: "Attach a file", onclick: function () { D.file.value = ""; D.file.click(); } }, "\u2191");
     D.file = h("input", { type: "file", multiple: "", hidden: "", onchange: function () { attachFiles(Array.prototype.slice.call(D.file.files)); } });
     D.compose = h("div", { class: "compose write" }, D.note, D.plus, D.attach, D.ta, D.send, D.file);
@@ -1342,18 +1493,21 @@ APP_JS = r"""(function () {
     D.body.appendChild(D.chatbox);
     D.body.appendChild(D.lcard);
     D.body.appendChild(D.pend);
+    D.body.appendChild(D.skeys);
     D.body.appendChild(D.compose);
     D.empty = h("div", { class: "d-empty" });
     var detailPane = h("section", { class: "detail-pane", "aria-label": "Agent chat" }, D.head, D.body, D.empty);
 
     app.appendChild(top);
     U.tov = h("section", { class: "tov-pane", hidden: true, "aria-label": "Terminals" });
+    U.bots = buildBotsPane();
     U.live = h("div", { class: "sr-only", role: "status", "aria-live": "polite" });
-    app.appendChild(h("div", { class: "split" }, listPane, detailPane, U.tov));
+    app.appendChild(h("div", { class: "split" }, listPane, detailPane, U.tov, U.bots, U.botsEmpty));
     app.appendChild(U.live);
     buildMenu();
     app.appendChild(M.root);
     app.classList.toggle("ro", !!(meta && meta.readonly));
+    app.classList.toggle("embed", EMBED);
     U.ro.hidden = !(meta && meta.readonly);
   }
 
@@ -1363,6 +1517,7 @@ APP_JS = r"""(function () {
       return (a.rank - b.rank) || ((a.tab || 0) - (b.tab || 0)) || ((a.num || 0) - (b.num || 0));
     });
     if (typeof data.now === "number") { clockOffset = data.now - Date.now() / 1000; }
+    setBotsDot(data.bots);
     var needs = agents.filter(function (a) { return a.state === "attention" || a.state === "limit"; }).length;
     document.title = (needs > 0 ? "(" + needs + ") " : "") + "Hivegrid";
     clear(U.count);
@@ -1437,18 +1592,24 @@ APP_JS = r"""(function () {
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
     if (needs + limited === 0) {
-      var swipeHint = meta && meta.terminal && window.matchMedia && window.matchMedia("(pointer: coarse)").matches ? " \u00b7 swipe left: terminals" : "";
+      var swipeHint = pagerOn && window.matchMedia && window.matchMedia("(pointer: coarse)").matches
+        ? " \u00b7 swipe left: " + [meta && meta.terminal ? "terminals" : null, hasBots() ? "bots" : null].filter(Boolean).join(" / ") : "";
       U.foot.appendChild(h("span", null, "tap an agent to open" + swipeHint));
     }
   }
 
   // ---------------------------------------------------------------- routing
   function takeFragment() {
-    var m = /^#t=(.+)$/.exec(window.location.hash);
+    var m = /^#t=([^&]+)(?:&r=([^&]*))?(&n=1)?$/.exec(window.location.hash);
     if (!m) { return false; }
     try { token = decodeURIComponent(m[1]); } catch (e) { token = m[1]; }
     tokenSaved = false;
-    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    // `&r=/bots` (the desktop's web pane): where to go once the token is taken; only `/` and `/bots...` are accepted
+    var route = "";
+    try { route = m[2] ? decodeURIComponent(m[2]) : ""; } catch (e) { route = ""; }
+    var to = /^\/(?:bots(?:\/[a-z0-9-]{3,32}(?:\/[0-9]{1,9})?)?)?$/.test(route) ? "#" + route : "";
+    window.history.replaceState(null, "", window.location.pathname + window.location.search + to);
+    openNew = EMBED && !!m[3];       // `&n=1`: the new-bot sheet right after login (embedded only)
     return true;
   }
   function parseHash() {
@@ -1503,7 +1664,7 @@ APP_JS = r"""(function () {
       else { renderMenu(); menuTick(true); }
     }
     if (changed && agents) { renderList(); updateDetail(); }
-    routeTerm();
+    routePages();
   }
 
   // ---------------------------------------------------------------- terminal: its script and styles load when it is first opened
@@ -1596,24 +1757,22 @@ APP_JS = r"""(function () {
       if (termView) { termView.select(want.n); } else { termView = window.HGTermView.open(termCtx(), want.n); }
     }
     var prevMode = termMode;
-    if (mode !== termMode) {
-      ["list-pane", "tov-pane"].forEach(function (c) { var p = document.querySelector("." + c); if (p) { pagerRest(p); p.classList.remove("pg-from-l", "pg-from-r"); } });
-      if (mode === "ov" && prevMode === null) { enterPane(U.tov, "pg-from-r"); }          // the terminals sit to the right of the agents
-      else if (mode === null && prevMode === "ov") { enterPane(document.querySelector(".list-pane"), "pg-from-l"); }
-    }
     if (mode !== prevMode) {
       termMode = mode;
       if (mode === "ov") { ovView.focus(termLast); announce("Terminals"); }
-      else if (mode === null) { announce("Agents"); if (U.termBtn && !U.termBtn.hidden) { U.termBtn.focus({ preventScroll: true }); } }
+      else if (mode === null && botsMode === null) { announce("Agents"); if (U.termBtn && !U.termBtn.hidden) { U.termBtn.focus({ preventScroll: true }); } }
+      pageSwitch();
     }
   }
 
-  // ---------------------------------------------------------------- swipe pager: agents <-> terminal overview
-  // The pager gesture, as pure functions (tests/ext/remote-term.test.ts runs this block on its own). The terminals sit to the right
-  // of the agents: finger moves left on the agents and the terminal overview opens; right on the overview: back to the agents; in
-  // an open terminal, from its header or an edge of the screen either way: back to the overview.
+  // ---------------------------------------------------------------- swipe pager: agents <-> terminal overview <-> bots
+  // The pager gesture, as pure functions (tests/ext/remote-term.test.ts runs this block on its own). The pages sit in a strip: the
+  // agents, then the terminal overview (only while the terminal is on), then the bots (only when the server has them). Finger moves
+  // left and the next page to the right opens, finger moves right and the one before it; in a full-screen page (a terminal, a bot or
+  // a run), from its header or an edge of the screen either way: one step back.
   // pager-logic:begin
-  var PAGER_EDGE = 24;       // px from a screen edge where a swipe inside an open terminal counts
+  var PAGER_EDGE = 24;       // px from a screen edge where a swipe inside a full-screen page counts
+  var PAGER_HASH = { agents: "#/", ov: "#/term", bots: "#/bots" };
   function pagerClassify(dx, dy) {
     var ax = Math.abs(dx);
     var ay = Math.abs(dy);
@@ -1621,33 +1780,70 @@ APP_JS = r"""(function () {
     if (ax >= 12 && ax >= 1.5 * ay) { return "lock"; }             // clearly sideways: the direction is locked
     return "wait";
   }
-  function pagerAllows(zone, dx) {
-    if (zone === "agents") { return dx < 0; }
-    if (zone === "ov") { return dx > 0; }
-    return zone === "term";
+  function pagerStripOf(terminal, bots) {
+    var s = ["agents"];
+    if (terminal) { s.push("ov"); }
+    if (bots) { s.push("bots"); }
+    return s;
+  }
+  function pagerAllows(zone, dx, strip) {
+    if (zone === "term" || zone === "bot") { return true; }
+    var i = strip.indexOf(zone);
+    if (i < 0) { return false; }
+    return dx < 0 ? i + 1 < strip.length : (dx > 0 && i > 0);
   }
   function pagerCommit(dx, ms) {
     var ax = Math.abs(dx);
     return ax >= 72 || (ax >= 36 && ax / Math.max(ms, 1) >= 0.5);   // far enough, or a short flick
   }
-  function pagerDest(zone) { return zone === "ov" ? "#/" : "#/term"; }
   function termHash(hash) {
     var m = /^#\/term(?:\/([0-9]{1,9}))?$/.exec(hash);
     return m ? { n: m[1] === undefined ? null : parseInt(m[1], 10) } : null;
   }
+  function botsHash(hash) {
+    var m = /^#\/bots(?:\/([a-z0-9-]{3,32})(?:\/([0-9]{1,9}))?)?$/.exec(hash);
+    return m ? { id: m[1] === undefined ? null : m[1], run: m[2] === undefined ? null : parseInt(m[2], 10) } : null;
+  }
+  function pagerDest(zone, dx, strip, hash) {
+    if (zone === "term") { return "#/term"; }
+    if (zone === "bot") {
+      var b = botsHash(hash);
+      return b && b.run !== null ? "#/bots/" + b.id : "#/bots";
+    }
+    var i = strip.indexOf(zone);
+    return PAGER_HASH[strip[dx < 0 ? i + 1 : i - 1]] || "#/";
+  }
   // pager-logic:end
   var pagerOn = false;
   var pg = null;             // the swipe being tracked: { id, x, y, t, zone, locked, dx, pane }
+  var PAGES = ["agents", "ov", "bots"];
+  function pagerStrip() { return pagerStripOf(!!(meta && meta.terminal), hasBots()); }
+  function pageEl(p) { return p === "agents" ? document.querySelector(".list-pane") : (p === "ov" ? U.tov : (p === "bots" ? U.bots : null)); }
+  // The strip page that shows now: null while a full-screen page (a terminal, a bot, a run) is over it.
+  function stripPage() {
+    if (botsMode === "list") { return "bots"; }
+    if (botsMode !== null) { return null; }
+    return termMode === "ov" ? "ov" : (termMode === null ? "agents" : null);
+  }
+  // A change of page: the pane that comes in slides from the side it sits on (to the right of the one that left, or to its left).
+  function pageSwitch() {
+    var next = stripPage();
+    if (next === lastPage) { return; }
+    var prev = lastPage;
+    lastPage = next;
+    PAGES.forEach(function (p) { var el = pageEl(p); if (el) { pagerRest(el); el.classList.remove("pg-from-l", "pg-from-r"); } });
+    if (next && prev) { enterPane(pageEl(next), PAGES.indexOf(next) > PAGES.indexOf(prev) ? "pg-from-r" : "pg-from-l"); }
+  }
   function pagerZone(ev) {
     var t = ev.target;
     if (!inApp || !t || !t.closest || menuSec || sheet || document.getElementById("confirm").open) { return null; }
-    if (document.querySelector(".term-page")) {
-      var edge = ev.clientX < PAGER_EDGE || ev.clientX > window.innerWidth - PAGER_EDGE;
-      return t.closest(".term-top") || (edge && t.closest(".term-page")) ? "term" : null;
-    }
+    var edge = ev.clientX < PAGER_EDGE || ev.clientX > window.innerWidth - PAGER_EDGE;
+    if (document.querySelector(".term-page")) { return t.closest(".term-top") || (edge && t.closest(".term-page")) ? "term" : null; }
+    if (document.querySelector(".bot-page")) { return t.closest(".bot-top") || (edge && t.closest(".bot-page")) ? "bot" : null; }
     var app = document.getElementById("app");
     if (!app.contains(t) || t.closest(".chips, .rw.open, input, textarea, select, button.rquit")) { return null; }
     if (app.classList.contains("term-ov")) { return t.closest(".top, .tov-pane") ? "ov" : null; }
+    if (app.classList.contains("bots-on")) { return t.closest(".top, .bots-pane") ? "bots" : null; }
     return t.closest(".top, .list-pane") ? "agents" : null;
   }
   function pagerDown(ev) {
@@ -1663,9 +1859,9 @@ APP_JS = r"""(function () {
     if (!pg.locked) {
       var c = pagerClassify(dx, dy);
       if (c === "wait") { return; }
-      if (c === "cancel" || !pagerAllows(pg.zone, dx)) { pg = null; return; }
+      if (c === "cancel" || !pagerAllows(pg.zone, dx, pagerStrip())) { pg = null; return; }
       pg.locked = true;
-      pg.pane = document.querySelector(pg.zone === "agents" ? ".list-pane" : (pg.zone === "ov" ? ".tov-pane" : ".none"));
+      pg.pane = pg.zone === "term" || pg.zone === "bot" ? null : pageEl(pg.zone);
       if (pg.pane) { pg.pane.classList.add("pg-drag"); }
     }
     pg.dx = dx;
@@ -1679,13 +1875,15 @@ APP_JS = r"""(function () {
     if (!pg || (ev && ev.pointerId !== pg.id)) { return; }
     var g = pg;
     pg = null;
-    var go = !cancelled && g.locked && !!ev && pagerAllows(g.zone, g.dx) && pagerCommit(g.dx, ev.timeStamp - g.t);
+    var strip = pagerStrip();
+    var go = !cancelled && g.locked && !!ev && pagerAllows(g.zone, g.dx, strip) && pagerCommit(g.dx, ev.timeStamp - g.t);
+    var dest = go ? pagerDest(g.zone, g.dx, strip, window.location.hash) : null;
     var pane = g.pane;
-    if (!pane) { if (go) { setHash(pagerDest(g.zone), false); } return; }
+    if (!pane) { if (go) { setHash(dest, false); } return; }
     pane.classList.remove("pg-drag");
     if (!go || REDUCED) {                                  // not far enough: it springs back; reduced motion: no slide
       pagerRest(pane);
-      if (go) { setHash(pagerDest(g.zone), false); }
+      if (go) { setHash(dest, false); }
       return;
     }
     var w = pane.offsetWidth || window.innerWidth;         // far enough: it slides the rest of the way out, then the page changes
@@ -1696,8 +1894,8 @@ APP_JS = r"""(function () {
       if (done) { return; }
       done = true;
       pane.removeEventListener("transitionend", fin);
-      setHash(pagerDest(g.zone), false);
-      window.setTimeout(function () { pagerRest(pane); }, 400);   // routeTerm clears it on the page change; this is the safety net
+      setHash(dest, false);
+      window.setTimeout(function () { pagerRest(pane); }, 400);   // pageSwitch clears it on the page change; this is the safety net
     }
     pane.addEventListener("transitionend", fin);
     window.setTimeout(fin, 240);
@@ -1705,7 +1903,8 @@ APP_JS = r"""(function () {
   function pagerRest(pane) { pane.style.transform = ""; pane.style.opacity = ""; }
   function pagerUp(ev) { pagerEnd(ev, false); }
   function pagerCancel(ev) { pagerEnd(ev, true); }
-  // Registered only while the terminal is on (meta.terminal): with it off nothing listens and the page's touch handling is untouched.
+  // Registered only while there is a second page (meta.terminal or the bots capability): without one nothing listens and the
+  // page's touch handling is untouched.
   function pagerSet(on) {
     if (on === pagerOn) { return; }
     pagerOn = on;
@@ -1722,7 +1921,7 @@ APP_JS = r"""(function () {
   // ---------------------------------------------------------------- chat state
   function newChat(id) {
     return { id: id, map: {}, rev: null, source: null, mode: "chat", hasOlder: false, olderLoaded: false, loadingOlder: false,
-      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null, blobs: {}, files: [] };
+      state: null, reason: null, nodes: {}, tailEtag: null, tailN: 0, loaded: false, gone: false, empty: null, blobs: {}, files: [], screen: false };
   }
   function openChat(id) {
     chatLoop.stop();
@@ -1744,8 +1943,8 @@ APP_JS = r"""(function () {
     if (!c || c.id === null) { return Promise.resolve({}); }
     var id = c.id;
     var url = "/api/agents/" + encodeURIComponent(id);
-    var probe = c.mode === "tail" && c.tailN % 8 === 7;
-    if (c.mode === "tail" && !probe) {
+    var probe = c.mode === "tail" && !c.screen && c.tailN % 8 === 7;
+    if ((c.mode === "tail" || c.screen) && !probe) {
       c.tailN += 1;
       return api(url + "/tail?lines=" + TAIL_LINES + "&wait=" + WAIT, { etag: c.tailEtag, timeout: (WAIT + 8) * 1000, loop: L }).then(function (r) {
         if (run !== L.run || c !== C || r.status === 401) { return {}; }
@@ -1762,7 +1961,7 @@ APP_JS = r"""(function () {
     var long = !!c.rev && c.mode === "chat";
     var q = "?limit=" + CHAT_LIMIT + (long ? "&rev=" + encodeURIComponent(c.rev) + "&wait=" + WAIT : "");
     if (probe) { c.tailN += 1; }
-    return api(url + "/chat" + q, { timeout: long ? (WAIT + 8) * 1000 : 12000, loop: L }).then(function (r) {
+    return api(c.bot ? botUrl(id, "conversation") + q : url + "/chat" + q, { timeout: long ? (WAIT + 8) * 1000 : 12000, loop: L }).then(function (r) {
       if (run !== L.run || c !== C || r.status === 401) { return {}; }
       if (r.status === 200 && r.data) {
         if (r.data.unchanged) { return { quick: true, retry: r.retry }; }
@@ -1856,6 +2055,13 @@ APP_JS = r"""(function () {
     }
     if (c.mode === "tail") { c.mode = "chat"; showMode(c); }
     c.rev = data.rev;
+    if (c.bot && !data.session && Object.keys(c.map).length) {
+      // a bot's session file is briefly unreadable while a turn starts: keep what the page has, only the status moves
+      BT.conv = { live: !!data.live, busy: !!data.busy, queue: data.queue || 0, error: data.error || null };
+      c.rev = null;
+      botBar();
+      return;
+    }
     if (c.gen !== data.gen) {      // another parse of the file (it was replaced or rewritten): item numbers no longer match
       c.gen = data.gen;
       c.map = {};
@@ -1874,13 +2080,14 @@ APP_JS = r"""(function () {
     if (!c.olderLoaded) { c.hasOlder = !!data.has_older; }
     c.queued = Array.isArray(data.pending_prompts) ? data.pending_prompts : [];
     renderTranscript(true);
+    if (c.bot) { BT.conv = { live: !!data.live, busy: !!data.busy, queue: data.queue || 0, error: data.error || null }; botBar(); return; }
     updateDetail();
   }
   function showMode(c) {
-    var tail = c.mode === "tail";
+    var tail = c.mode === "tail" || c.screen;
     D.chat.hidden = tail;
     D.tailbox.hidden = !tail;
-    D.screenNote.hidden = !tail;
+    D.screenNote.hidden = c.mode !== "tail" || c.screen;
   }
   function loadOlder() {
     var c = C;
@@ -1890,7 +2097,7 @@ APP_JS = r"""(function () {
     var oldest = Math.min.apply(null, ns2);
     c.loadingOlder = true;
     renderOlder();
-    api("/api/agents/" + encodeURIComponent(c.id) + "/chat?limit=" + CHAT_LIMIT + "&before=" + oldest, { timeout: 12000 }).then(function (r) {
+    api((c.bot ? botUrl(c.id, "conversation") : "/api/agents/" + encodeURIComponent(c.id) + "/chat") + "?limit=" + CHAT_LIMIT + "&before=" + oldest, { timeout: 12000 }).then(function (r) {
       c.loadingOlder = false;
       if (c !== C) { return; }
       if (r.status === 200 && r.data && Array.isArray(r.data.items)) {
@@ -2119,23 +2326,27 @@ APP_JS = r"""(function () {
     renderLimit(a);
     var can = a.can || {};
     var mode = composeMode(a);
+    var typed = mode === "answer" || mode === "screen";
     D.ta.disabled = mode === "none";
-    D.ta.placeholder = mode === "answer" ? "Answer" : (mode === "none" ? "Agent exited" : "Message");
-    D.ta.setAttribute("aria-label", mode === "answer" ? "Answer" : "Message");
-    D.ta.setAttribute("maxlength", String(limitOf(mode === "answer" ? "key_text" : "prompt")));
-    D.send.textContent = mode === "answer" ? "answer" : "send";
+    D.ta.placeholder = mode === "answer" ? "Answer" : (mode === "screen" ? "Type into the screen" : (mode === "none" ? "Agent exited" : "Message"));
+    D.ta.setAttribute("aria-label", mode === "answer" ? "Answer" : (mode === "screen" ? "Type into the screen" : "Message"));
+    D.ta.setAttribute("maxlength", String(limitOf(typed ? "key_text" : "prompt")));
+    D.send.textContent = mode === "answer" ? "answer" : (mode === "screen" ? "type" : "send");
     D.send.disabled = mode === "none" || !D.ta.value.trim();
+    D.skeys.hidden = !(C && C.id === selId && C.screen);
+    D.skeyBtns.forEach(function (b) { b.disabled = !can.keys; });
     D.plus.disabled = false;
     D.attach.hidden = !(meta && meta.capabilities && meta.capabilities.indexOf("upload") >= 0);
     D.attach.disabled = mode === "none" || uploading;
     var note = "";
-    if (mode === "answer" && a.pending && a.pending.kind !== "plan_review") { note = "Tap above, or type an answer: it is pasted, then Enter."; }
+    if (mode === "screen") { note = "The agent's screen. Use the keys; typed text is not followed by Enter."; }
+    else if (mode === "answer" && a.pending && a.pending.kind !== "plan_review") { note = "Tap above, or type an answer: it is pasted, then Enter."; }
     else if (a.state === "limit") { note = "The account's limit is reached: switch account, or wait for the reset."; }
     D.note.hidden = !note;
     D.note.textContent = note;
     // live indicator
     var working = a.state === "working" || a.state === "busy";
-    D.working.hidden = !working || !(C && C.mode === "chat");
+    D.working.hidden = !working || !(C && C.mode === "chat" && !C.screen);
     if (working) {
       clear(D.working);
       var g = h("span", { class: "glyph spin", "aria-hidden": "true" }, REDUCED ? "\u21bb" : spinChar());
@@ -2161,9 +2372,11 @@ APP_JS = r"""(function () {
   function renderLimit(a) {
     var lim = a.state === "limit" ? a.limit || { label: "usage limit" } : null;
     var sw = a.switch;
+    if (sw && sw.state !== "running" && swDismissed[a.id] === sw.since) { sw = null; }
     var can = a.can || {};
     var key = JSON.stringify([a.id, a.state, lim, sw, !!can.account, a.profile]);
     if (key === limKey) { return; }
+    window.clearTimeout(swTimer);
     limKey = key;
     clear(D.lcard);
     if (!lim && !sw) { D.lcard.hidden = true; return; }
@@ -2182,12 +2395,20 @@ APP_JS = r"""(function () {
       D.lcard.appendChild(h("h3", null, "Chat moved to " + (sw.to || "the new account")));
       D.lcard.appendChild(h("p", null, sw.message || "omp resumed the chat"));
     }
+    if (sw && sw.state !== "running" && !lim) {
+      var since = sw.since;
+      var dismiss = function () { swDismissed[a.id] = since; updateDetail(); };
+      D.lcard.appendChild(h("div", { class: "pbtns" }, h("button", { class: "btn", type: "button", onclick: dismiss }, "Dismiss")));
+      if (sw.state === "done") { swTimer = window.setTimeout(dismiss, 8000); }
+    }
     if (lim) {
       D.lcard.appendChild(h("h3", null, "\u2298 " + (lim.label || "usage limit") + " reached" + (lim.account ? " on " + lim.account : "")));
       var when = typeof lim.reset_at === "number" ? ["The limit ", h("span", { "data-reset": String(lim.reset_at) }, resetText(lim.reset_at)), " (" + fmtTime(lim.reset_at) + ")."] : ["The reset time is not known."];
       D.lcard.appendChild(h("p", null, ["The agent stopped. "].concat(when)));
+      var auto = typeof lim.continues_at === "number";
+      if (auto) { D.lcard.appendChild(h("p", null, "Continues automatically at " + fmtTime(lim.continues_at) + ".")); }
       D.lcard.appendChild(h("div", { class: "pbtns write" },
-        h("button", { class: "btn primary", type: "button", disabled: !can.account, onclick: function () { openAccounts(a.id); } }, "\u21c4 Switch account\u2026")));
+        h("button", { class: auto ? "btn" : "btn primary", type: "button", disabled: !can.account, onclick: function () { openAccounts(a.id); } }, "\u21c4 Switch account\u2026")));
     }
   }
 
@@ -2270,6 +2491,20 @@ APP_JS = r"""(function () {
     D.ta.style.height = "auto";
     D.ta.style.height = Math.min(D.ta.scrollHeight + 2, 160) + "px";
   }
+  // Shows the pane's screen in place of the chat (and its keys), or goes back to the chat.
+  function setScreen(on) {
+    var c = C;
+    if (!c || c.id !== selId || c.screen === on) { return; }
+    c.screen = on;
+    c.tailEtag = null;
+    c.tailN = 0;
+    if (on) { D.tail.textContent = ""; }
+    pinned = true;
+    showMode(c);
+    updateDetail();
+    scrollBottom();
+    if (chatLoop.wanted) { chatLoop.go(); }
+  }
   // Prompt mode posts /prompt; answer mode (a pending approval or question) pastes the text and presses Enter via /keys.
   function submit() {
     if (D.send.disabled) { return; }
@@ -2277,7 +2512,7 @@ APP_JS = r"""(function () {
     if (mode === "none") { return; }
     var text = D.ta.value.replace(/\r\n?/g, "\n");
     if (!text.trim()) { return; }
-    var max = limitOf(mode === "answer" ? "key_text" : "prompt");
+    var max = limitOf(mode === "prompt" ? "prompt" : "key_text");
     if (text.length > max) { toast("Too long: at most " + max + " characters.", true); return; }
     var id = selId;
     pinned = true;
@@ -2288,11 +2523,13 @@ APP_JS = r"""(function () {
     onPromptInput();
     var req = mode === "answer"
       ? post(agentUrl(id, "keys"), { text: text, keys: ["enter"] }, null)
-      : post(agentUrl(id, "prompt"), { text: text }, null);
+      : (mode === "screen" ? post(agentUrl(id, "keys"), { text: text, keys: [] }, null) : post(agentUrl(id, "prompt"), { text: text }, null));
     req.then(function (r) {
       if (!r) {
         if (id !== selId) { if (!drafts[id]) { drafts[id] = text; } }
         else if (!D.ta.value) { D.ta.value = text; drafts[id] = text; }
+      } else if (mode === "prompt" && text.charAt(0) === "/" && id === selId) {
+        setScreen(true);       // a command may open a menu on the pane (/resume, /model ...): show it
       }
       if (id === selId) { onPromptInput(); }
     });
@@ -2312,12 +2549,6 @@ APP_JS = r"""(function () {
     var max = limitOf("upload");
     var todo = files.filter(function (f) {
       if (f.size > max) { toast(f.name + " is larger than " + Math.round(max / 1048576) + " MB.", true); return false; }
-    if (sw && sw.state !== "running" && !lim) {
-      var since = sw.since;
-      var dismiss = function () { swDismissed[a.id] = since; updateDetail(); };
-      D.lcard.appendChild(h("div", { class: "pbtns" }, h("button", { class: "btn", type: "button", onclick: dismiss }, "Dismiss")));
-      if (sw.state === "done") { swTimer = window.setTimeout(dismiss, 8000); }
-    }
       if (f.size === 0) { toast(f.name + " is empty.", true); return false; }
       return true;
     });
@@ -2394,8 +2625,10 @@ APP_JS = r"""(function () {
         s.body.appendChild(aRow({ glyph: "\u25c7", title: "Change model", meta: cur.model && cur.model.name ? cur.model.name : "", hint: modelHint, disabled: !can.model || busy, onclick: function () { openModels(id); } }));
         s.body.appendChild(thinkingBlock(cur, can, busy, modelHint));
         s.body.appendChild(aRow({ glyph: "\u238b", title: "Interrupt", meta: "Esc", hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () { closeSheet(); sendKeys(id, ["esc"], false, "Interrupt sent"); } }));
+        s.body.appendChild(aRow({ glyph: "\u25ad", title: "Screen", meta: "menus, /resume", hint: can.keys ? null : "the agent has exited", disabled: !can.keys, onclick: function () { closeSheet(); setScreen(true); } }));
         s.body.appendChild(aRow({ glyph: "\u25a4", title: "Compact", meta: "/compact", hint: can.prompt ? null : "not while the agent waits for an answer", disabled: !can.prompt, onclick: function () { closeSheet(); post(agentUrl(id, "prompt"), { text: "/compact" }, "Compact sent"); } }));
         s.body.appendChild(aRow({ glyph: "\u2713", title: "Acknowledge", hint: can.ack ? null : "only when the agent is done or idle, or its limit has reset", disabled: !can.ack, onclick: function () { closeSheet(); post(agentUrl(id, "ack"), {}, "Acknowledged"); } }));
+        s.body.appendChild(aRow({ glyph: "\u2387", title: "Git", meta: "branch, changes, commits", hint: cur.cwd ? null : "the agent's folder is unknown", disabled: !cur.cwd, onclick: function () { openGit(id, 0); } }));
         s.body.appendChild(aRow({ glyph: "\u21c4", title: "Switch account", meta: cur.profile || "", hint: can.account ? null : "only while the agent is idle or stopped on its limit, on an omp profile", disabled: !can.account, onclick: function () { openAccounts(id); } }));
         s.body.appendChild(aRow({ glyph: "\u25cb", title: "Quit session", meta: "Ctrl-D", danger: true, hint: can.quit ? "it leaves the list; History can start it again" : (cur.state === "exited" ? "the agent has exited" : "only when the agent is idle, done or stopped on its limit"), disabled: !can.quit, onclick: function () {
           ask("Quit \u201c" + agentLine(cur) + "\u201d? omp gets Ctrl-D and the session leaves the list. You can start it again from History.", "Quit session").then(function (ok) { if (ok) { closeSheet(); quitSession(id); } });
@@ -2492,6 +2725,77 @@ APP_JS = r"""(function () {
     });
     return bits.length ? bits.join(" \u00b7 ") : (ac.state === "ok" || !ac.state ? "no quota data" : ac.state);
   }
+  var GIT_DOT = { green: "g-ok", amber: "g-warn", red: "g-err", muted: "" };
+  var GIT_CI = { pass: ["\u2713", "CI passed", "g-ok"], fail: ["\u2717", "CI failed", "g-err"], running: ["\u25d4", "CI running", "g-warn"], other: ["\u2013", "CI: no result", ""], none: ["\u2013", "CI: no runs yet", ""], unknown: ["?", "CI unknown", ""] };
+  function gitCounts(r) {
+    var parts = [];
+    if (r.staged) { parts.push(r.staged + " staged"); }
+    if (r.changed) { parts.push(r.changed + " changed"); }
+    if (r.untracked) { parts.push(r.untracked + " untracked"); }
+    if (r.conflicts) { parts.push(r.conflicts + " in conflict"); }
+    return parts.length ? parts.join(" \u00b7 ") : "clean";
+  }
+  function gitDistance(r) {
+    if (r.ahead === null || r.behind === null || r.ahead === undefined) { return "no upstream"; }
+    return "\u2191" + r.ahead + " ahead \u00b7 \u2193" + r.behind + " behind";
+  }
+  function openGit(id, repo) {
+    var a = findAgent(id);
+    if (!a) { return; }
+    var info = null;
+    var failed = null;
+    var loading = false;
+    openSheet({ title: "Git", sub: agentLine(a), back: function () { openActions(); }, render: function (s) {
+      function draw() {
+        clear(s.body);
+        s.body.appendChild(h("div", { class: "sheet-tools" },
+          h("button", { class: "btn ghost", type: "button", disabled: loading, onclick: function () { load(repo); } }, loading ? "reading\u2026" : "\u21bb Refresh")));
+        if (failed) { s.body.appendChild(h("div", { class: "note-line err" }, failed)); return; }
+        if (!info) { s.body.appendChild(h("div", { class: "note-line" }, "reading the repository\u2026")); return; }
+        if (!info.repos.length) { s.body.appendChild(h("div", { class: "note-line" }, "This folder is not in a git repository.")); return; }
+        info.repos.forEach(function (r) {
+          var open = r.index === info.open;
+          var ci = r.ci && GIT_CI[r.ci] ? GIT_CI[r.ci] : null;
+          var mark = r.error ? ["\u2715", "unreadable", "g-err"] : ["\u25cf", r.dot === "green" ? "clean" : (r.dot === "red" ? "conflicts" : "uncommitted changes"), GIT_DOT[r.dot] || ""];
+          var line = r.error ? "could not be read" : (r.detached ? r.branch + " (detached)" : r.branch) + " \u00b7 " + gitDistance(r) + " \u00b7 " + gitCounts(r) + (r.op ? " \u00b7 " + r.op + " in progress" : "");
+          s.body.appendChild(h("button", { class: "arow git-repo" + (open ? " cur" : ""), type: "button", "aria-pressed": open ? "true" : "false", disabled: loading,
+            onclick: function () { if (!open) { repo = r.index; load(repo); } } },
+            h("span", { class: "mark", "aria-hidden": "true" }, "\u258e"),
+            h("span", { class: "g " + mark[2], role: "img", "aria-label": mark[1] }, mark[0]),
+            h("span", { class: "t" }, r.name),
+            h("span", { class: "m" }, ci ? h("span", { class: ci[2], role: "img", "aria-label": ci[1] }, ci[0]) : ""),
+            h("span", { class: "h" }, line)));
+        });
+        var d = info.detail;
+        if (!d) { return; }
+        s.body.appendChild(h("div", { class: "sec-h" }, "changes" + (d.files_total ? " \u00b7 " + d.files_total : "")));
+        if (!d.files.length) { s.body.appendChild(h("div", { class: "note-line" }, "nothing to commit, working tree clean")); }
+        d.files.forEach(function (f) {
+          var code = f.kind === "untracked" ? "?" : (f.staged !== "." ? f.staged : "") + (f.worktree !== "." ? f.worktree : "");
+          s.body.appendChild(h("div", { class: "git-file" }, h("span", { class: "git-code", title: f.kind }, code), h("span", { class: "git-path" }, f.path), h("span", { class: "git-kind" }, f.kind)));
+        });
+        if (d.files_more) { s.body.appendChild(h("div", { class: "note-line" }, "and " + (d.files_total - d.files.length) + " more")); }
+        s.body.appendChild(h("div", { class: "sec-h" }, "recent commits"));
+        if (!d.commits.length) { s.body.appendChild(h("div", { class: "note-line" }, "no commits yet")); }
+        d.commits.forEach(function (c) {
+          s.body.appendChild(h("div", { class: "git-commit" }, h("span", { class: "git-sha" }, c.sha), h("span", { class: "git-subj" }, c.subject),
+            h("span", { class: "git-meta" }, c.author + " \u00b7 " + fmtAge(Math.max(nowServer() - c.ts, 0)) + " ago")));
+        });
+      }
+      function load(n) {
+        loading = true;
+        draw();
+        api(agentUrl(id, "git") + "?repo=" + n, { timeout: 15000 }).then(function (r) {
+          loading = false;
+          if (sheet !== s) { return; }
+          if (r.status === 200 && r.data) { info = r.data; failed = null; } else { failed = errText(r); }
+          draw();
+        }, function () { loading = false; if (sheet === s) { failed = "no connection"; draw(); } });
+      }
+      s.refresh = draw;
+      load(repo);
+    } });
+  }
   function openAccounts(id) {
     var a = findAgent(id);
     if (!a) { return; }
@@ -2546,7 +2850,7 @@ APP_JS = r"""(function () {
         h("button", { class: "btn ghost icon", type: "button", "aria-label": "Close menu", onclick: closeMenu }, "\u2715")),
       M.tabs, M.body);
     M.root = h("div", { class: "menu", hidden: true }, h("div", { class: "scrim", onclick: closeMenu }), M.panel);
-    M.data = { usage: null, system: null, history: null };
+    M.data = { usage: null, system: null, history: null, push: null, pushErr: null, pushMine: null, pushBusy: false };
   }
   function renderMenu() {
     if (!menuSec) { return; }
@@ -2562,6 +2866,7 @@ APP_JS = r"""(function () {
     else if (menuSec === "new") { drawNew(); }
     else if (menuSec === "history") { drawHistory(); }
     else if (menuSec === "system") { drawSystem(); }
+    else if (menuSec === "notify") { drawNotify(); }
     else { drawAbout(); }
     M.body.scrollTop = keep;
   }
@@ -2586,6 +2891,8 @@ APP_JS = r"""(function () {
       }, function () { M.data.systemErr = "no connection"; if (menuSec === sec) { renderMenu(); } }).then(again);
     } else if (sec === "new") {
       loadOptions();
+    } else if (sec === "notify") {
+      loadPush();
     } else if (sec === "history") {
       loadHistory(true);
     } else {
@@ -2625,7 +2932,8 @@ APP_JS = r"""(function () {
   }
 
   // new session
-  function loadOptions() {
+  function loadOptions(after) {
+    function fin() { if (menuSec === "new") { renderMenu(); } if (typeof after === "function") { after(); } }
     api("/api/sessions/options", { timeout: 10000 }).then(function (r) {
       if (r.status === 200 && r.data) {
         ns.profiles = r.data.profiles || [];
@@ -2639,8 +2947,8 @@ APP_JS = r"""(function () {
           ns.dir = match ? match.path : null;
         }
       } else if (r.status !== 401) { ns.err = errText(r); }
-      if (menuSec === "new") { renderMenu(); }
-    }, function () { ns.err = "no connection"; if (menuSec === "new") { renderMenu(); } });
+      fin();
+    }, function () { ns.err = "no connection"; fin(); });
   }
   function drawNew() {
     if (ns.err) { M.body.appendChild(h("div", { class: "note-line err" }, "options unavailable: " + ns.err)); }
@@ -2921,6 +3229,161 @@ APP_JS = r"""(function () {
     M.body.appendChild(kv);
   }
 
+  // alerts: Web Push to this phone (the service worker /sw.js shows the notification; the server sends it)
+  function pushSupport() {
+    if (!window.isSecureContext) { return "Notifications need https. Open the page at the https address that tailscale serve shows, not at an http address."; }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      return /iPhone|iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1) ? "On iPhone and iPad, add this page to the Home Screen first (Share, Add to Home Screen), then open it from there." : "This browser cannot receive push notifications.";
+    }
+    return null;
+  }
+  function deviceName() {
+    var ua = navigator.userAgent;
+    var os = /Android/.test(ua) ? "Android" : (/iPhone/.test(ua) ? "iPhone" : (/iPad/.test(ua) ? "iPad" : (/Linux/.test(ua) ? "Linux" : (/Mac/.test(ua) ? "Mac" : (/Windows/.test(ua) ? "Windows" : "device")))));
+    var br = /Firefox\//.test(ua) ? "Firefox" : (/Edg\//.test(ua) ? "Edge" : (/Chrome\//.test(ua) ? "Chrome" : (/Safari\//.test(ua) ? "Safari" : "browser")));
+    return os + " " + br;
+  }
+  function b64uBytes(s) {
+    var p = s.replace(/-/g, "+").replace(/_/g, "/");
+    var raw = window.atob(p + "===".slice((p.length + 3) % 4));
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) { out[i] = raw.charCodeAt(i); }
+    return out;
+  }
+  function bytesB64u(buf) {
+    var a = new Uint8Array(buf);
+    var s = "";
+    for (var i = 0; i < a.length; i++) { s += String.fromCharCode(a[i]); }
+    return window.btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function endpointId(endpoint) {
+    return window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(endpoint)).then(function (d) {
+      return Array.prototype.map.call(new Uint8Array(d).subarray(0, 8), function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+    });
+  }
+  function thisSubscription() {
+    if (pushSupport()) { return Promise.resolve(null); }
+    return navigator.serviceWorker.getRegistration("/").then(function (reg) { return reg ? reg.pushManager.getSubscription() : null; });
+  }
+  var pushSeq = 0;
+  function loadPush() {
+    var sec = "notify";
+    var seq = ++pushSeq;
+    var want = api("/api/push", { timeout: 10000 }).then(function (r) {
+      if (seq !== pushSeq) { return; }
+      if (r.status === 200 && r.data) { M.data.push = r.data; M.data.pushErr = null; }
+      else if (r.status !== 401) { M.data.pushErr = errText(r); }
+    }, function () { if (seq === pushSeq) { M.data.pushErr = "no connection"; } });
+    var mine = thisSubscription().then(function (sub) { return sub ? endpointId(sub.endpoint) : null; }).then(function (id) { if (seq === pushSeq) { M.data.pushMine = id; } }, function () { if (seq === pushSeq) { M.data.pushMine = null; } });
+    Promise.all([want, mine]).then(function () {
+      if (seq !== pushSeq) { return; }          // a newer look is on its way: it draws
+      if (M.data.pushSettle) { M.data.pushSettle = false; M.data.pushBusy = false; }
+      if (menuSec === sec) { renderMenu(); }
+    });
+  }
+  // The buttons stay disabled until the fresh state is drawn, so the old state is never offered again after an action.
+  function pushDone(msg, isErr) {
+    if (msg) { toast(msg, isErr); }
+    M.data.pushSettle = true;
+    loadPush();
+  }
+  function withTimeout(p, ms, why) {
+    return Promise.race([p, new Promise(function (resolve, reject) { window.setTimeout(function () { reject(new Error(why)); }, ms); })]);
+  }
+  function pushEnable() {
+    var d = M.data.push;
+    if (M.data.pushBusy || !d || !d.public_key) { return; }
+    M.data.pushBusy = true;
+    renderMenu();
+    var key = d.public_key;
+    // requestPermission is called inside the click, before anything is awaited (iOS wants a user gesture)
+    var asked = new Promise(function (resolve, reject) {
+      try { var r = Notification.requestPermission(resolve); if (r && typeof r.then === "function") { r.then(resolve, reject); } } catch (e) { reject(e); }
+    });
+    withTimeout(asked.then(function (perm) {
+      if (perm === "denied") { throw new Error("Notifications are blocked for this page. Allow them in the browser's site settings."); }
+      if (perm !== "granted") { throw new Error("Permission was not given. Tap again and allow notifications."); }
+      return navigator.serviceWorker.register("/sw.js", { scope: "/" }).then(function () { return withTimeout(navigator.serviceWorker.ready, 15000, "the service worker did not start"); });
+    }), 60000, "the browser did not answer").then(function (reg) {
+      return reg.pushManager.getSubscription().then(function (sub) {
+        // A subscription whose key cannot be shown to be ours (the key was made again, or the browser does not say) is renewed:
+        // the push service would answer 403 to messages signed with another key, and we would never hear of it.
+        var same = sub && sub.options && sub.options.applicationServerKey && bytesB64u(sub.options.applicationServerKey) === key;
+        if (sub && !same) { return sub.unsubscribe().then(function () { return null; }); }
+        return sub;
+      }).then(function (sub) { return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(key) }); });
+    }).then(function (sub) {
+      var j = sub.toJSON();
+      return api("/api/push/subscribe", { body: { endpoint: j.endpoint, keys: j.keys, label: deviceName() }, timeout: 15000 });
+    }).then(function (r) {
+      if (r.status === 401) { pushDone(); return; }
+      if (r.status >= 200 && r.status < 300) { pushDone("Notifications are on for this device"); } else { pushDone(errText(r), true); }
+    }).catch(function (e) { pushDone(e && e.message ? String(e.message) : "could not turn notifications on", true); });
+  }
+  function pushDisable(id, mine) {
+    if (M.data.pushBusy) { return; }
+    M.data.pushBusy = true;
+    renderMenu();
+    var local = mine ? thisSubscription().then(function (sub) { return sub ? sub.unsubscribe() : null; }) : Promise.resolve();
+    local.catch(function () { return null; }).then(function () {
+      return api("/api/push/unsubscribe", { body: { id: id }, timeout: 15000 });
+    }).then(function (r) {
+      if (r.status === 401) { pushDone(); return; }
+      if (r.status >= 200 && r.status < 300) { pushDone("Removed"); } else { pushDone(errText(r), true); }
+    }, function () { pushDone("no connection", true); });
+  }
+  function pushTest(id) {
+    if (M.data.pushBusy) { return; }
+    M.data.pushBusy = true;
+    renderMenu();
+    api("/api/push/test", { body: id ? { id: id } : {}, timeout: 20000 }).then(function (r) {
+      if (r.status === 401) { pushDone(); return; }
+      if (r.status >= 200 && r.status < 300 && r.data) {
+        pushDone(r.data.sent ? "Test sent. It should arrive in a moment." : "Nothing was delivered" + (r.data.removed ? " (the device was dropped by its push service)" : ""), !r.data.sent);
+      } else { pushDone(errText(r), true); }
+    }, function () { pushDone("no connection", true); });
+  }
+  function drawNotify() {
+    var d = M.data.push;
+    if (M.data.pushErr) { M.body.appendChild(h("div", { class: "note-line err" }, "alerts unavailable: " + M.data.pushErr)); }
+    if (!d) { if (!M.data.pushErr) { M.body.appendChild(h("div", { class: "note-line" }, "loading\u2026")); } return; }
+    var support = pushSupport();
+    var perm = support ? null : Notification.permission;
+    var mine = M.data.pushMine;
+    var registered = mine && (d.devices || []).some(function (x) { return x.id === mine; });
+    var kv = h("div", { class: "kv" });
+    function row(k, v) { kv.appendChild(h("span", { class: "k" }, k)); kv.appendChild(h("span", { class: "v" }, v)); }
+    row("this machine", !d.supported ? "cannot send" : (d.enabled ? "push is on" : "push is off"));
+    row("this device", support ? "unsupported" : (perm === "denied" ? "blocked in the browser" : (registered ? "receives alerts" : "not registered")));
+    M.body.appendChild(h("div", { class: "sec-h" }, "web push"));
+    M.body.appendChild(kv);
+    var why = !d.supported ? d.reason : (!d.enabled ? (d.reason || "Push is off on this machine. Set \"push\": true under \"remote\" in settings.json; no restart is needed.") : support);
+    if (!why && perm === "denied") { why = "Notifications are blocked for this page. Allow them in the browser's site settings, then come back."; }
+    if (why) { M.body.appendChild(h("div", { class: "note-line err" }, why)); }
+    else {
+      var busy = M.data.pushBusy;
+      var act = h("div", { class: "about-act" });
+      if (!registered) { act.appendChild(h("button", { class: "btn ok", type: "button", disabled: busy, onclick: pushEnable }, busy ? "Working\u2026" : "Turn on for this device")); }
+      else {
+        act.appendChild(h("button", { class: "btn", type: "button", disabled: busy, onclick: function () { pushTest(mine); } }, "Send a test notification"));
+        act.appendChild(h("button", { class: "btn bad", type: "button", disabled: busy, onclick: function () { pushDisable(mine, true); } }, "Turn off for this device"));
+      }
+      M.body.appendChild(act);
+      M.body.appendChild(h("div", { class: "note-line" }, "You get a notification when an agent needs you, is done or hits its usage limit, and when a bot finishes. Tapping it opens the agent. The text is the agent's number, title and folder (for a bot, the headline of its result), nothing else from the chat; the push service of your browser (Google, Apple or Mozilla) only relays it encrypted."));
+    }
+    var list = d.devices || [];
+    if (list.length) {
+      M.body.appendChild(h("div", { class: "sec-h" }, "devices \u00b7 " + list.length + " of " + d.max_devices));
+      list.forEach(function (x) {
+        var me = x.id === mine;
+        M.body.appendChild(h("div", { class: "acct" },
+          h("div", { class: "acct-top" }, h("span", { class: "mark", "aria-hidden": "true" }, "\u258e"), h("span", { class: "nm" }, (x.label || "device") + (me ? " (this device)" : "")),
+            h("button", { class: "btn bad", type: "button", disabled: M.data.pushBusy, "aria-label": "Remove " + (x.label || "device"), onclick: function () { pushDisable(x.id, me); } }, "Remove")),
+          h("div", { class: "note-line" }, "added " + fmtAge(nowServer() - x.added) + " ago")));
+      });
+    }
+  }
+
   // about
   function drawAbout() {
     M.conn = h("span", { class: "v" }, listLoop.fails > 0 || !lastOk ? "reconnecting\u2026" : "live");
@@ -2968,8 +3431,760 @@ APP_JS = r"""(function () {
     if (dlg.open) { return; }
     if (sheet) { closeSheet(); ev.preventDefault(); }
     else if (menuSec) { closeMenu(); ev.preventDefault(); }
+    else if (botsMode === "run" && BT.page) { setHash("#/bots/" + BT.page.id, false); ev.preventDefault(); }
+    else if (botsMode === "bot" || botsMode === "list") {
+      if (EMBED && botsMode === "list") { return; }       // Bots is the home page of an embedded view
+      setHash(botsMode === "bot" ? "#/bots" : "#/", false); ev.preventDefault();
+    }
     else if (termMode === "ov") { setHash("#/", false); ev.preventDefault(); }
   });
+
+  // ---------------------------------------------------------------- bots: scheduled omp agents, the third page of the swipe strip
+  // #/bots lists them (a pane under the same top bar, long-polling GET /api/bots), #/bots/<id> is one bot (definition, memory of an
+  // agent, its runs) and #/bots/<id>/<n> one run's result, both full-screen pages over the list. Creating and editing is a sheet.
+  var RSTAT = { ok: "ok", failed: "failed", limit: "limit", timeout: "timed out", cost: "cost cap", skipped: "skipped", missed: "missed", cancelled: "stopped", deferred: "deferred" };
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var PRESETS = [["Once", "tomorrow 9am"], ["Daily", "daily 09:00"], ["Weekdays", "weekdays 09:00"], ["Hourly", "hourly"]];
+  function newBots() { return { data: null, etag: null, err: null, brief: null, briefEtag: null, briefErr: null, page: null, det: null, runs: null, conv: null, drafts: {}, open: {}, form: null, ui: null }; }
+  function hasBots() { return !!(meta && meta.capabilities && meta.capabilities.indexOf("bots") >= 0); }
+  function botsLimits() {
+    var L = meta && meta.limits && meta.limits.bots;
+    return L || { max_bots: 50, min_interval_s: 300, max_time_s: 7200, max_cost_usd: 10, default_time_s: 1800, default_cost_usd: 2, name: 80, identity: 2000 };
+  }
+  function untilText(ts, pre) { var left = ts - nowServer(); return left > 0 ? pre + fmtDur(left) : "due now"; }
+  function untilNode(ts, pre) { return h("span", { "data-until": String(ts), "data-pre": pre }, untilText(ts, pre)); }
+  function agoNode(ts) { return [h("span", { "data-since": String(ts) }, fmtAge(nowServer() - ts)), " ago"]; }
+  function fmtRunDur(s) { return s < 60 ? s + "s" : fmtDur(s); }
+  function fmtWhenAt(ts) {
+    var d = new Date(ts * 1000);
+    return DAYS[d.getDay()] + " " + MONTHS[d.getMonth()] + " " + d.getDate() + " " + fmtTime(ts);
+  }
+  function rstat(s) { return /^[a-z]+$/.test(String(s)) ? s : "other"; }
+  // What a bot reads as: the glyph and colour of the shared state vocabulary (the scheduler's own `schedule` state is the one new
+  // kind, a clock) and the phone's own word for it.
+  function botView(b) {
+    var last = b.last ? b.last.status : null;
+    if (b.running) { return { kind: "working", label: "running" }; }
+    if (b.paused_reason) { return { kind: "attention", label: "paused" }; }
+    if (b.state === "attention") {
+      if (last === "limit") { return { kind: "limit", label: "limit" }; }
+      return { kind: "attention", label: { failed: "failed", missed: "missed", timeout: "timed out", cost: "cost cap" }[last] || "needs a look" };
+    }
+    if (b.state === "done") { return { kind: "done", label: "done" }; }
+    if (b.state === "schedule") { return { kind: "schedule", label: "waiting" }; }
+    return { kind: "idle", label: b.done ? "finished" : "off" };
+  }
+  function botById(id) {
+    var list = BT.data && BT.data.bots || [];
+    for (var i = 0; i < list.length; i++) { if (list[i].id === id) { return list[i]; } }
+    return BT.det && BT.det.bot && BT.det.bot.id === id ? BT.det.bot : null;
+  }
+  function botUrl(id, suffix) { return "/api/bots/" + encodeURIComponent(id) + (suffix ? "/" + suffix : ""); }
+  function setBotsBtn(on) {
+    if (!U.botsBtn) { return; }
+    U.botsBtn.classList.toggle("on", on);
+    if (on) { U.botsBtn.setAttribute("aria-current", "page"); } else { U.botsBtn.removeAttribute("aria-current"); }
+  }
+  // The dot on the top bar's Bots button: violet while a bot needs a look, accent while only unread results wait.
+  function setBotsDot(sum) {
+    if (!U.botsBtn) { return; }
+    var n = sum ? sum.attention || 0 : 0;
+    var u = sum ? sum.unseen || 0 : 0;
+    U.botsDot.hidden = !(n > 0 || u > 0);
+    U.botsDot.className = "bdot" + (n > 0 ? " attn" : "");
+    U.botsBtn.setAttribute("aria-label", "Bots" + (n > 0 ? ", " + n + " need a look" : (u > 0 ? ", " + u + " new " + (u === 1 ? "report" : "reports") : "")));
+  }
+  function botsPost(id, verb, body, okMsg) {
+    return post(botUrl(id, verb), body || {}, okMsg || null);
+  }
+  function botRun(b) {
+    ask("Run \u201c" + b.name + "\u201d now? An omp run starts on this machine and uses the account\u2019s quota.", "Run now").then(function (ok) {
+      if (!ok) { return; }
+      botsPost(b.id, "run", {}, null).then(function (r) {
+        if (r) { toast(r.data && r.data.queued ? "Queued: it runs when the scheduler starts" : "Run requested"); }
+      });
+    });
+  }
+  function botDelete(b) {
+    ask("Delete \u201c" + b.name + "\u201d with its memory and run history? This cannot be undone.", "Delete").then(function (ok) {
+      if (!ok) { return; }
+      botsPost(b.id, "delete", { confirm: true }, "Bot deleted").then(function (r) { if (r && BT.page) { setHash("#/bots", true); } });
+    });
+  }
+  function abtn(label, cls, disabled, fn) { return h("button", { class: "btn " + cls, type: "button", disabled: !!disabled, onclick: fn }, label); }
+
+  // ---- the list
+  function buildBotsPane() {
+    var ui = { back: h("a", { class: "btn ghost bots-back", href: "#/", "aria-label": "Back to agents" }, "\u25c0 agents"), count: h("span", { class: "n" }) };
+    ui.title = h("h2", { class: "bots-title", tabindex: "-1" }, "Bots", ui.count);
+    ui.add = h("button", { class: "btn ghost icon write", type: "button", "aria-label": "New bot", onclick: function () { openBotForm(null); } }, "+");
+    ui.note = h("div", { class: "bots-note", role: "status", hidden: true });
+    ui.empty = h("div", { class: "empty", hidden: true }, h("strong", null, "No bots yet"),
+      "A bot runs an omp agent on a schedule, in the background, and talks to you here. Use + to make one.");
+    ui.briefSeen = h("button", { class: "btn ghost bseen write", type: "button", onclick: briefSeen }, "Mark all seen");
+    ui.briefCount = h("span", { class: "n" });
+    ui.briefList = h("ul", { class: "blist", role: "list", "aria-label": "Briefing" });
+    ui.brief = h("section", { class: "brief", "aria-label": "Briefing" },
+      h("div", { class: "sec-h" }, "Briefing", ui.briefCount, h("span", { class: "spacer" }), ui.briefSeen), ui.briefList);
+    ui.botsH = h("div", { class: "sec-h" }, "Bots");
+    ui.grid = h("ul", { class: "bgrid", role: "list", "aria-label": "Bots" });
+    ui.scroll = h("div", { class: "bots-scroll" }, ui.brief, ui.botsH, ui.empty, ui.grid);
+    ui.foot = h("div", { class: "foot" });
+    BT.ui = ui;
+    U.botsEmpty = h("section", { class: "bots-none", hidden: true, "aria-label": "No bot open" }, logo("big", 72), h("div", null, "Pick a bot to talk to it, or a report to read it."));
+    return h("section", { class: "bots-pane", hidden: true, "aria-label": "Bots" },
+      h("div", { class: "bots-head" }, ui.back, ui.title, h("span", { class: "spacer" }), ui.add), ui.note, ui.scroll, ui.foot);
+  }
+  function botCard(b) {
+    var v = botView(b);
+    var glyph = h("span", { "aria-hidden": "true" });
+    setGlyph(glyph, v.kind);
+    var sub = [b.when_text || "", " \u00b7 ", h("span", { class: "st" }, v.label)];
+    if (b.running && typeof b.running_since === "number") { sub.push(" \u00b7 ", h("span", { "data-since": String(b.running_since) }, fmtAge(nowServer() - b.running_since))); }
+    else if (b.paused_reason) { sub.push(" \u00b7 ", b.paused_reason); }
+    else if (b.enabled && !b.done && typeof b.next_at === "number") { sub.push(" \u00b7 ", untilNode(b.next_at, "next in ")); }
+    var last = [];
+    if (b.last) {
+      last.push(h("span", { class: "rchip rs-" + rstat(b.last.status) }, RSTAT[b.last.status] || b.last.status));
+      if (typeof b.last.ended === "number") { last.push(" ", agoNode(b.last.ended)); }
+      var hl = b.last.headline || b.last.summary;
+      if (hl) { last.push(" \u00b7 " + hl.replace(/[*`#]/g, "").replace(/\s+/g, " ")); }
+    } else { last.push("no runs yet"); }
+    var main = h("a", { class: "bmain", href: "#/bots/" + encodeURIComponent(b.id), "aria-label": b.name + ", " + (b.kind === "agent" ? "agent" : "task") + ", " + v.label + (b.unseen > 0 ? ", " + b.unseen + " unread" : "") },
+      glyph, h("span", { class: "bname" }, b.name),
+      h("span", { class: "bend" }, b.unseen > 0 ? h("span", { class: "bnew", "aria-hidden": "true" }, "\u25cf " + b.unseen) : null, h("span", { class: "kchip" }, b.kind === "agent" ? "agent" : "task")),
+      h("span", { class: "bsub" }, sub), h("span", { class: "blast" }, last));
+    var on = b.enabled && !b.paused_reason;
+    var can = b.can || {};
+    var tgl = h("button", { class: "btn tgl write", type: "button", role: "switch", "aria-checked": on ? "true" : "false", "aria-label": "Enabled: " + b.name,
+      disabled: !(on ? can.pause : can.resume), onclick: function () { botsPost(b.id, on ? "pause" : "resume", {}, on ? "Paused" : "Resumed"); } },
+      h("span", { class: "knob", "aria-hidden": "true" }), on ? "on" : "off");
+    var acts = h("div", { class: "bact" }, tgl,
+      abtn("Run now", "write", !can.run, function () { botRun(b); }),
+      abtn("Skip next", "write", !can.skip, function () { botsPost(b.id, "skip", {}, "Next run skipped"); }),
+      abtn("Edit", "write", !can.edit, function () { openBotForm(b.id); }));
+    var cur = BT.page && BT.page.id === b.id;
+    return h("li", { class: "bli" }, h("div", { class: "bcard s-" + v.kind + (cur ? " cur" : "") }, main, acts));
+  }
+  // ---- the briefing: important reports of every bot, newest first
+  function briefSeen() {
+    post("/api/bots/briefing/seen", {}, null).then(function (r) { if (r && briefLoop.wanted) { briefLoop.go(); } });
+  }
+  function briefItem(e) {
+    var line = [h("span", { class: "bname" }, e.bot_name), " \u00b7 ", e.status && e.status !== "ok" ? [h("span", { class: "rchip rs-" + rstat(e.status) }, RSTAT[e.status] || e.status), " \u00b7 "] : null,
+      typeof e.ended === "number" ? agoNode(e.ended) : null];
+    return h("li", { class: "bri" + (e.seen ? "" : " unseen") },
+      h("a", { class: "bri-a", href: "#/bots/" + encodeURIComponent(e.bot_id) + "/" + e.run },
+        h("span", { class: "bri-dot", "aria-hidden": "true" }, e.seen ? "" : "\u25cf"),
+        h("span", { class: "bri-h" }, e.headline || "(no headline)"),
+        h("span", { class: "bri-m" }, line)));
+  }
+  function renderBrief() {
+    var ui = BT.ui;
+    if (!ui) { return; }
+    var b = BT.brief;
+    clear(ui.briefList);
+    if (!b) { ui.briefCount.textContent = ""; ui.briefSeen.hidden = true; ui.briefList.appendChild(h("li", { class: "note-line" }, BT.briefErr ? "briefing unavailable: " + BT.briefErr : "loading\u2026")); return; }
+    ui.briefCount.textContent = b.unseen > 0 ? " \u00b7 " + b.unseen + " new" : "";
+    ui.briefSeen.hidden = !(b.unseen > 0);
+    if (!b.entries.length) { ui.briefList.appendChild(h("li", { class: "note-line" }, "Nothing important. Quiet runs stay in each bot\u2019s own history.")); return; }
+    b.entries.forEach(function (e) { ui.briefList.appendChild(briefItem(e)); });
+  }
+  function briefStep(L, run) {
+    return api("/api/bots/briefing?wait=" + WAIT, { etag: BT.briefEtag, timeout: (WAIT + 8) * 1000, loop: L }).then(function (r) {
+      if (run !== L.run || r.status === 401) { return {}; }
+      if (r.status === 304) { return { quick: true, retry: r.retry }; }
+      if (r.status === 200 && r.data) {
+        BT.briefEtag = r.etag || (r.data.rev ? '"' + r.data.rev + '"' : null);
+        BT.briefErr = null;
+        BT.brief = r.data;
+        if (typeof r.data.now === "number") { clockOffset = r.data.now - Date.now() / 1000; }
+        renderBrief();
+        return {};
+      }
+      BT.briefErr = errText(r);
+      renderBrief();
+      return { fail: true, retry: r.retry };
+    });
+  }
+  function renderBots() {
+    var ui = BT.ui;
+    if (!ui) { return; }
+    var d = BT.data;
+    var keep = ui.scroll.scrollTop;
+    clear(ui.grid);
+    var back = meta && meta.terminal ? ["#/term", "\u25c0 terminals", "Back to terminals"] : ["#/", "\u25c0 agents", "Back to agents"];
+    ui.back.setAttribute("href", back[0]);
+    ui.back.textContent = back[1];
+    ui.back.setAttribute("aria-label", back[2]);
+    var note = "";
+    if (BT.err) { note = "bots unavailable: " + BT.err; }
+    else if (d && d.counts.total > 0 && !(d.scheduler && d.scheduler.alive)) {
+      note = "The scheduler is not running on the laptop, so nothing starts on its own and bots cannot hear you" + (d.scheduler && typeof d.scheduler.age_s === "number" ? " (last seen " + fmtAge(d.scheduler.age_s) + " ago)" : "")
+        + ". hivegrid-autostart install starts it.";
+    }
+    ui.note.textContent = note;
+    ui.note.hidden = !note;
+    var list = d ? d.bots : [];
+    ui.count.textContent = "";
+    ui.empty.hidden = !d || list.length > 0;
+    ui.botsH.hidden = !d || list.length === 0;
+    list.forEach(function (b) { ui.grid.appendChild(botCard(b)); });
+    ui.add.disabled = !!d && !d.can.create;
+    ui.add.setAttribute("title", d && !d.can.create && !(meta && meta.readonly) ? "at most " + botsLimits().max_bots + " bots" : "");
+    var coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    ui.foot.textContent = d ? "tap a bot to talk to it" + (coarse && !EMBED ? " \u00b7 swipe right: " + (meta && meta.terminal ? "terminals" : "agents") : "") : "loading\u2026";
+    ui.scroll.scrollTop = keep;
+    if (d) { setBotsDot(d.counts); }
+  }
+  function botsStep(L, run) {
+    return api("/api/bots?wait=" + WAIT, { etag: BT.etag, timeout: (WAIT + 8) * 1000, loop: L }).then(function (r) {
+      if (run !== L.run || r.status === 401) { return {}; }
+      if (r.status === 304) { return { quick: true, retry: r.retry }; }
+      if (r.status === 200 && r.data) {
+        BT.etag = r.etag || (r.data.rev ? '"' + r.data.rev + '"' : null);
+        BT.err = null;
+        BT.data = r.data;
+        if (typeof r.data.now === "number") { clockOffset = r.data.now - Date.now() / 1000; }
+        renderBots();
+        if (botsMode === "bot" && BT.page && BT.det) { loadBot(BT.page.id); }       // the list moved: so did this bot
+        if (botsMode === "bot") { botBar(); }
+        return {};
+      }
+      BT.err = errText(r);
+      renderBots();
+      return { fail: true, retry: r.retry };
+    });
+  }
+
+  // ---- routing: the bots list is a page of the strip, a bot and a run are full-screen pages over it
+  function closeBotPage() {
+    if (!BT.page) { return; }
+    var pg0 = BT.page;
+    if (pg0.run === null) {
+      BT.drafts[pg0.id] = pg0.ta.value;
+      chatLoop.stop();
+      D.body.insertBefore(D.chatbox, D.lcard);        // the transcript goes back to the agent chat
+    }
+    if (pg0.el.parentNode) { pg0.el.parentNode.removeChild(pg0.el); }
+    BT.page = null;
+    BT.det = null;
+    BT.runs = null;
+    BT.conv = null;
+    if (pg0.run === null) { D.working.hidden = true; openChat(selId); }
+  }
+  function showBotPage(id, run) {
+    var cur = BT.page;
+    if (cur && cur.id === id && cur.run === run) { return; }
+    var from = !cur ? 0 : (cur.run !== null ? 2 : 1);
+    var to = run !== null ? 2 : 1;
+    closeBotPage();
+    var top = h("header", { class: "bot-top" });
+    var pg0 = { id: id, run: run, top: top, err: null, data: null };
+    if (run === null) {
+      pg0.info = h("div", { class: "bot-info", role: "status" });
+      pg0.ta = h("textarea", { class: "field", rows: "1", placeholder: "Talk to the bot", "aria-label": "Message to the bot", enterkeyhint: "send", autocapitalize: "sentences",
+        maxlength: String(botsLimits().say || 4000), oninput: function () { botInput(pg0); }, onkeydown: function (ev) {
+          var fine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
+          if (ev.key === "Enter" && !ev.isComposing && (((fine || EMBED) && !ev.shiftKey) || ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); botSay(); }
+        } });
+      pg0.ta.value = BT.drafts[id] || "";
+      pg0.send = h("button", { class: "btn primary send", type: "button", disabled: true, onclick: botSay }, "send");
+      pg0.note = h("p", { class: "note", hidden: true });
+      pg0.compose = h("div", { class: "compose write" }, pg0.note, pg0.ta, pg0.send);
+      pg0.el = h("div", { class: "bot-page", role: "region", "aria-label": "Bot" }, top, pg0.info, pg0.compose);
+    } else {
+      pg0.scroll = h("div", { class: "bot-scroll" });
+      pg0.el = h("div", { class: "bot-page", role: "region", "aria-label": "Report" }, top, pg0.scroll);
+    }
+    BT.page = pg0;
+    document.querySelector("#app .split").appendChild(pg0.el);
+    enterPane(pg0.el, to >= from ? "pg-from-r" : "pg-from-l");
+    if (run === null) { openBotChat(pg0); drawBotPage(); loadBot(id); } else { drawRunPage(); loadRun(id, run); }
+  }
+  function routeBots() {
+    if (!inApp) { return; }
+    var want = botsHash(window.location.hash);
+    if (want && !meta) { return; }                       // the capabilities are not known yet: applyMeta routes again
+    if (EMBED && !want && meta && hasBots()) { setHash("#/bots", true); return; }
+    if (want && !hasBots()) { if (!EMBED) { setHash("#/", true); } return; }
+    var mode = !want ? null : (want.id === null ? "list" : (want.run === null ? "bot" : "run"));
+    var prev = botsMode;
+    if (openNew && mode !== null) { openNew = false; window.setTimeout(function () { if (inApp && !sheet) { openBotForm(null); } }, 0); }
+    var app = document.getElementById("app");
+    app.classList.toggle("bots-on", mode !== null);
+    app.classList.toggle("bot-open", mode === "bot" || mode === "run");
+    U.bots.hidden = mode === null;
+    U.botsEmpty.hidden = mode === null;
+    setBotsBtn(mode !== null);
+    if (mode === null) { botsLoop.stop(); briefLoop.stop(); closeBotPage(); }
+    else {
+      if (!botsLoop.wanted) { botsLoop.start(); }
+      if (!briefLoop.wanted) { briefLoop.start(); }
+      if (mode === "list") { closeBotPage(); } else { showBotPage(want.id, want.run); }
+    }
+    botsMode = mode;
+    if (mode === prev) { return; }
+    if (mode === "list" && prev === null) { renderBots(); announce("Bots"); BT.ui.title.focus({ preventScroll: true }); }
+    else if (mode === null && !termRoute()) { announce("Agents"); if (U.botsBtn && !U.botsBtn.hidden) { U.botsBtn.focus({ preventScroll: true }); } }
+    if (!(mode === null && termRoute())) { pageSwitch(); }    // a move to the terminals is switched by routeTerm, once it is shown
+  }
+  function routePages() { routeBots(); routeTerm(); }
+
+  // ---- one bot
+  function loadBot(id) {
+    var pg0 = BT.page;
+    api(botUrl(id), { timeout: 10000 }).then(function (r) {
+      if (!BT.page || BT.page !== pg0 || pg0.run !== null) { return; }
+      if (r.status === 200 && r.data) {
+        BT.det = r.data;
+        pg0.err = null;
+        if (typeof r.data.now === "number") { clockOffset = r.data.now - Date.now() / 1000; }
+        BT.runs = { items: r.data.runs.slice(), more: r.data.total_runs > r.data.runs.length, loading: false };
+      } else if (r.status === 404) { toast("This bot is gone.", true); setHash("#/bots", true); return; }
+      else if (r.status !== 401) { pg0.err = errText(r); }
+      drawBotPage();
+    }, function () { if (BT.page === pg0) { pg0.err = "no connection"; drawBotPage(); } });
+  }
+  function loadOlderRuns() {
+    var pg0 = BT.page;
+    var rs = BT.runs;
+    if (!pg0 || !rs || rs.loading || !rs.more) { return; }
+    rs.loading = true;
+    if (sheet && sheet.refresh) { sheet.refresh(); }
+    api(botUrl(pg0.id, "runs") + "?limit=20&offset=" + rs.items.length, { timeout: 10000 }).then(function (r) {
+      if (BT.page !== pg0 || BT.runs !== rs) { return; }
+      rs.loading = false;
+      if (r.status === 200 && r.data && Array.isArray(r.data.runs)) { rs.items = rs.items.concat(r.data.runs); rs.more = !!r.data.more; }
+      else if (r.status !== 401) { toast(errText(r), true); }
+      if (sheet && sheet.refresh) { sheet.refresh(); }
+    }, function () { if (BT.runs === rs) { rs.loading = false; toast("no connection", true); if (sheet && sheet.refresh) { sheet.refresh(); } } });
+  }
+  function kvRows(rows) {
+    var kv = h("div", { class: "kv" });
+    rows.forEach(function (r) { if (r[1] !== null && r[1] !== undefined && r[1] !== "") { kv.appendChild(h("span", { class: "k" }, r[0])); kv.appendChild(h("span", { class: "v" }, r[1])); } });
+    return kv;
+  }
+  function openDet(key, summary, content) {
+    var d = h("details", { class: "bot-det" }, h("summary", null, summary), content);
+    d.open = !!BT.open[key];
+    d.addEventListener("toggle", function () { BT.open[key] = d.open; });
+    return d;
+  }
+  // The header and the status line of the conversation page; the transcript below it is the agent chat's (openBotChat).
+  function drawBotPage() {
+    var pg0 = BT.page;
+    if (!pg0 || pg0.run !== null) { return; }
+    var b = BT.det ? BT.det.bot : botById(pg0.id);
+    clear(pg0.top);
+    pg0.top.appendChild(h("a", { class: "btn ghost icon bot-back", href: "#/bots", "aria-label": "Back to bots" }, "\u25c0"));
+    if (b) { var g = h("span", { class: "glyph", "aria-hidden": "true" }); setGlyph(g, botView(b).kind); pg0.top.appendChild(g); }
+    pg0.top.appendChild(h("span", { class: "ttl" }, b ? b.name : "Bot"));
+    if (b) { pg0.top.appendChild(h("span", { class: "kchip" }, b.kind === "agent" ? "agent" : "task")); }
+    pg0.top.appendChild(h("button", { class: "btn ghost icon", type: "button", "aria-label": "Bot actions", "aria-haspopup": "dialog", disabled: !b, onclick: openBotMenu }, "\u22ef"));
+    clear(pg0.info);
+    if (b) {
+      var v = botView(b);
+      var stat = [h("span", { class: "st s-" + v.kind }, v.label), " \u00b7 " + b.when_text];
+      if (b.running && typeof b.running_since === "number") { stat.push(" \u00b7 running ", h("span", { "data-since": String(b.running_since) }, fmtAge(nowServer() - b.running_since))); }
+      else if (b.paused_reason) { stat.push(" \u00b7 paused: " + b.paused_reason); }
+      else if (b.enabled && !b.done && typeof b.next_at === "number") { stat.push(" \u00b7 ", untilNode(b.next_at, "next in ")); }
+      append(pg0.info, stat);
+    }
+    if (pg0.err) { append(pg0.info, [h("span", { class: "err" }, "bot unavailable: " + pg0.err)]); }
+    botBar();
+  }
+  // What the conversation says about itself: the working line over the composer, the note under it, the send button.
+  function botBar() {
+    var pg0 = BT.page;
+    if (!pg0 || pg0.run !== null) { return; }
+    var cv = BT.conv || {};
+    var working = !!(cv.live || cv.busy);
+    D.working.hidden = !working;
+    if (working) {
+      clear(D.working);
+      var g = h("span", { class: "glyph spin", "aria-hidden": "true" }, REDUCED ? "\u21bb" : spinChar());
+      g.style.color = "var(--accent)";
+      append(D.working, [g, cv.live ? "working\u2026" : "busy\u2026"]);
+    }
+    var alive = BT.data && BT.data.scheduler ? BT.data.scheduler.alive : true;
+    var note = "";
+    if (cv.error) { note = "The last message failed: " + cv.error; }
+    else if (!alive) { note = "The scheduler is not running on the laptop, so the bot cannot hear you."; }
+    else if (cv.queue > 0) { note = "The bot is busy: " + cv.queue + (cv.queue === 1 ? " message waits" : " messages wait") + " for its turn."; }
+    else if (working) { note = "The bot is busy: a message you send waits for its turn."; }
+    pg0.note.hidden = !note;
+    pg0.note.textContent = note;
+    botInput(pg0);
+  }
+  function botInput(pg0) {
+    pg0.send.disabled = !pg0.ta.value.trim();
+    pg0.ta.style.height = "auto";
+    pg0.ta.style.height = Math.min(pg0.ta.scrollHeight + 2, 160) + "px";
+  }
+  function botSay() {
+    var pg0 = BT.page;
+    if (!pg0 || pg0.run !== null || pg0.send.disabled) { return; }
+    var text = pg0.ta.value.replace(/\r\n?/g, "\n");
+    if (!text.trim()) { return; }
+    var max = botsLimits().say || 4000;
+    if (text.length > max) { toast("Too long: at most " + max + " characters.", true); return; }
+    var id = pg0.id;
+    pinned = true;
+    // Cleared at once and given back when the request fails (see submit)
+    pg0.ta.value = "";
+    delete BT.drafts[id];
+    botInput(pg0);
+    post(botUrl(id, "say"), { text: text }, null).then(function (r) {
+      if (!r) {
+        if (BT.page === pg0 && !pg0.ta.value) { pg0.ta.value = text; }
+        if (!BT.drafts[id]) { BT.drafts[id] = text; }
+      } else if (r.data && r.data.queued) { toast("The bot is busy: your message is number " + (r.data.position || 1) + " in line."); }
+      if (BT.page === pg0) { botInput(pg0); if (chatLoop.wanted) { chatLoop.go(); } }
+    });
+  }
+  // The transcript of the page is the agent chat's own view (D.chatbox), moved in, reading the bot's conversation endpoint.
+  function openBotChat(pg0) {
+    chatLoop.stop();
+    openChat(null);
+    C = newChat(pg0.id);
+    C.bot = true;
+    pinned = true;
+    pg0.el.insertBefore(D.chatbox, pg0.compose);
+    chatLoop.start();
+  }
+
+  // ---- the actions of a bot: one sheet with rows, and Runs, Memory and About below it
+  function openBotMenu() {
+    var pg0 = BT.page;
+    if (!pg0 || pg0.run !== null) { return; }
+    var id = pg0.id;
+    var b0 = botById(id);
+    openSheet({ title: "Bot", sub: b0 ? b0.name : "", render: function (s) {
+      function draw() {
+        var b = botById(id);
+        if (!b) { closeSheet(); return; }
+        var can = b.can || {};
+        var det = BT.det;
+        var on = b.enabled && !b.paused_reason;
+        clear(s.body);
+        s.body.appendChild(aRow({ glyph: "\u25a4", title: "Runs", meta: det ? String(det.total_runs || 0) : "", onclick: function () { openBotRuns(id); } }));
+        if (det && det.memory) { s.body.appendChild(aRow({ glyph: "\u2630", title: "Memory", meta: det.memory.text ? fmtTok(det.memory.text.length) + " characters" : "empty", onclick: function () { openBotMemory(id); } })); }
+        s.body.appendChild(aRow({ glyph: "\u24d8", title: "About", disabled: !det, onclick: function () { openBotAbout(id); } }));
+        s.body.appendChild(aRow({ glyph: "\u270e", title: "Edit", disabled: !can.edit, onclick: function () { closeSheet(true); openBotForm(id); } }));
+        s.body.appendChild(aRow({ glyph: on ? "\u23f8" : "\u25b6", title: on ? "Pause" : "Resume", disabled: !(on ? can.pause : can.resume), onclick: function () { closeSheet(true); botsPost(id, on ? "pause" : "resume", {}, on ? "Paused" : "Resumed"); } }));
+        s.body.appendChild(aRow({ glyph: "\u21bb", title: "Run now", disabled: !can.run, onclick: function () { closeSheet(true); botRun(b); } }));
+        s.body.appendChild(aRow({ glyph: "\u23ed", title: "Skip next run", disabled: !can.skip, onclick: function () { closeSheet(true); botsPost(id, "skip", {}, "Next run skipped"); } }));
+        if (b.running) {
+          s.body.appendChild(aRow({ glyph: "\u25a0", title: "Stop the run", danger: true, disabled: !can.cancel, onclick: function () {
+            closeSheet(true);
+            ask("Stop the run of \u201c" + b.name + "\u201d now?", "Stop run").then(function (ok) { if (ok) { botsPost(id, "cancel", {}, "Stopping the run"); } });
+          } }));
+        }
+        s.body.appendChild(aRow({ glyph: "\u2718", title: "Delete", danger: true, disabled: !can.delete, onclick: function () { closeSheet(true); botDelete(b); } }));
+      }
+      s.refresh = draw;
+      draw();
+    } });
+  }
+  function openBotRuns(id) {
+    var b0 = botById(id);
+    openSheet({ title: "Runs", sub: b0 ? b0.name : "", back: openBotMenu, render: function (s) {
+      function draw() {
+        var rs = BT.runs || { items: [], more: false, loading: false };
+        clear(s.body);
+        if (!rs.items.length) { s.body.appendChild(h("div", { class: "note-line" }, "no runs yet")); }
+        rs.items.forEach(function (r) {
+          var rl = [h("span", { class: "rchip rs-" + rstat(r.status) }, RSTAT[r.status] || r.status), h("span", null, "#" + r.run)];
+          if (r.trigger === "chat") { rl.push(h("span", null, "talk")); }
+          if (typeof (r.ended || r.started) === "number") { rl.push(h("span", null, agoNode(r.ended || r.started))); }
+          if (typeof r.duration === "number") { rl.push(h("span", null, "took " + fmtRunDur(r.duration))); }
+          if (typeof r.cost_usd === "number") { rl.push(h("span", null, "$" + r.cost_usd.toFixed(2))); }
+          if (!r.seen) { rl.push(h("span", { class: "bnew" }, "\u25cf new")); }
+          s.body.appendChild(h("a", { class: "brun" + (r.seen ? "" : " unseen"), href: "#/bots/" + encodeURIComponent(id) + "/" + r.run, onclick: function () { closeSheet(true); } },
+            h("div", { class: "rl" }, rl), h("div", { class: "rs" }, r.headline || (r.summary ? r.summary.replace(/\s+/g, " ") : (r.error || "no summary")))));
+        });
+        if (rs.more) { s.body.appendChild(h("div", { class: "startbar" }, h("button", { class: "btn", type: "button", disabled: rs.loading, onclick: loadOlderRuns }, rs.loading ? "loading\u2026" : "older runs"))); }
+      }
+      s.refresh = draw;
+      draw();
+    } });
+  }
+  function openBotMemory(id) {
+    var b0 = botById(id);
+    openSheet({ title: "Memory", sub: b0 ? b0.name : "", back: openBotMenu, render: function (s) {
+      var mem = BT.det ? BT.det.memory : null;
+      if (!mem) { s.body.appendChild(h("div", { class: "note-line" }, "this bot keeps no memory")); return; }
+      s.body.appendChild(h("pre", { class: "bot-pre" }, mem.text || "Nothing yet: the agent writes it during its runs."));
+      if (mem.truncated) { s.body.appendChild(h("div", { class: "note-line" }, "Only the start is shown; the whole file is on the laptop.")); }
+    } });
+  }
+  function openBotAbout(id) {
+    var b0 = botById(id);
+    openSheet({ title: "About", sub: b0 ? b0.name : "", back: openBotMenu, render: function (s) {
+      var det = BT.det;
+      if (!det) { s.body.appendChild(h("div", { class: "note-line" }, "loading\u2026")); return; }
+      var def = det.definition;
+      s.body.appendChild(kvRows([
+        ["kind", def.kind === "agent" ? "agent (standing task, identity, memory)" : "task"], ["when", def.when_text + (def.tz && def.tz !== "local" ? " (" + def.tz + ")" : "")],
+        ["folder", def.dir], ["account", def.account || "automatic"], ["mode", def.mode === "visible" ? "visible (in a pane)" : "headless (background)"],
+        ["permissions", def.permissions], ["limits", fmtRunDur(def.max_time_s) + " and $" + Number(def.max_cost_usd).toFixed(2) + " per run"],
+        ["notify", def.notify.length ? def.notify.join(", ") : "off"], ["made on", def.origin],
+        ["runs", String(det.total_runs || 0) + (det.state.consec_failures ? " \u00b7 " + det.state.consec_failures + " failed in a row" : "")]]));
+      s.body.appendChild(h("div", { class: "sec-h" }, def.kind === "agent" ? "standing task" : "task"));
+      s.body.appendChild(h("pre", { class: "bot-text" }, def.prompt));
+      if (def.kind === "agent" && def.identity) { s.body.appendChild(h("div", { class: "sec-h" }, "identity")); s.body.appendChild(h("pre", { class: "bot-text" }, def.identity)); }
+    } });
+  }
+
+  // ---- one run's result
+  function loadRun(id, n) {
+    var pg0 = BT.page;
+    api(botUrl(id, "runs/" + n), { timeout: 10000 }).then(function (r) {
+      if (BT.page !== pg0) { return; }
+      if (r.status === 200 && r.data) { pg0.data = r.data; pg0.err = null; }
+      else if (r.status === 404) { toast("This run is gone.", true); setHash("#/bots/" + id, true); return; }
+      else if (r.status !== 401) { pg0.err = errText(r); }
+      drawRunPage();
+    }, function () { if (BT.page === pg0) { pg0.err = "no connection"; drawRunPage(); } });
+  }
+  function drawRunPage() {
+    var pg0 = BT.page;
+    if (!pg0 || pg0.run === null) { return; }
+    var keep = pg0.scroll.scrollTop;
+    clear(pg0.top);
+    clear(pg0.scroll);
+    var b = botById(pg0.id);
+    var r = pg0.data ? pg0.data.run : null;
+    pg0.top.appendChild(h("a", { class: "btn ghost icon", href: "#/bots/" + encodeURIComponent(pg0.id), "aria-label": "Back to the bot" }, "\u25c0"));
+    pg0.top.appendChild(h("span", { class: "ttl" }, "Run #" + pg0.run + (b ? " \u00b7 " + b.name : "")));
+    var body = h("div", { class: "bot-body" });
+    pg0.scroll.appendChild(body);
+    if (pg0.err) { body.appendChild(h("div", { class: "note-line err" }, "run unavailable: " + pg0.err)); }
+    if (!r) { if (!pg0.err) { body.appendChild(h("div", { class: "note-line" }, "loading\u2026")); } return; }
+    body.appendChild(h("div", { class: "bot-stat" }, h("span", { class: "rchip rs-" + rstat(r.status) }, RSTAT[r.status] || r.status),
+      typeof (r.ended || r.started) === "number" ? [" \u00b7 ", agoNode(r.ended || r.started)] : null, " \u00b7 " + (r.trigger || "")));
+    var can = b && b.can ? b.can : {};
+    body.appendChild(h("div", { class: "bot-act" },
+      abtn("Run again", "write", !can.run, function () { if (b) { botRun(b); } }),
+      h("a", { class: "btn", href: "#/bots/" + encodeURIComponent(pg0.id) }, "Talk to " + (b ? b.name : "the bot"))));
+    if (r.error) { body.appendChild(h("div", { class: "note-line err" }, r.error)); }
+    if (r.headline) { body.appendChild(h("div", { class: "run-head" }, r.headline)); }
+    body.appendChild(h("div", { class: "sec-h" }, "summary"));
+    body.appendChild(h("div", { class: "run-md" }, r.summary ? renderMd(r.summary) : h("div", { class: "note-line" }, "no summary")));
+    if (r.report_text && r.report_text.text) {
+      body.appendChild(h("div", { class: "sec-h" }, "report"));
+      body.appendChild(h("div", { class: "run-md" }, renderMd(r.report_text.text)));
+      if (r.report_text.truncated) { body.appendChild(h("div", { class: "note-line" }, "Only the start of the report is shown; the whole file is on the laptop.")); }
+    }
+    body.appendChild(h("div", { class: "sec-h" }, "details"));
+    body.appendChild(kvRows([
+      ["started", typeof r.started === "number" ? fmtWhenAt(r.started) : null], ["took", typeof r.duration === "number" ? fmtRunDur(r.duration) : null],
+      ["cost", typeof r.cost_usd === "number" ? "$" + r.cost_usd.toFixed(2) : null], ["tokens", typeof r.tokens === "number" ? fmtTok(r.tokens) : null],
+      ["account", r.account], ["model", r.model], ["attempt", r.attempt > 1 ? String(r.attempt) : null], ["exit", typeof r.exit === "number" && r.exit !== 0 ? String(r.exit) : null]]));
+    pg0.scroll.scrollTop = keep;
+  }
+
+  // ---- create and edit: one sheet
+  function openBotForm(id) {
+    var L = botsLimits();
+    var f = BT.form = { id: id, loaded: !id, busy: false, err: null, kind: "task", name: "", prompt: "", identity: "", when: "", dir: null, curDir: "", curWhen: "",
+      query: "", found: [], searching: false, account: null, mode: "headless", notify: true, perms: "edit", mins: String(Math.round(L.default_time_s / 60)),
+      cost: String(L.default_cost_usd), parse: null, parseTimer: 0, searchTimer: 0, sheet: null };
+    openSheet({ title: id ? "Edit bot" : "New bot", sub: id && botById(id) ? botById(id).name : "", render: function (s) { f.sheet = s; drawBotForm(); } });
+    if (!ns.loaded) { loadOptions(drawBotForm); }
+    if (id) {
+      api(botUrl(id), { timeout: 10000 }).then(function (r) {
+        if (BT.form !== f) { return; }
+        if (r.status === 200 && r.data) {
+          var d = r.data.definition;
+          f.kind = d.kind; f.name = d.name; f.prompt = d.prompt; f.identity = d.identity || ""; f.account = d.account; f.mode = d.mode;
+          f.notify = d.notify.length > 0; f.perms = d.permissions === "readonly" ? "readonly" : "edit"; f.mins = String(Math.round(d.max_time_s / 60));
+          f.cost = String(d.max_cost_usd); f.curDir = d.dir; f.curWhen = d.when_text;
+          f.loaded = true;
+        } else if (r.status !== 401) { f.err = errText(r); }
+        drawBotForm();
+      }, function () { if (BT.form === f) { f.err = "no connection"; drawBotForm(); } });
+    }
+  }
+  function botParseSoon() {
+    var f = BT.form;
+    window.clearTimeout(f.parseTimer);
+    var text = f.when.trim();
+    if (!text) { f.parse = null; drawBotPreview(); return; }
+    f.parse = { loading: true };
+    drawBotPreview();
+    f.parseTimer = window.setTimeout(function () {
+      api("/api/bots/parse", { body: { text: text }, timeout: 8000 }).then(function (r) {
+        if (BT.form !== f || f.when.trim() !== text) { return; }
+        f.parse = r.status === 200 && r.data ? r.data : { error: errText(r) };
+        drawBotPreview();
+      }, function () { if (BT.form === f && f.when.trim() === text) { f.parse = { error: "no connection" }; drawBotPreview(); } });
+    }, 350);
+  }
+  function drawBotPreview() {
+    var f = BT.form;
+    if (!f || !BT.prevEl) { return; }
+    var el = BT.prevEl;
+    clear(el);
+    var p = f.parse;
+    var minutes = Math.round(botsLimits().min_interval_s / 60);
+    if (!p) {
+      el.className = "pvw";
+      el.textContent = f.id && f.curWhen ? "now: " + f.curWhen + " (leave empty to keep it)" : "e.g. weekdays 9am, every 2h, in 30 minutes, tomorrow 8:30; a repeat is at least " + minutes + " minutes";
+    } else if (p.loading) { el.className = "pvw"; el.textContent = "reading\u2026"; }
+    else if (p.error) { el.className = "pvw err"; el.textContent = p.error; }
+    else {
+      el.className = "pvw";
+      el.appendChild(h("b", null, p.describe || "ok"));
+      el.appendChild(document.createTextNode(" \u00b7 next: " + (p.next || []).map(fmtWhenAt).join(" \u00b7 ")));
+    }
+  }
+  function botSearchDirs() {
+    var f = BT.form;
+    window.clearTimeout(f.searchTimer);
+    var q = f.query;
+    if (q.length < 2) { f.found = []; f.searching = false; drawBotDirs(); return; }
+    f.searching = true;
+    drawBotDirs();
+    f.searchTimer = window.setTimeout(function () {
+      api("/api/sessions/dirs?q=" + encodeURIComponent(q), { timeout: 10000 }).then(function (r) {
+        if (BT.form !== f || q !== f.query) { return; }
+        f.searching = false;
+        f.found = r.status === 200 && r.data && Array.isArray(r.data.dirs) ? r.data.dirs : [];
+        drawBotDirs();
+      }, function () { if (BT.form === f && q === f.query) { f.searching = false; f.found = []; drawBotDirs(); } });
+    }, 250);
+  }
+  function drawBotDirs() {
+    var f = BT.form;
+    var el = BT.dirsEl;
+    if (!f || !el) { return; }
+    clear(el);
+    var q = f.query.toLowerCase();
+    var shown = (ns.dirs || []).filter(function (x) { return !q || (x.label + " " + x.path).toLowerCase().indexOf(q) >= 0; });
+    var have = {};
+    shown.forEach(function (x) { have[x.path] = true; });
+    (q ? f.found : []).forEach(function (x) { if (!have[x.path]) { have[x.path] = true; shown.push(x); } });
+    if (f.dir !== null && !have[f.dir]) { shown.unshift({ label: f.dir.split("/").filter(Boolean).pop() || f.dir, path: f.dir }); }
+    if (!shown.length) { el.appendChild(h("div", { class: "note-line" }, f.searching ? "searching\u2026" : (ns.loaded ? "no directories" : "loading\u2026"))); }
+    shown.forEach(function (x) {
+      el.appendChild(h("button", { class: "drow" + (f.dir === x.path ? " cur" : ""), type: "button", role: "option", "aria-selected": f.dir === x.path ? "true" : "false", onclick: function () { f.dir = x.path; f.err = null; drawBotForm(); } },
+        h("span", { class: "mark", "aria-hidden": "true" }, "\u258e"), h("span", { class: "nm" }, x.label), h("span", { class: "pth" }, x.path)));
+    });
+    if (f.searching && shown.length) { el.appendChild(h("div", { class: "note-line" }, "searching\u2026")); }
+  }
+  function drawBotForm() {
+    var f = BT.form;
+    if (!f || !sheet || sheet !== f.sheet) { return; }
+    var body = sheet.body;
+    var keep = body.scrollTop;
+    clear(body);
+    var L = botsLimits();
+    var edit = !!f.id;
+    if (!f.loaded) { body.appendChild(h("div", { class: "note-line" + (f.err ? " err" : "") }, f.err ? "bot unavailable: " + f.err : "loading\u2026")); return; }
+    function pad(x) { return h("div", { class: "fpad" }, x); }
+    function hint(t) { return h("div", { class: "fhint" }, t); }
+    function label(t) { body.appendChild(h("div", { class: "sec-h" }, t)); }
+    function input(tag, key, attrs, after) {
+      var el = h(tag, attrs);
+      el.value = f[key];
+      el.addEventListener("input", function () { f[key] = el.value; if (after) { after(); } });
+      return el;
+    }
+    function group(name, choices, cur, set) {
+      var g = h("div", { class: "opts", role: "group", "aria-label": name });
+      choices.forEach(function (c) { g.appendChild(chip(c[1], cur === c[0], function () { set(c[0]); f.err = null; drawBotForm(); })); });
+      return g;
+    }
+    if (f.err) { body.appendChild(h("div", { class: "note-line err", role: "alert" }, f.err)); }
+    label("name");
+    body.appendChild(pad(input("input", "name", { class: "field", type: "text", maxlength: String(L.name), "aria-label": "Name", autocapitalize: "sentences" })));
+    if (!edit) {
+      label("kind");
+      body.appendChild(group("Kind", [["task", "Task"], ["agent", "Agent"]], f.kind, function (v) { f.kind = v; }));
+      body.appendChild(hint(f.kind === "agent" ? "A persistent agent: a standing task, an identity and a memory file it keeps between runs." : "Runs its task on the schedule and reports the result here."));
+    }
+    label(f.kind === "agent" ? "standing task" : "task");
+    body.appendChild(pad(input("textarea", "prompt", { class: "field", rows: "4", maxlength: String(limitOf("prompt")), "aria-label": "Task", placeholder: "What should it do?" })));
+    if (f.kind === "agent") {
+      label("identity (optional)");
+      body.appendChild(pad(input("textarea", "identity", { class: "field", rows: "2", maxlength: String(L.identity), "aria-label": "Identity", placeholder: "Who it is and how it works" })));
+    }
+    label("when");
+    var cur = f.when.trim();
+    var custom = cur !== "" && !PRESETS.some(function (p) { return p[1] === cur; });
+    var pr = h("div", { class: "opts", role: "group", "aria-label": "Schedule" });
+    PRESETS.forEach(function (p) { pr.appendChild(chip(p[0], cur === p[1], function () { f.when = p[1]; f.err = null; drawBotForm(); botParseSoon(); })); });
+    pr.appendChild(chip("Custom", custom, function () { f.when = custom ? f.when : ""; drawBotForm(); var w = body.querySelector("input[aria-label='When']"); if (w) { w.focus(); } }));
+    body.appendChild(pr);
+    body.appendChild(pad(input("input", "when", { class: "field", type: "text", "aria-label": "When", placeholder: edit ? "leave empty to keep the schedule" : "weekdays 9am, every 2h, in 30 minutes\u2026", autocapitalize: "off", autocorrect: "off", spellcheck: "false" }, botParseSoon)));
+    BT.prevEl = h("div", { class: "pvw", role: "status" });
+    body.appendChild(BT.prevEl);
+    drawBotPreview();
+    label("folder");
+    if (edit && f.curDir && f.dir === null) { body.appendChild(hint("now: " + f.curDir + " (pick another to change it)")); }
+    var q = h("input", { class: "field", type: "search", placeholder: "search folders or type a path (~/work/x)", "aria-label": "Search folders", autocapitalize: "off", autocorrect: "off", spellcheck: "false" });
+    q.value = f.query;
+    q.addEventListener("input", function () { f.query = q.value.trim(); botSearchDirs(); });
+    body.appendChild(h("div", { class: "sfilter" }, q));
+    BT.dirsEl = h("div", { class: "dirs", role: "listbox", "aria-label": "Folder" });
+    body.appendChild(BT.dirsEl);
+    drawBotDirs();
+    label("account");
+    body.appendChild(group("Account", [[null, "Auto"]].concat((ns.profiles || []).map(function (p) { return [p.label, p.label]; })), f.account, function (v) { f.account = v; }));
+    label("mode");
+    body.appendChild(group("Mode", [["headless", "Headless"], ["visible", "Visible"]], f.mode, function (v) { f.mode = v; }));
+    body.appendChild(hint(f.mode === "visible" ? "The run is shown in a pane of the Hivegrid window." : "Runs in the background; its result lands in Bots."));
+    label("permissions");
+    body.appendChild(group("Permissions", [["readonly", "Read only"], ["edit", "Edit"]], f.perms, function (v) { f.perms = v; }));
+    body.appendChild(hint(f.perms === "readonly" ? "Reads files and searches the web; changes nothing." : "Reads and writes files; shell commands are refused. Full access is set on the laptop only."));
+    label("limits per run");
+    body.appendChild(pad(h("div", { class: "fnum" },
+      h("label", null, "minutes (at most " + Math.floor(L.max_time_s / 60) + ")", input("input", "mins", { class: "field", type: "text", inputmode: "numeric", "aria-label": "Minutes per run" })),
+      h("label", null, "cost in USD (at most " + L.max_cost_usd + ")", input("input", "cost", { class: "field", type: "text", inputmode: "decimal", "aria-label": "Cost per run in USD" })))));
+    label("notify");
+    body.appendChild(h("div", { class: "opts" }, chip("Tell me when it finishes or fails", f.notify, function () { f.notify = !f.notify; drawBotForm(); })));
+    var go = h("button", { class: "btn primary", type: "button", disabled: f.busy, onclick: submitBotForm }, f.busy ? "saving\u2026" : (edit ? "Save changes" : "Create bot"));
+    body.appendChild(h("div", { class: "startbar" }, go,
+      h("div", { class: "why" }, "At most " + L.max_bots + " bots; the phone cannot make a bot that runs shell commands.")));
+    body.scrollTop = keep;
+  }
+  function submitBotForm() {
+    var f = BT.form;
+    if (!f || f.busy) { return; }
+    var L = botsLimits();
+    var edit = !!f.id;
+    var mins = parseFloat(f.mins);
+    var cost = parseFloat(f.cost);
+    var problem = null;
+    if (!f.name.trim()) { problem = "Give the bot a name."; }
+    else if (!f.prompt.trim()) { problem = "Write the task."; }
+    else if (!edit && !f.when.trim()) { problem = "Say when it runs."; }
+    else if (f.when.trim() && f.parse && f.parse.error) { problem = "The schedule is not understood: " + f.parse.error; }
+    else if (!edit && f.dir === null) { problem = "Choose a folder."; }
+    else if (!(mins >= 1 && mins * 60 <= L.max_time_s)) { problem = "Minutes per run: a number from 1 to " + Math.floor(L.max_time_s / 60) + "."; }
+    else if (!(cost > 0 && cost <= L.max_cost_usd)) { problem = "Cost per run: a number above 0, at most " + L.max_cost_usd + "."; }
+    f.err = problem;
+    if (problem) { drawBotForm(); return; }
+    var body = { name: f.name.trim(), prompt: f.prompt, account: f.account, mode: f.mode, permissions: f.perms, max_time_s: Math.round(mins * 60), max_cost_usd: cost, notify: f.notify };
+    if (f.kind === "agent") { body.identity = f.identity; }
+    if (!edit) { body.kind = f.kind; body.when = f.when.trim(); body.dir = f.dir; }
+    else { if (f.when.trim()) { body.when = f.when.trim(); } if (f.dir !== null) { body.dir = f.dir; } }
+    f.busy = true;
+    drawBotForm();
+    api(edit ? botUrl(f.id) : "/api/bots", { body: body, timeout: 15000 }).then(function (r) {
+      f.busy = false;
+      if (r.status >= 200 && r.status < 300 && r.data && r.data.ok) {
+        if (BT.form === f) { BT.form = null; closeSheet(); }
+        toast(edit ? "Saved" : "Bot created");
+        refreshNow();
+        if (botsMode === "bot" && BT.page) { loadBot(BT.page.id); }
+      } else if (r.status !== 401) { f.err = errText(r); drawBotForm(); }
+      else { drawBotForm(); }
+    }, function () { f.busy = false; f.err = "no connection"; drawBotForm(); });
+  }
 
   // ---------------------------------------------------------------- start
   function start() {
@@ -2979,6 +4194,7 @@ APP_JS = r"""(function () {
     meta = null; metaRev = null; metaBusy = false; metaFails = 0;
     agents = null; listEtag = null; filter = null; clockOffset = 0; lastOk = 0; nomux = false;
     selId = null; menuSec = null; menuPushed = false; starting = null; modelsCache = {};
+    BT = newBots(); botsMode = null; lastPage = "agents";
     ns = { loaded: false, profiles: [], dirs: [], profile: null, dir: null, filter: "", query: "", busy: false, err: null, found: [], searching: false, timer: null };
     closeSheet(true);
     buildApp();
@@ -3036,4 +4252,47 @@ MANIFEST = r"""{
     { "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ]
 }
+"""
+
+# The service worker (served at /sw.js, scope /): shows a notification when the server pushes one and opens the page at
+# the right place when it is tapped. It holds no token, makes no request and caches nothing; the text is whatever the
+# server encrypted for this device, cut and set as plain text by the OS (never as markup). A notification is shown for
+# every push, also while the page is open: iOS revokes a subscription that stays silent, and the tag makes a newer message
+# for the same agent replace the older one.
+SW_JS = r"""(function () {
+  "use strict";
+  var ROUTE = /^#\/[A-Za-z0-9\/_%.-]{0,100}$/;
+  function text(v, n) { return typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, n) : ""; }
+  self.addEventListener("install", function () { self.skipWaiting(); });
+  self.addEventListener("activate", function (ev) { ev.waitUntil(self.clients.claim()); });
+  self.addEventListener("push", function (ev) {
+    var d = {};
+    try { d = ev.data ? ev.data.json() : {}; } catch (e) { d = {}; }
+    if (!d || typeof d !== "object") { d = {}; }
+    var tag = text(d.tag, 60);
+    var opts = {
+      body: text(d.body, 300),
+      icon: "/icon.png",
+      tag: tag || undefined,
+      renotify: !!tag,
+      data: { url: typeof d.url === "string" && ROUTE.test(d.url) ? d.url : "#/" }
+    };
+    ev.waitUntil(self.registration.showNotification(text(d.title, 120) || "Hivegrid", opts));
+  });
+  self.addEventListener("notificationclick", function (ev) {
+    ev.notification.close();
+    var data = ev.notification.data;
+    var hash = data && typeof data.url === "string" && ROUTE.test(data.url) ? data.url : "#/";
+    var target = self.registration.scope + hash;
+    ev.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (c.url.indexOf(self.registration.scope) === 0 && typeof c.focus === "function") {
+          return c.focus().then(function (w) { return (w || c).navigate(target); }).catch(function () { return self.clients.openWindow(target); });
+        }
+      }
+      return self.clients.openWindow(target);
+    }));
+  });
+})();
 """

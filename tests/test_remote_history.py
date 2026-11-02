@@ -58,6 +58,21 @@ class TestQuit(QuitCase):
         self.assertEqual([c for c in self.sends() if "--no-paste" not in c], [])
         self.assertIn("write quit label=", self.logs[-1])
 
+    def test_the_shell_pane_that_is_left_is_closed_on_the_host(self):
+        self.omp_exits_on_ctrl_d()
+        self.assertEqual(self.quit()[0].status, 200)
+        self.assertEqual([c for c in self.fake.calls if c[0] == "kill-pane"], [("kill-pane", "--pane-id", "3")])
+
+    def test_a_pane_that_runs_something_else_after_omp_quit_is_not_closed(self):
+        self.omp_exits_on_ctrl_d()
+        self.quitter.foreground = lambda: {"pts/3": (1, "omp" if self.running[0] else "vim", 0, "")}
+        self.assertEqual(self.quit()[0].status, 200)
+        self.assertEqual([c for c in self.fake.calls if c[0] == "kill-pane"], [])
+
+    def test_omp_that_stays_closes_nothing(self):
+        self.quit()
+        self.assertEqual([c for c in self.fake.calls if c[0] == "kill-pane"], [])
+
     def test_a_quit_session_is_gone_from_the_list_not_listed_as_exited(self):
         _, data = self.call("GET", "/api/agents")
         self.assertEqual([(a["state"], a["can"]["quit"]) for a in data["agents"]], [("idle", True)])

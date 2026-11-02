@@ -1209,13 +1209,15 @@ const ui = fs.readFileSync(path.join(import.meta.dir, "../../bin/hivegrid_remote
 const pagerMatch = ui.match(/\/\/ pager-logic:begin\n([\s\S]*?)\/\/ pager-logic:end/);
 if (!pagerMatch) throw new Error("pager-logic block not found");
 const pager = new Function(
-	`${pagerMatch[1]}\nreturn { pagerClassify, pagerAllows, pagerCommit, pagerDest, termHash, PAGER_EDGE };`,
+	`${pagerMatch[1]}\nreturn { pagerClassify, pagerAllows, pagerCommit, pagerDest, pagerStripOf, termHash, botsHash, PAGER_EDGE };`,
 )() as {
 	pagerClassify(dx: number, dy: number): "wait" | "lock" | "cancel";
-	pagerAllows(zone: string, dx: number): boolean;
+	pagerAllows(zone: string, dx: number, strip: string[]): boolean;
 	pagerCommit(dx: number, ms: number): boolean;
-	pagerDest(zone: string): string;
+	pagerDest(zone: string, dx: number, strip: string[], hash: string): string;
+	pagerStripOf(terminal: boolean, bots: boolean): string[];
 	termHash(hash: string): { n: number | null } | null;
+	botsHash(hash: string): { id: string | null; run: number | null } | null;
 	PAGER_EDGE: number;
 };
 
@@ -1247,14 +1249,43 @@ describe("pager gesture rules", () => {
 		expect(pager.pagerClassify(14, 10)).toBe("wait");
 	});
 
-	test("the terminals sit to the right: agents take a swipe to the left, the overview one to the right", () => {
-		expect(pager.pagerAllows("agents", -50)).toBe(true);
-		expect(pager.pagerAllows("agents", 50)).toBe(false);
-		expect(pager.pagerAllows("ov", 50)).toBe(true);
-		expect(pager.pagerAllows("ov", -50)).toBe(false);
-		expect(pager.pagerAllows("term", 50)).toBe(true);
-		expect(pager.pagerAllows("term", -50)).toBe(true);
-		expect(pager.pagerAllows("elsewhere", 50)).toBe(false);
+	test("the terminals sit to the right of the agents: agents take a swipe to the left, the overview one to the right", () => {
+		const strip = pager.pagerStripOf(true, false);
+		expect(strip).toEqual(["agents", "ov"]);
+		expect(pager.pagerAllows("agents", -50, strip)).toBe(true);
+		expect(pager.pagerAllows("agents", 50, strip)).toBe(false);
+		expect(pager.pagerAllows("ov", 50, strip)).toBe(true);
+		expect(pager.pagerAllows("ov", -50, strip)).toBe(false);
+		expect(pager.pagerAllows("term", 50, strip)).toBe(true);
+		expect(pager.pagerAllows("term", -50, strip)).toBe(true);
+		expect(pager.pagerAllows("bot", -50, strip)).toBe(true);
+		expect(pager.pagerAllows("elsewhere", 50, strip)).toBe(false);
+	});
+
+	test("the strip is agents, terminals (only when on), bots (only when the server has them)", () => {
+		expect(pager.pagerStripOf(false, false)).toEqual(["agents"]);
+		expect(pager.pagerStripOf(true, false)).toEqual(["agents", "ov"]);
+		expect(pager.pagerStripOf(false, true)).toEqual(["agents", "bots"]);
+		expect(pager.pagerStripOf(true, true)).toEqual(["agents", "ov", "bots"]);
+	});
+
+	test("with all three pages each takes the swipes that lead to a neighbour and refuses the others", () => {
+		const strip = pager.pagerStripOf(true, true);
+		expect([-50, 50].map(dx => pager.pagerAllows("agents", dx, strip))).toEqual([true, false]);
+		expect([-50, 50].map(dx => pager.pagerAllows("ov", dx, strip))).toEqual([true, true]);
+		expect([-50, 50].map(dx => pager.pagerAllows("bots", dx, strip))).toEqual([false, true]);
+		expect(pager.pagerAllows("agents", 0, strip)).toBe(false);
+	});
+
+	test("without the terminal the bots are the neighbour of the agents; a page that is not in the strip takes nothing", () => {
+		const strip = pager.pagerStripOf(false, true);
+		expect(pager.pagerAllows("agents", -50, strip)).toBe(true);
+		expect(pager.pagerAllows("bots", 50, strip)).toBe(true);
+		expect(pager.pagerAllows("bots", -50, strip)).toBe(false);
+		expect(pager.pagerAllows("ov", 50, strip)).toBe(false);
+		const alone = pager.pagerStripOf(false, false);
+		expect(pager.pagerAllows("agents", -50, alone)).toBe(false);
+		expect(pager.pagerAllows("agents", 50, alone)).toBe(false);
 	});
 
 	test("it commits for a long drag or a short quick flick, not for a short slow one", () => {
@@ -1266,10 +1297,21 @@ describe("pager gesture rules", () => {
 		expect(pager.pagerCommit(40, 200)).toBe(false);
 	});
 
-	test("the destinations: the overview back to the agents, everything else to the overview", () => {
-		expect(pager.pagerDest("ov")).toBe("#/");
-		expect(pager.pagerDest("agents")).toBe("#/term");
-		expect(pager.pagerDest("term")).toBe("#/term");
+	test("the destinations follow the strip: left goes one page to the right, right one page back; full-screen pages step back", () => {
+		const all = pager.pagerStripOf(true, true);
+		expect(pager.pagerDest("agents", -80, all, "#/")).toBe("#/term");
+		expect(pager.pagerDest("ov", -80, all, "#/term")).toBe("#/bots");
+		expect(pager.pagerDest("ov", 80, all, "#/term")).toBe("#/");
+		expect(pager.pagerDest("bots", 80, all, "#/bots")).toBe("#/term");
+		const noTerm = pager.pagerStripOf(false, true);
+		expect(pager.pagerDest("agents", -80, noTerm, "#/")).toBe("#/bots");
+		expect(pager.pagerDest("bots", 80, noTerm, "#/bots")).toBe("#/");
+		const noBots = pager.pagerStripOf(true, false);
+		expect(pager.pagerDest("agents", -80, noBots, "#/")).toBe("#/term");
+		expect(pager.pagerDest("ov", 80, noBots, "#/term")).toBe("#/");
+		expect(pager.pagerDest("term", 80, all, "#/term/3")).toBe("#/term");
+		expect(pager.pagerDest("bot", 80, all, "#/bots/digest-k3x")).toBe("#/bots");
+		expect(pager.pagerDest("bot", -80, all, "#/bots/digest-k3x/7")).toBe("#/bots/digest-k3x");
 	});
 
 	test("the terminal routes", () => {
@@ -1278,6 +1320,15 @@ describe("pager gesture rules", () => {
 		expect(pager.termHash("#/term/12")).toEqual({ n: 12 });
 		for (const bad of ["#/", "#/a/1", "#/term/", "#/term/x", "#/term/1/2", "#/terms", "#/term/1234567890", "#/term?x"]) {
 			expect(pager.termHash(bad)).toBeNull();
+		}
+	});
+
+	test("the bots routes", () => {
+		expect(pager.botsHash("#/bots")).toEqual({ id: null, run: null });
+		expect(pager.botsHash("#/bots/digest-k3x")).toEqual({ id: "digest-k3x", run: null });
+		expect(pager.botsHash("#/bots/digest-k3x/12")).toEqual({ id: "digest-k3x", run: 12 });
+		for (const bad of ["#/", "#/bots/", "#/bots/ab", "#/bots/UPPER", "#/bots/a-b-c/x", "#/bots/a-b-c/1/2", "#/botsx", "#/bots/a-b-c/1234567890", "#/term", "#/bots?x"]) {
+			expect(pager.botsHash(bad)).toBeNull();
 		}
 	});
 });

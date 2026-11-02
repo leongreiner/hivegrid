@@ -2,8 +2,8 @@
 
 Quitting. `SessionQuitter` ends the omp of one agent the way the user would: Ctrl+D on an empty prompt, sent
 only while omp is the program in front in that pane, then it waits for omp to exit and the pane to show a
-shell. It never kills a process and never closes a pane: the shell that is left behind reads `exited`, which
-the phone's list leaves out (App._listed); the window and its dock are the desktop's and stay as they are.
+shell. It never kills a process. Once omp is gone and the pane shows a plain shell, that pane is closed (kill-pane;
+a pane that runs anything else is left alone); its dock and window stay as they are.
 See docs/remote.md, "Quitting a session".
 
 History. `History` lists the omp session files of the machine (`~/.omp/agent/sessions` and
@@ -90,6 +90,13 @@ class SessionQuitter:
             if self.clock() >= end or self.sleep(D.EXIT_POLL):
                 return False
 
+    def _close_pane(self, pane):
+        """Closes the pane that is left after omp quit, only while it still shows a plain shell (never a
+        pane that runs something else: the user may have started a program there since)."""
+        row = self._row(pane)
+        if row is not None and self._front(row) in A.SHELLS:
+            self.mux.run("kill-pane", "--pane-id", str(pane))
+
     def quit(self, agent):
         """Quits the omp of `agent` (a listed agent that `quit_block` allows). Returns once omp has exited and the
         pane shows a shell (or is gone), also when that took longer than D.SHELL_WAIT. Raises Refused (omp keeps
@@ -110,7 +117,8 @@ class SessionQuitter:
                 raise Refused("agent_not_ready", "could not reach the agent's pane") from None
             if not self._wait_exit(agent.pid):
                 raise Refused("agent_not_ready", "omp did not quit (unsent text in its prompt?): the session keeps running")
-            self._settled(agent.pane)
+            if self._settled(agent.pane):
+                self._close_pane(agent.pane)
         finally:
             with self._lock:
                 self._busy.discard(agent.pane)

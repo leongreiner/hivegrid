@@ -59,6 +59,27 @@ def session_path_ok(path, home=None, uid=None):
     return real if profile_sessions or default_sessions else None
 
 
+def session_path_pending(path, home=None):
+    """True when `path` names a session file omp has not written yet (a fresh agent writes it with its first
+    message): an absolute `.jsonl` that does not exist, whose real path would lie where `session_path_ok`
+    accepts session files. Nothing is read."""
+    if not isinstance(path, str) or not path.endswith(".jsonl") or "\0" in path or len(path) > SESSION_HINT_MAX:
+        return False
+    if not os.path.isabs(path) or os.path.lexists(path):
+        return False
+    try:
+        real = os.path.realpath(path)
+        root = os.path.realpath(os.path.join(_home(home), ".omp"))
+    except OSError:
+        return False
+    rel = os.path.relpath(real, root)
+    if rel.startswith("..") or os.path.isabs(rel):
+        return False
+    parts = rel.split(os.sep)
+    return (len(parts) >= 5 and parts[0] == "profiles" and parts[2:4] == ["agent", "sessions"]) or \
+           (len(parts) >= 3 and parts[:2] == ["agent", "sessions"])
+
+
 def _open_jsonl(pid, proc, home, uid):
     found = []
     try:
@@ -740,7 +761,7 @@ def limit_json(agent, accounts, now, san_line, directory=None):
             break
     window = A.limit_window(limit, windows)
     return {"window": window, "label": LIMIT_LABELS[window], "hit_at": limit.get("hit_at"), "reset_at": limit.get("reset_at"),
-            "account": san_line(label, 40) if label else None}
+            "account": san_line(label, 40) if label else None, "continues_at": A.autocontinue_at(agent, now)}
 
 
 # ---------------------------------------------------------------- switching an agent's account

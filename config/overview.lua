@@ -1,6 +1,7 @@
 -- Overview dock: a pane at the right edge of the active tab that lists every grid pane with
 -- its number, state glyph, directory, time in that state and omp's session title.
 -- Wire (parent): require('overview')(config, wezterm, as, sb, layouts)
+--   overview.on_bot = function(window, pane, bot_id) end   (optional) opens that bot on the Bots page instead of the panel
 --   LEADER+o shows or hides the dock in the active tab (settings key overview_toggle).
 -- The dock is bin/hivegrid-overview. This module writes the rows (agentstatus.overview) to
 -- $XDG_RUNTIME_DIR/hivegrid-overview-<dock pane id>.json whenever they change and the dock
@@ -345,15 +346,36 @@ return function(config, wezterm, as, sb, layouts)
 
   -- Requests from the dock, which must come from the dock pane of its own tab: a click on a
   -- row (or its digit) focuses that grid pane, the grid buttons equalize or arrange the panes,
-  -- the close buttons close a grid pane or the tab.
+  -- the close buttons close a grid pane or the tab, a click on a row of its bots section
+  -- (hivegrid_overview_bots, "<schedule id>:<serial>") opens that bot on the Bots page.
+  local PANEL = wezterm.home_dir .. '/.local/bin/hivegrid-panel'
+  local api = {}
+  local function open_bot(window, rec, pane, value)
+    local id = tostring(value):match('^([^:]*)')
+    if not id or id == '' or #id > 64 or not id:match('^[a-z0-9-]+$') then return end
+    local origin = rec.last and wezterm.mux.get_pane(rec.last) or pane
+    -- The Bots page of the window (config/pages.lua), when the config wired one in (api.on_bot).
+    if api.on_bot then return api.on_bot(window, origin, id) end
+    local args = { PANEL, 'bots', '--origin', tostring(origin:pane_id()), '--select', id }
+    local ok, action = pcall(function()
+      return wezterm.action.ShowOverlayCommand { args = args, cwd = wezterm.home_dir }
+    end)
+    window:perform_action(ok and action or wezterm.action.SpawnCommandInNewTab { args = args }, origin)
+  end
+
   wezterm.on('user-var-changed', function(window, pane, name, value)
     if name ~= 'hivegrid_overview_goto' and name ~= 'hivegrid_overview_equalize'
-        and name ~= 'hivegrid_overview_arrange' and name ~= 'hivegrid_overview_close' then
+        and name ~= 'hivegrid_overview_arrange' and name ~= 'hivegrid_overview_close'
+        and name ~= 'hivegrid_overview_bots' then
       return
     end
     local tab = pane:tab()
     local rec = tab and load(tab:tab_id())
     if not rec or rec.pane ~= pane:pane_id() then return end
+    if name == 'hivegrid_overview_bots' then
+      open_bot(window, rec, pane, value)
+      return
+    end
     if name == 'hivegrid_overview_equalize' then
       layouts.equalize(window, pane)
       return
@@ -384,5 +406,6 @@ return function(config, wezterm, as, sb, layouts)
     key = bind.key, mods = bind.mods, action = wezterm.action_callback(toggle),
   })
 
-  return { toggle = toggle }
+  api.toggle = toggle
+  return api
 end

@@ -258,6 +258,14 @@ class TestSend(Base):
         self.assertEqual(m.calls, [("send-text", "--pane-id", "7", "--", "-fix it\nnow"),
                                    ("send-text", "--pane-id", "7", "--no-paste", "\r")])
 
+    def test_a_command_loses_trailing_blanks_but_a_message_keeps_them(self):
+        # omp opens an argument menu after `/todo ` and Enter would take its first suggestion instead of running the command
+        m = FakeMux([])
+        A.send_prompt(agent(7), "/todo \n ", run=m)
+        A.send_prompt(agent(7), "/todo append x ", run=m)
+        A.send_prompt(agent(7), "note \n", run=m)
+        self.assertEqual([c[-1] for c in m.calls if c[3] == "--"], ["/todo", "/todo append x", "note \n"])
+
     def test_refusals(self):
         m = FakeMux([])
         self.assertFalse(A.send_prompt(agent(state="attention"), "hi", run=m)[0])
@@ -349,6 +357,11 @@ class Tiler:
         if cmd == "zoom-pane":
             for p in self.panes.values():
                 p["is_zoomed"] = False
+            return ""
+        if cmd == "activate-pane":
+            i = int(a[a.index("--pane-id") + 1])
+            for j in self.ids(self.panes[i]["tab_id"]):
+                self.panes[j]["is_active"] = j == i
             return ""
         return ""
 
@@ -515,6 +528,29 @@ class TestSpawn(EnvCase):
         self.assertEqual(split[split.index("--pane-id") + 1], "12")  # the last grid pane
         self.assertNotIn("--move-pane-id", split)
         self.assertEqual({i: t.geo(i) for i in (1, 2, 10, 11)}, before)  # no pane moved or resized
+
+    def test_an_arranged_spawn_gives_the_keyboard_back_to_the_pane_that_had_it(self):
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(3)
+        t.panes[11]["is_active"], t.panes[10]["is_active"] = True, False
+        new = A.spawn_agent("/w", None, run=t, arrange=True)
+        self.assertTrue(t.panes[11]["is_active"], "the user's pane keeps the keys")
+        self.assertFalse(t.panes[new]["is_active"])
+        self.assertEqual([c[0] for c in t.non_list()], ["split-pane", "activate-pane"])
+
+    def test_without_arrange_the_split_focuses_the_new_pane_as_before(self):
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(3)
+        new = A.spawn_agent("/w", None, run=t)
+        self.assertTrue(t.panes[new]["is_active"])
+        self.assertEqual([c[0] for c in t.non_list()], ["split-pane"])
+
+    def test_zoom_is_dropped_so_the_new_pane_can_be_seen_and_arranged(self):
+        os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
+        t = self.strip(2)
+        t.panes[10]["is_zoomed"] = True
+        A.spawn_agent("/w", None, run=t, arrange=True)
+        self.assertEqual([c[0] for c in t.non_list()][:2], ["zoom-pane", "split-pane"])
 
     def test_command_cwd_and_default_agent_command(self):
         os.environ["HIVEGRID_ORIGIN_PANE"] = "10"
@@ -859,6 +895,37 @@ class TestLimit(Base):
         self.assertEqual((b.state, b.limit), ("idle", None))
         self.write_state(3, state="limit", since=NOW + 50, limit={"hit_at": NOW + 50, "reset_at": NOW + 9000})   # hit again
         self.assertEqual(self.collect([pane(3)], now=NOW + 60)[3].state, "limit")
+
+    def ledger(self, **rec):
+        doc = {"heartbeat": NOW - 3, "enabled": True,
+               "panes": {"3": dict({"since": NOW - 600, "status": "waiting", "at": NOW + 500, "fires": []}, **rec)}}
+        with open(os.path.join(self.dir, "autocontinue.json"), "w") as f:
+            json.dump(doc, f)
+        return doc
+
+    def test_autocontinue_at_is_when_the_ledger_continues_this_limit(self):
+        self.write_state(3, state="limit", since=NOW - 600, limit={"hit_at": NOW - 600, "reset_at": NOW + 470})
+        a = self.collect([pane(3)])[3]
+        self.assertIsNone(A.autocontinue_at(a, NOW), "no ledger")
+        self.ledger()
+        self.assertEqual(A.autocontinue_at(a, NOW), NOW + 500)
+        self.ledger(at=NOW + 10)
+        self.assertEqual(A.autocontinue_at(a, NOW + 20), NOW + 10, "due: the caller sees a time in the past")
+
+    def test_autocontinue_at_ignores_what_does_not_belong_to_this_limit(self):
+        self.write_state(3, state="limit", since=NOW - 600, limit={"hit_at": NOW - 600, "reset_at": NOW + 470})
+        a = self.collect([pane(3)])[3]
+        for rec in ({"since": NOW - 5000}, {"status": "sent"}, {"status": "capped"}, {"at": None}, {"at": True}, {"at": 1e13}):
+            self.ledger(**rec)
+            self.assertIsNone(A.autocontinue_at(a, NOW), rec)
+        doc = self.ledger()
+        for patch in ({"enabled": False}, {"enabled": "yes"}, {"heartbeat": NOW - 120}, {"heartbeat": None}, {"panes": []}, {"panes": {}}):
+            with open(os.path.join(self.dir, "autocontinue.json"), "w") as f:
+                json.dump(dict(doc, **patch), f)
+            self.assertIsNone(A.autocontinue_at(a, NOW), patch)
+        self.ledger()
+        self.assertIsNone(A.autocontinue_at(dataclasses.replace(a, state="idle"), NOW), "only a limit agent")
+        self.assertIsNone(A.autocontinue_at(dataclasses.replace(a, pane=4), NOW), "another pane")
 
     def test_a_refused_request_is_a_limit(self):
         self.assertEqual(A.limit_of_entry(limit_entry()), {"hit_at": 1793086676.845, "reset_at": 1793101199.845})

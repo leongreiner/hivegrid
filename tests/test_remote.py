@@ -370,7 +370,7 @@ class TestAgentModel(unittest.TestCase):
         self.assertEqual(m["states"]["attention"], {"glyph": "?", "label": "needs you", "color": "violet", "rank": 1})
         self.assertEqual(m["dangerous"], ["ctrl-c", "ctrl-d"])
         self.assertNotEqual(m["meta_rev"], R.meta_json(True)["meta_rev"])
-        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload"])
+        self.assertEqual(m["capabilities"], ["chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload", "bots"])
         self.assertEqual((m["limits"]["chat_max"], m["limits"]["wait_max"]), (200, 20))
 
 

@@ -54,7 +54,7 @@ DISP=:$((90 + slot))
 # would leak into every pane and change how lazygit, omp, yazi and the shells look.
 sandbox_env() {
   local keep=() v
-  for v in USER LOGNAME SHELL LANG LANGUAGE $(compgen -e | grep '^LC_' || true); do
+  for v in USER LOGNAME SHELL LANG LANGUAGE HIVEGRID_REMOTE_PORT $(compgen -e | grep '^LC_' || true); do
     [ -n "${!v:-}" ] && keep+=("$v=${!v}")
   done
   ENV=(env -i "${keep[@]}" HOME="$H" XDG_RUNTIME_DIR="$RUN" DISPLAY="$DISP"

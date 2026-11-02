@@ -35,12 +35,12 @@ The demo shows the agent grid and the overview dock, switching an account mid-se
 ## Features
 
 - **Agent grid**: `omp-grid` starts one agent per pane (omp or Claude Code, chosen in the settings); panes stay where you put them and are arranged, equalized, rotated, swapped and zoomed only when you ask, and can all be typed into at once (broadcast).
-- **Overview dock**: every pane with its number, state (working, busy, needs you, limit when the account's usage limit stopped the agent, done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
+- **Overview dock**: every pane with its number, state (working, busy, needs you, limit when the account's usage limit stopped the agent (omp then continues by itself after the reset, see docs/accounts-and-quota.md), done, idle, exited), omp title, time and git branch (with a marker for linked worktrees); jump by click or digit, close panes safely.
 - **Accounts and usage**: Claude Code usage (5 h and 7 d) of every account in the header; switch an account from a running chat without losing it.
 - **History panels**: usage history charts, a system monitor (CPU, RAM, disk, GPU) and an agent hive of hex cells, plus settings with themes, key bindings, accounts, the web browser and the agent (omp or Claude Code).
 - **Left bar**: a yazi file explorer (open a terminal or editor from it) and a git view of every repository with branch, changes, ahead and behind, GitHub Actions results and lazygit.
 - **Web pane**: a page of a headless Chromium-family browser as a pane of the grid, next to the agents, with a header row (back, forward, reload, address and search field, Google by default) that `LEADER+w h` collapses, opened from the left bar's browser button or `LEADER+w` (Hivegrid WezTerm build).
-- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes; a prompt sent while the agent works shows greyed out until omp takes it), answer approvals and plan reviews with buttons, change an agent's model and thinking level, see which agents stopped on their account's usage limit (and when it reopens) and move their chat to another account, start a new session on any of your accounts in any folder (search box; the laptop arranges the new pane into the grid), swipe a session to quit it, revive a past one from a history page, receive images and files an agent sends with `hivegrid-send`, upload files from the phone into a message, and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
+- **Phone remote**: `hivegrid-remote` serves every agent to your phone over Tailscale, in Hivegrid's own look: a live chat of each agent (built from its omp session, updates the moment the agent writes; a prompt sent while the agent works shows greyed out until omp takes it), answer approvals and plan reviews with buttons, change an agent's model and thinking level, see which agents stopped on their account's usage limit (and when it reopens) and move their chat to another account, start a new session on any of your accounts in any folder (search box; the laptop arranges the new pane into the grid), swipe a session to quit it, revive a past one from a history page, receive images and files an agent sends with `hivegrid-send`, upload files from the phone into a message, read the results of your scheduled Bots (swipe to the third page: make, run, pause and continue them within limits the phone cannot lift), and see every account's quota and the machine's CPU, RAM, GPU and disk (token-protected, optional read-only mode).
 - **Session restore**: the layout (windows, tabs, splits and their sizes) and what ran in each pane (omp chats resumed with `--restore`, web pages, shells in their directories) is kept on disk and built again at the next start, after a crash or a power loss.
 - **Polish**: hover feedback, one themed picker for every list, a calm header (project, branch and running agents first, usage and system stats as quiet text), header pills for the active mode, five colour themes (Graphite by default).
 
@@ -93,7 +93,7 @@ For the usage chips each account must be logged in once (`omp --profile=<name>` 
 | `LEADER+g` | agent picker |
 | `Ctrl+F` / `Ctrl+G` | file explorer / git view |
 | `LEADER+w`, then `n` | new web pane |
-| `LEADER+,` / `LEADER+h` / `LEADER+a` | settings / usage history / agent hive |
+| `LEADER+,` / `LEADER+h` / `LEADER+a` / `LEADER+t` | settings / usage history / agent hive / Bots |
 | `LEADER+u`, then `1`-`9` | start or switch omp with that account |
 | `LEADER+b` | broadcast typing to all panes of the tab |
 
@@ -110,6 +110,7 @@ Every key, with the pane, resize, sidebar, web and panel groups: [docs/keys.md](
 | `+` menu `Agent overview` | agents |
 | click the header logo, `LEADER+a`, `+` menu `Agent hive` | hive |
 | click the system group (CPU, RAM, DSK, GPU), `+` menu `System monitor` | monitor |
+| the header buttons `Canvas` / `Bots`, the header chip `◷ 3 · next 09:00 ● 2`, `LEADER+t`, `+` menu `Bots` / `New bot…`, a row of the dock's Bots section | bots: scheduled omp agents that run in the background; one fixed Bots page (Briefing of what matters, the bots, a conversation with each) over the active tab, the same page as on the phone; `Canvas` goes back ([docs/schedules.md](docs/schedules.md)) |
 
 What each panel does: [docs/panels.md](docs/panels.md).
 
@@ -164,6 +165,7 @@ Releases are published by hand: Actions, "Release", "Run workflow" with a tag su
 | [docs/features.md](docs/features.md) | every feature in detail |
 | [docs/remote.md](docs/remote.md) | control the agents from a phone over Tailscale: token, `tailscale serve`, systemd unit, API, the optional phone terminal (off by default), threat model |
 | [docs/autostart.md](docs/autostart.md) | come back by itself after a crash or reboot: restart units, kernel faults to reboot, watchdog, automatic login, what no software can fix |
+| [docs/schedules.md](docs/schedules.md) | scheduled `omp` agents ("Bots"): one-time and recurring tasks, persistent agents with memory, `hivegrid-schedule`, file formats, the when grammar, policies |
 | [docs/panels.md](docs/panels.md) | settings, usage, agents, monitor and hive panels |
 | [docs/wezterm-build.md](docs/wezterm-build.md) | what the WezTerm fork adds and how it degrades on stock WezTerm |
 | [docs/notes-and-limits.md](docs/notes-and-limits.md) | known limits, how sidebar views pick their directory, clipboard behaviour |

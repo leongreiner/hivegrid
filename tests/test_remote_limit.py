@@ -61,10 +61,20 @@ class TestLimitState(LimitCase):
         row = self.row()
         self.assertEqual((row["state"], row["state_label"], row["rank"], row["reason"]), ("limit", "limit", 2, "usage limit"))
         self.assertEqual(row["limit"], {"window": "five_hour", "label": "5-hour limit", "hit_at": HIT, "reset_at": NOW + 4 * 3600,
-                                        "account": "alpha"})
+                                        "account": "alpha", "continues_at": None})
         self.assertEqual((row["can"]["prompt"], row["can"]["ack"], row["can"]["account"]), (True, False, True))
         _, data = self.call("GET", "/api/agents")
         self.assertEqual(data["totals"]["by_state"], {"limit": 1})
+
+    def test_the_row_says_when_hivegrid_continues_the_agent_by_itself(self):
+        since = NOW - 600
+        self.write_state(3, state="limit", since=since, limit={"hit_at": since, "reset_at": NOW + 600})
+        self.assertIsNone(self.row()["limit"]["continues_at"], "no ledger: nothing is promised")
+        ledger = {"heartbeat": NOW - 2, "enabled": True, "panes": {"3": {"since": since, "status": "waiting", "at": NOW + 630, "fires": []}}}
+        with open(os.path.join(self.dir, "autocontinue.json"), "w") as f:
+            json.dump(ledger, f)
+        self.assertEqual(self.row()["limit"]["continues_at"], NOW + 630)
+        self.assertTrue(self.row()["can"]["account"], "switching the account stays possible")
 
     def test_the_weekly_window_is_named_by_its_reset_or_by_the_horizon(self):
         week = NOW + 3 * 86400

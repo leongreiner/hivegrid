@@ -19,6 +19,7 @@ hivegrid-autostart uninstall --all             # remove everything it installed
 | --- | --- | --- |
 | `hivegrid-remote` crashes or is killed | The server, 3 s later (waits longer after repeated crashes, up to 60 s, and never gives up). Not after exit status 1 or 2 (no or unsafe token file, port taken, bad arguments): looping cannot fix those. | `hivegrid-remote.service` with `Restart=always` |
 | Hivegrid (the WezTerm window) crashes or is killed | The window, 5 s later, with its layout and the omp chats ([session restore](features.md)). At most five restarts in ten minutes, then the unit stays failed. Closing the window yourself does not reopen it. | `hivegrid.service` with `Restart=on-failure` |
+| `hivegrid-scheduler` crashes or is killed | The scheduler, 3 s later (growing delay, never gives up, not after exit status 1 or 2). The bot runs that were live die with its control group; the scheduler closes them as `failed` when it starts, and what was due meanwhile follows the catch-up rules (one run when within the bot's grace period, else `missed`). | `hivegrid-scheduler.service` with `Restart=always` |
 | Kernel oops, panic, soft or hard lockup, hardware NMI | The machine reboots after 10 s, then the rows below apply. | `--sysctl` |
 | Total hang: no panic, no NMI (the kernel stops, timers stop) | A reset after at most 60 s, **only** when the machine has a hardware watchdog timer and its driver is loaded. | `--watchdog` |
 | Total hang on a machine without a hardware watchdog | **Nothing.** Software cannot reset a machine whose CPUs no longer run software. The power button is the only way. | |
@@ -26,13 +27,14 @@ hivegrid-autostart uninstall --all             # remove everything it installed
 | Power loss, then power back | A boot, then the rows below. On a laptop the battery usually bridges short outages, and the BIOS option "power on after AC loss" does not apply (a laptop with an empty battery waits for the power button). | |
 | Lid closed | A laptop suspends by default and is unreachable until it wakes. `hivegrid-autostart` does not change that, see "Lid and sleep". | |
 
-After a reboot the chain is: firmware, disk passphrase (if the disk is encrypted), display manager, automatic login, graphical session, `hivegrid.service`, Hivegrid restores its layout. In parallel: `tailscaled` (a system service), then `hivegrid-remote.service` (a user service that runs without a login because of linger). Every link must hold; the next sections cover the ones that need your decision.
+After a reboot the chain is: firmware, disk passphrase (if the disk is encrypted), display manager, automatic login, graphical session, `hivegrid.service`, Hivegrid restores its layout. In parallel: `tailscaled` (a system service), then `hivegrid-remote.service` and `hivegrid-scheduler.service` (user services that run without a login because of linger). Every link must hold; the next sections cover the ones that need your decision.
 
 ## The user services (no sudo)
 
-`install` writes two units into `~/.config/systemd/user/` and enables them:
+`install` writes three units into `~/.config/systemd/user/` and enables them:
 
 - `hivegrid-remote.service`: the server of [remote.md](remote.md) with `Restart=always`, no start limit and a growing delay. It runs `hivegrid-remote serve`, so it binds `127.0.0.1:8787` exactly as before and `tailscale serve` publishes it. A user unit cannot be ordered after `tailscaled` or `network-online.target` (those belong to the system manager); it does not need to, because loopback is always there and `tailscaled` publishes the page itself once it is up. With `--bind <tailscale ip>` the server would fail while the address does not exist yet and, since a failed bind exits with status 1, would not be restarted: keep the loopback setup.
+- `hivegrid-scheduler.service`: the daemon that runs the Bots ([schedules.md](schedules.md#scheduler)): `hivegrid-scheduler run` with `Restart=always`, no start limit and a growing delay, enabled **and started** by `install` (it has no token to wait for; with no bots defined it idles and writes only its heartbeat). It stops after exit status 1 (another scheduler holds the lock, or the state directories are not usable) or 2 (bad arguments), as the remote unit does. On a stop systemd sends `SIGTERM` to the scheduler only (`KillMode=mixed`): it ends every live bot run itself, records it `cancelled` and exits; `TimeoutStopSec=30` bounds that. Like the remote unit it sets `UMask=0077` and no `NoNewPrivileges`, `LockPersonality` or `RestrictAddressFamilies`: every bot run inherits the unit's no-new-privs flag, and a bot with permissions `full` that needs `sudo` would be refused. A bot that was due while the machine was off runs once when the scheduler comes back if it is within the bot's grace period (default 2 hours), otherwise it is recorded `missed` and notifies (see [schedules.md](schedules.md#scheduler)). Without the unit, `hivegrid-scheduler` can be started by hand (the Bots panel shows the command when the heartbeat is stale).
 - The remote unit sets `UMask=0077` (the shells of the phone terminal inherit it: new files are mode `0600`; see Terminal in [remote.md](remote.md#terminal)). It has no `NoNewPrivileges`, `LockPersonality` or `RestrictAddressFamilies`: in a user unit each of them sets the kernel's no-new-privs flag, which the shells inherit and which makes `sudo` and `su` refuse to run. It has no `ProtectHome` or `ProtectSystem` on purpose: the server writes `acks.json` and `seen.json` below `$XDG_RUNTIME_DIR/hivegrid-agents`, and `wezterm cli` writes logs of its own. It has no `PrivateTmp` either: in a user service that runs the server in a user namespace, where it can no longer read `/proc/<pid>/exe` of the Hivegrid window, so it finds no window and answers `503 no_mux`. To start the server with the phone terminal, set `remote.terminal` in `settings.json`; a hand-edited `ExecStart` is overwritten by the next `install`.
 - `hivegrid.service`: `hivegrid start --cwd .` bound to `graphical-session.target`, so it starts with the graphical session and stops with it. It is enabled, not started, by `install`: starting it while you sit in a Hivegrid would open a second window. A unit file of your own with the same name is moved to `<name>.orig` and put back by `uninstall`.
 - `loginctl enable-linger <user>`: the user manager (and so `hivegrid-remote`) starts at boot instead of at your login. `uninstall` turns it off again only when `install` turned it on. Opt out with `--no-linger`.
@@ -112,8 +114,8 @@ Hivegrid saves its layout every few seconds (`~/.local/state/hivegrid/session.js
 
 ```sh
 hivegrid-autostart status                              # everything "ok", "to do" empty
-systemctl --user status hivegrid-remote hivegrid       # active / enabled
-systemd-analyze verify --user ~/.config/systemd/user/hivegrid-remote.service ~/.config/systemd/user/hivegrid.service
+systemctl --user status hivegrid-remote hivegrid-scheduler hivegrid   # active / enabled
+systemd-analyze verify --user ~/.config/systemd/user/hivegrid-remote.service ~/.config/systemd/user/hivegrid-scheduler.service ~/.config/systemd/user/hivegrid.service
 loginctl show-user "$USER" -p Linger                   # Linger=yes
 cat /proc/sys/kernel/panic /proc/sys/kernel/panic_on_oops
 ls /dev/watchdog*                                      # the device exists when --watchdog worked
@@ -151,7 +153,7 @@ Nothing here is run for you without the flag, and `sudo` is called only for thes
 
 | Command | What it does |
 | --- | --- |
-| `hivegrid-autostart install` | Writes the two user units, enables them, runs `loginctl enable-linger`. No sudo. |
+| `hivegrid-autostart install` | Writes the three user units, enables them, runs `loginctl enable-linger`. No sudo. |
 | `hivegrid-remote token`, `tailscale serve --bg --https=443 http://127.0.0.1:8787` | Once, as in [remote.md](remote.md). Not done by this program. |
 | `hivegrid-autostart install --sysctl` | `sudo install` of `/etc/sysctl.d/90-hivegrid-recovery.conf`, `sudo sysctl -p` on it. |
 | `hivegrid-autostart install --watchdog` | `sudo install` of `/etc/systemd/system.conf.d/90-hivegrid-watchdog.conf` and `/etc/systemd/system/hivegrid-watchdog.service`; `sudo systemctl daemon-reload` and `enable hivegrid-watchdog.service`; `sudo modprobe <driver>`; `sudo systemctl daemon-reexec`. |

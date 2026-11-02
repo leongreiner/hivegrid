@@ -34,7 +34,8 @@ AGENT_PROCS = {"omp", "claude", "codex", "gemini", "aider", "opencode"}
 # Chrome = panes that are never part of the agent grid: the sidebar bar (hivegrid-bar), its
 # views (yazi, hivegrid-git, lazygit; config/sidebar.lua), the overview dock (hivegrid-overview;
 # config/overview.lua) and the panels.
-CHROME_MARKERS = ("hivegrid-overview", "hivegrid-bar", "hivegrid-git", "hivegrid-panel")
+CHROME_MARKERS = ("hivegrid-overview", "hivegrid-bar", "hivegrid-git", "hivegrid-panel", "hivegrid-remote attach")
+TERMINAL_MARKER = "hivegrid-remote attach"     # the pane that shows a phone terminal on the host (hivegrid_remote_attach.py)
 CHROME_PROGS = {"yazi", "lazygit"}
 
 # Mirrors config/agentstatus.lua TITLE_WORKING / SPIN.
@@ -744,6 +745,29 @@ def peek(pane, lines=12, run=wezterm_cli):
     return rows[-lines:] if lines > 0 else []
 
 
+AUTOCONTINUE_FRESH_S = 30.0   # the ledger of config/autocontinue.lua is rewritten every 10 s; an older one is not kept any more
+
+
+def autocontinue_at(agent, now=None):
+    """Epoch seconds at which Hivegrid continues the limit agent by itself (config/autocontinue.lua), None when
+    it will not: not in `limit`, the feature off, the ledger not kept any more (no Hivegrid window), another limit
+    than the one the ledger knows, already continued or capped, or no reset time to wait for. A time that is not
+    ahead of `now` means "continuing right now"."""
+    if agent.state != "limit":
+        return None
+    now = time.time() if now is None else now
+    doc = _read_map("autocontinue.json")
+    beat = doc.get("heartbeat")
+    if doc.get("enabled") is not True or not isinstance(beat, (int, float)) or isinstance(beat, bool) or not -AUTOCONTINUE_FRESH_S <= now - beat <= AUTOCONTINUE_FRESH_S:
+        return None
+    panes = doc.get("panes")
+    rec = panes.get(str(agent.pane)) if isinstance(panes, dict) else None
+    if not isinstance(rec, dict) or rec.get("status") != "waiting" or not _same_time(rec.get("since"), agent.since):
+        return None
+    at = rec.get("at")
+    return float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) and abs(at) < 1e12 else None
+
+
 def limit_expired(agent, now):
     """True for a limit agent whose reset time is known and no longer ahead of `now`: its account answers again."""
     info = agent.limit if agent.state == "limit" else None
@@ -769,6 +793,10 @@ def send_prompt(agent, text, run=wezterm_cli):
     if agent.state == "exited":
         return False, "agent has exited"
     pane = str(agent.pane)
+    # A command with a trailing blank (a phone keyboard adds one after a word) opens omp's argument menu, and Enter then
+    # takes the highlighted suggestion instead of running the command: `/todo ` ends up as `/todo edit` in the input line.
+    if text.startswith("/"):
+        text = text.rstrip()
     # `--` so a prompt starting with '-' is not parsed as an option
     if run("send-text", "--pane-id", pane, "--", text) is None:
         return False, "send-text failed"
@@ -839,9 +867,12 @@ def origin(run=wezterm_cli):
     if not panes:
         return None
     byid = {p["pane_id"]: p for p in panes}
+    fg = foreground_by_tty()
 
     def hit(pane_id):
         p = byid.get(pane_id)
+        if p and TERMINAL_MARKER in fg.get(_tty(p), (None, "", 0, ""))[3]:
+            return None     # a phone terminal's window is never where new agents go
         return (p["pane_id"], int(p.get("tab_id", 0)), int(p.get("window_id", 0))) if p else None
 
     for name in ("HIVEGRID_ORIGIN_PANE", "WEZTERM_PANE"):
@@ -856,9 +887,37 @@ def origin(run=wezterm_cli):
         fid = c.get("focused_pane_id") if isinstance(c, dict) else None
         if isinstance(fid, int) and hit(fid):
             return hit(fid)
-    active = [p for p in panes if p.get("is_active")] or panes
+    active = [p for p in panes if p.get("is_active") and hit(p["pane_id"])] or [p for p in panes if hit(p["pane_id"])]
+    if not active:
+        return None
     first = min(active, key=lambda p: (int(p.get("window_id", 0)), int(p.get("tab_id", 0)), p["pane_id"]))
     return hit(first["pane_id"])
+
+
+def spawn_terminal_pane(command, cwd, run=wezterm_cli):
+    """Show a phone terminal on the host: `command` (an argv that contains TERMINAL_MARKER) runs in a pane of the
+    window that holds the phone terminals, split off its last pane (the first one opens that window, beside the
+    agents' window and never in it). The window arranges its panes itself: the command first sets the user var
+    `hivegrid_arrange_new` (config/layouts.lua). Returns the new pane id or None (no mux, no origin pane)."""
+    line = f"printf '\\033]1337;SetUserVar={ARRANGE_VAR}=MQ==\\007'; exec " + " ".join(shlex.quote(c) for c in command)
+    argv = ("--cwd", cwd, "--", "bash", "-c", line)
+    panes = _list_panes(run)
+    if not panes:
+        return None
+    fg = foreground_by_tty()
+    mine = [p for p in panes if TERMINAL_MARKER in fg.get(_tty(p), (None, "", 0, ""))[3]]
+    if mine:
+        tab = mine[0].get("tab_id")
+        _unzoom(run, [p for p in panes if p.get("tab_id") == tab])
+        in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab and p["pane_id"] in {m["pane_id"] for m in mine}]
+        if in_tab:
+            return _split_keeping_focus(run, in_tab, _reading_order(in_tab)[-1], argv)
+    o = origin(run)
+    if o is None:
+        return None
+    out = run("spawn", "--new-window", "--pane-id", str(o[0]), *argv)
+    m = re.match(r"\s*(\d+)\s*$", out or "")
+    return int(m.group(1)) if m else None
 
 
 PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -898,17 +957,31 @@ def _split_new(run, target_pane, extra):
     return int(m.group(1)) if m else None
 
 
-def _spawn_in_origin(o, extra, run):
+def _split_keeping_focus(run, tab_panes, target_pane, extra):
+    """_split_new, then the pane that was the tab's active one gets the keyboard back (a split makes the
+    new pane the active one, and a new agent must not take the keys the user is typing)."""
+    keep = next((p["pane_id"] for p in tab_panes if p.get("is_active")), None)
+    new = _split_new(run, target_pane, extra)
+    if new is not None and keep is not None:
+        run("activate-pane", "--pane-id", str(keep))
+    return new
+
+
+def _spawn_in_origin(o, extra, run, keep_focus=False):
     """Split a new pane off the last grid pane of the origin tab o = (pane, tab, window) with
-    split-pane's `extra` arguments; the grid is not re-tiled. Returns the new pane id or None."""
+    split-pane's `extra` arguments; the grid is not re-tiled. With `keep_focus` the tab's active
+    pane stays active. Returns the new pane id or None."""
     focus, tab, _window = o
     panes = _list_panes(run)
     in_tab = [p for p in panes or [] if p.get("tab_id") == tab]
     if not in_tab:
         return None
+    active = in_tab
     if _unzoom(run, in_tab):
         in_tab = [p for p in _list_panes(run) or [] if p.get("tab_id") == tab] or in_tab
     grid = _grid_panes(in_tab, foreground_by_tty()) or [p for p in in_tab if p["pane_id"] == focus] or in_tab
+    if keep_focus:
+        return _split_keeping_focus(run, active, _reading_order(grid)[-1], extra)
     return _split_new(run, _reading_order(grid)[-1], extra)
 
 
@@ -916,7 +989,8 @@ def spawn_agent(cwd=None, near=None, run=wezterm_cli, profile=None, arrange=Fals
     """Start the agent command (HIVEGRID_AGENT_CMD, default omp; run as `bash -ic '<cmd>; exec
     bash'`) in a new pane of the origin tab, always: the pane is split off the last grid pane and
     stays where the split puts it (nothing re-tiles the grid), unless `arrange` asks the window to
-    arrange the grid once the pane is up (the phone does: nobody is there to press the key). The
+    arrange the grid once the pane is up (the phone does: nobody is there to press the key, and the
+    tab's active pane keeps the keyboard). The
     directory is `cwd`, else `near`'s, else the one of the pane the hive was opened over, else $HOME.
     Returns the new pane id or None. `profile` starts `omp --profile=<profile>` (ValueError, before
     any pane exists, when that cannot be done: see `_agent_command`); `resume` adds `--resume <file>`."""
@@ -930,7 +1004,7 @@ def spawn_agent(cwd=None, near=None, run=wezterm_cli, profile=None, arrange=Fals
     if not cwd:
         here = next((p for p in _list_panes(run) or [] if p["pane_id"] == focus), None)
         cwd = (_cwd_path(here.get("cwd")) if here and not is_web(here) else "") or os.environ.get("HOME", "/")
-    return _spawn_in_origin(o, ("--cwd", cwd, "--", *command), run)
+    return _spawn_in_origin(o, ("--cwd", cwd, "--", *command), run, keep_focus=arrange)
 
 
 def spawn_web(url, profile=None, run=wezterm_cli):

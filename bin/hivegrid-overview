@@ -13,6 +13,13 @@ start a longer number waits a moment for the next one). j / k or the arrows (Pag
 g / G, Home / End) move the selection mark (it starts on, and follows, the active pane) and
 Enter jumps to the selected pane. q or Esc closes the dock. With no blank line left between the
 rows, every second row is shaded so the rows stay apart.
+Bots: below the agent rows, pinned above the footer, a compact `Bots` section lists scheduled agents
+(hivegrid_schedule's runtime summary, read every 2 s; hidden while the scheduler's heartbeat is older
+than 60 s or nothing runs or waits): the running ones with the working spinner, then up to 3 waiting
+ones (◷, right-aligned `in 2h` or `09:00`), at most a header and 4 one-line rows. It only takes rows
+the agents leave free at their row height (first the header goes, then rows, then the whole section)
+and never moves an agent row. A click on a bot row sets the user var hivegrid_overview_bots (the
+schedule id), which the config answers by opening that bot on the Bots page.
 Closing: the ✕ at the right end of the row under the pointer (else the selected row), or x /
 Delete for the selected row, closes that pane (user var hivegrid_overview_close); `✕ tab` in the
 title row, or X, closes the whole tab. A pane whose close would interrupt work (close_need) and
@@ -41,6 +48,7 @@ import unicodedata
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import hivegrid_agents as A  # noqa: E402
+import hivegrid_schedule as HS  # noqa: E402
 import hivegrid_repos as R  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
 from hivegrid_ui import decode, mix, split_complete  # noqa: E402
@@ -72,6 +80,97 @@ def with_git(doc, where):
         return doc
     return dict(doc, panes=[dict(p, git=where(p.get("cwd") or "")) if p.get("kind") != "web" else p
                             for p in doc["panes"]])
+
+
+BOTS_HEARTBEAT_MAX = 60.0  # seconds: an older scheduler heartbeat means no daemon, so no section
+BOTS_NEXT = 3  # waiting schedules the section lists
+BOTS_ROWS = 4  # rows under the header at most
+SUMMARY_TTL = 2.0  # seconds between reads of the schedule summary
+
+
+def briefing_of(block):
+    """{unseen, id, name, headline} of the summary's Briefing block when something in it is unseen (the
+    newest unseen entry speaks for it), else None."""
+    if not isinstance(block, dict):
+        return None
+    unseen = block.get("unseen")
+    if isinstance(unseen, bool) or not isinstance(unseen, int) or unseen < 1:
+        return None
+    entry = next((e for e in block.get("newest") or [] if isinstance(e, dict) and e.get("seen") is False
+                  and isinstance(e.get("bot_id"), str) and HS.ID_RE.match(e["bot_id"])), None)
+    if entry is None:
+        return {"unseen": unseen, "id": None, "name": "", "headline": ""}
+    return {"unseen": unseen, "id": entry["bot_id"], "name": str(entry.get("bot_name") or entry["bot_id"]),
+            "headline": str(entry.get("headline") or "")}
+
+
+def with_schedules(doc, summary, now=None):
+    """The document with "bots" = {running: [{id, name}], next: [{id, name, next_at}] (the earliest
+    BOTS_NEXT enabled waiting schedules), more: waiting ones not listed, brief: the Briefing's unseen count
+    and newest unseen headline (briefing_of; absent when nothing is unseen)}, from hivegrid_schedule's
+    runtime summary. The document unchanged (no "bots") without a summary, with a scheduler
+    heartbeat older than BOTS_HEARTBEAT_MAX seconds, or when nothing runs, waits or is unseen."""
+    if not doc or not isinstance(summary, dict):
+        return doc
+    now = time.time() if now is None else now
+    sched = summary.get("scheduler")
+    beat = sched.get("heartbeat") if isinstance(sched, dict) else None
+    if isinstance(beat, bool) or not isinstance(beat, (int, float)) or now - beat > BOTS_HEARTBEAT_MAX:
+        return doc
+    running, waiting = [], []
+    for it in summary.get("items") if isinstance(summary.get("items"), list) else []:
+        sid = it.get("id") if isinstance(it, dict) else None
+        if not isinstance(sid, str) or not HS.ID_RE.match(sid):
+            continue
+        name = str(it.get("name") or sid)
+        at = it.get("next_at")
+        if it.get("running") or it.get("state") == "working":
+            running.append({"id": sid, "name": name})
+        elif it.get("enabled") and it.get("state") == "schedule":
+            at = at if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+            waiting.append({"id": sid, "name": name, "next_at": at})
+    brief = briefing_of(summary.get("briefing"))
+    if not running and not waiting and not brief:
+        return doc
+    waiting.sort(key=lambda b: (b["next_at"] is None, b["next_at"] or 0))
+    out = {"running": running, "next": waiting[:BOTS_NEXT], "more": max(len(waiting) - BOTS_NEXT, 0)}
+    if brief:
+        out["brief"] = brief
+    return dict(doc, bots=out)
+
+
+def when_text(at, now):
+    """When a waiting schedule runs next: `in 5m`, `in 2h`, else the local clock time (`09:00`,
+    with the weekday when it is not today)."""
+    if at is None:
+        return ""
+    left = at - now
+    if left < 60:
+        return "now"
+    if left < 3600:
+        return f"in {int(left // 60)}m"
+    if left < 6 * 3600:
+        return f"in {int(left // 3600)}h"
+    day = time.strftime("%a ", time.localtime(at)) if time.strftime("%Y%j", time.localtime(at)) != time.strftime("%Y%j", time.localtime(now)) else ""
+    return day + time.strftime("%H:%M", time.localtime(at))
+
+
+def bots_lines(bots, free):
+    """What the section shows in `free` rows: (header, rows, hidden). rows are (kind, id, name, next_at)
+    with kind 'brief' (the newest unseen Briefing headline, first), 'working' or 'schedule'; running ones
+    next, BOTS_ROWS at most. The header needs a row beyond the rows; short of rows the header goes first,
+    then the last rows. hidden counts the schedules not listed. ((False, [], 0) when nothing fits.)"""
+    if not bots or free < 1:
+        return False, [], 0
+    brief = bots.get("brief")
+    every = ([("brief", brief["id"], brief["headline"] or f"{brief['unseen']} new", brief["unseen"])]
+             if brief and brief.get("id") else []) + \
+            [("working", b["id"], b["name"], None) for b in bots.get("running") or []] + \
+            [("schedule", b["id"], b["name"], b.get("next_at")) for b in bots.get("next") or []]
+    want = every[:BOTS_ROWS]
+    header = free >= len(want) + 1
+    rows = want[:min(free, len(want))]
+    return header, rows, len(every) - len(rows) + int(bots.get("more") or 0)
 
 
 def clean(text):
@@ -274,8 +373,9 @@ def git_tag(pal, g, room):
 
 
 def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, digits="", scroll=None, sel=None,
-           close=None, close_tab=None, ask=None, answer=None, pointer=None):
+           close=None, close_tab=None, ask=None, answer=None, pointer=None, bot=None):
     """Draws the overview into a w x h canvas. goto(pane_id) is called by a click on a row,
+    bot(schedule id) by a click on a row of the bots section (doc["bots"], see with_schedules),
     equalize() by a click on ▦, arrange() by a click on ⊞. hover maps what the pointer is over
     (a pane id for a row, ('x', pane id) for a row's ✕, 'equalize', 'arrange', 'close_tab' or
     'ask_yes' / 'ask_no' for a button) to its fade level 0..1; `pointer` is the key the pointer
@@ -404,6 +504,29 @@ def render(doc, w, h, now, goto=None, equalize=None, arrange=None, hover=None, d
             qw = (w if lines > 1 else row.end) - qx
             confirm_line(cv, pal, qx, qy, qw, row.bg, close_question(panes, asked), answer, hover)
         y += rows_per
+    # The bots section: only in rows the agents leave free at their own row height (computed above
+    # from the full height, so it can never change it), straight below the last agent row.
+    bots = doc.get("bots") if doc else None
+    free = 0 if cv.last else max(avail - len(panes) * rows_per, 0)
+    header, brows, hidden = bots_lines(bots, free)
+    if brows:
+        by = first + len(panes) * rows_per
+        if header:
+            cv.fill(0, by, w, 1, bg=bg)
+            cv.put(2, by, "Bots", pal["muted"], bg, U.BOLD)
+            new = (bots.get("brief") or {}).get("unseen")
+            tail = " ".join(t for t in (f"● {new}" if new else "", f"+{hidden}" if hidden else "") if t)
+            if tail:
+                cv.put(w - 1 - U.text_width(tail), by, tail, pal["accent"] if new else pal["dim"], bg)
+            by += 1
+        for kind, sid, name, at in brows:
+            glyph, _, color = ("●", "", pal["accent"]) if kind == "brief" else U.state_style(pal, kind, now)
+            U.list_row(cv, pal, by, w=w, lines=1, hover=hover.get(("bot", sid), 0.0), bg=bg, glyph=glyph,
+                       glyph_color=color, name=clean(name) or sid,
+                       name_color=pal["text"] if kind == "brief" else pal["muted"],
+                       right=when_text(at, now) if kind == "schedule" else "", right_color=pal["dim"],
+                       hit=(lambda button, sid=sid: bot(sid)) if bot else None, key=("bot", sid) if bot else None)
+            by += 1
     if cv.last:  # rows out of view, above and below
         above, below = start, cv.last - start
         note = "  ".join(t for t in (f"↑{above} more" if above else "", f"↓{below} more" if below else "") if t)
@@ -440,6 +563,18 @@ class Dock:
         self.ask = None  # the close waiting for its answer: ('pane', pane id) or ('tab', None)
         self.closing = {}  # pane id -> monotonic time its close was sent (its row is hidden meanwhile)
         self.where = R.Where()  # branch and worktree per directory, cached
+        self.summary = None  # the schedule summary (hivegrid_schedule.read_summary), re-read every SUMMARY_TTL
+        self.summary_at = None  # monotonic time of that read
+
+    def schedules(self, now):
+        """The schedule summary, read at most every SUMMARY_TTL seconds."""
+        if self.summary_at is None or now - self.summary_at >= SUMMARY_TTL:
+            self.summary_at = now
+            try:
+                self.summary = HS.read_summary(HS.summary_path())
+            except Exception:  # an unreadable summary only hides the section
+                self.summary = None
+        return self.summary
 
     def reload(self):
         try:
@@ -459,6 +594,9 @@ class Dock:
 
     def goto(self, pane_id):
         self.request("hivegrid_overview_goto", pane_id)
+
+    def bot(self, schedule_id):
+        self.request("hivegrid_overview_bots", schedule_id)
 
     def equalize(self, *_):
         self.request("hivegrid_overview_equalize", "")
@@ -629,10 +767,11 @@ class Dock:
         if active != self.active:  # another pane got the focus: follow it again
             self.active, self.scroll, self.sel = active, None, None
         view = None if self.doc is None else with_git(dict(self.doc, panes=self.panes()), self.where)
+        view = with_schedules(view, self.schedules(time.monotonic()), now)
         if self.ask and self.ask[0] == "pane" and (view is None or all(p["id"] != self.ask[1] for p in view["panes"])):
             self.ask = None  # the pane went away while the question was open
         self.cv = render(view, cols, rows, now, self.goto, self.equalize, self.arrange, hover, self.digits,
-                         self.scroll, self.sel, self.close, self.close_tab, self.ask, self.answer, self.fade.key)
+                         self.scroll, self.sel, self.close, self.close_tab, self.ask, self.answer, self.fade.key, self.bot)
         frame = "\x1b[?25l" + self.cv.render()
         # The pane's default background takes the dock's colour, so WezTerm paints the window
         # padding beside the dock with it and the dock runs from the header to the bottom edge.
@@ -667,7 +806,8 @@ class Dock:
                 fading = self.advance(time.monotonic())
                 pending = self.settle(time.monotonic())
                 self.draw(size)
-                busy = any(p.get("kind") == "working" for p in (self.doc or {}).get("panes", []))
+                busy = any(p.get("kind") == "working" for p in (self.doc or {}).get("panes", [])) or \
+                    bool(((with_schedules(self.doc, self.summary, time.time()) or {}).get("bots") or {}).get("running"))
                 wait = U.FRAME if fading else 0.125 if busy else 0.5
                 r, _, _ = select.select([self.fd], [], [], min(wait, pending) if pending else wait)
                 if r:
@@ -711,7 +851,8 @@ def main(argv=None):
             return 2
     path = path or state_path()
     if dump_size:
-        print("\n".join(dump(render(with_git(load(path), R.Where(background=False)), *dump_size, time.time(), lambda _: None, lambda: None, lambda: None))))
+        print("\n".join(dump(render(with_schedules(with_git(load(path), R.Where(background=False)), HS.read_summary(HS.summary_path())),
+                                    *dump_size, time.time(), lambda _: None, lambda: None, lambda: None, bot=lambda _: None))))
         return 0
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("hivegrid-overview: needs a terminal (--dump prints one frame)", file=sys.stderr)

@@ -777,7 +777,7 @@ end)
 
 T.test('state tables: web sits between exited and the plain-program states', function()
   local S = require('theme').STATES
-  T.eq({ S.web.glyph, S.web.text, S.web.key, S.web.rank }, { '◍', 'web', 'cyan', 9 })
+  T.eq({ S.web.glyph, S.web.text, S.web.key, S.web.rank }, { '◍', 'web', 'cyan', 10 })
   T.ok(S.exited.rank < S.web.rank and S.web.rank < S.other.rank and S.other.rank < S.shell.rank)
   T.eq(S.web.color, require('theme').P.cyan)
 end)
@@ -977,7 +977,7 @@ end
 
 T.test('S.web: defaults, valid values, and invalid ones falling back', function(wz)
   local defaults = { links = 'pane', search = 'https://www.google.com/search?q=%s', profile = 'main',
-    home = 'about:blank', browser = 'auto' }
+    home = 'about:blank', browser = 'auto', theme = 'dark' }
   local function with(over)
     local out = {}
     for k, v in pairs(defaults) do out[k] = v end
@@ -988,9 +988,9 @@ T.test('S.web: defaults, valid values, and invalid ones falling back', function(
   T.fresh()
   local w2 = require 'wezterm'
   T.eq(web_settings(w2, { web = { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2',
-      home = ' https://start.test/ ', browser = ' /usr/bin/brave-browser ' } }),
+      home = ' https://start.test/ ', browser = ' /usr/bin/brave-browser ', theme = 'light' } }),
     with { links = 'system', search = 'https://x.test/?q=%s', profile = 'work-2', home = 'https://start.test/',
-      browser = '/usr/bin/brave-browser' })
+      browser = '/usr/bin/brave-browser', theme = 'light' })
   T.fresh()
   local w3 = require 'wezterm'
   T.eq(web_settings(w3, { web = { links = 'both', search = 'https://x.test/', profile = '../evil', home = '  ',
@@ -1006,6 +1006,14 @@ T.test('S.web: defaults, valid values, and invalid ones falling back', function(
   T.eq(web_settings(w6, { web = { search = 'javascript:alert(%s)' } }).search, '', 'a search template must be http(s)')
   T.fresh()
   T.eq(web_settings(require 'wezterm', { web = { search = '' } }).search, '', 'an explicit empty string is no search')
+end)
+
+T.test('S.web.theme: dark unless light or system is stored', function(wz)
+  T.eq(web_settings(wz, { web = { theme = 'system' } }).theme, 'system')
+  T.fresh()
+  T.eq(web_settings(require 'wezterm', { web = { theme = 'Light' } }).theme, 'dark', 'only exact values count')
+  T.fresh()
+  T.eq(web_settings(require 'wezterm', { web = { theme = 3 } }).theme, 'dark')
 end)
 
 T.test('S.agent: omp unless the file says claude', function(wz)

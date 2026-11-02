@@ -117,13 +117,15 @@ class SettingsFileNormalisation(TempHome):
     def test_web_settings_default_and_stored_values(self):
         self.assertEqual(S.Settings(self.settings_file({})).web(),
                          {"links": "pane", "search": "https://www.google.com/search?q=%s", "profile": "main",
-                          "home": "about:blank", "browser": "auto"})
+                          "home": "about:blank", "browser": "auto", "theme": "dark"})
         self.assertEqual(S.Settings(self.settings_file({"web": {"search": ""}})).web()["search"], "",
                          "an explicit empty string is no search")
         s = S.Settings(self.settings_file({"web": {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
-                                                    "home": "https://start.test/", "browser": "/usr/bin/brave-browser"}}))
+                                                    "home": "https://start.test/", "browser": "/usr/bin/brave-browser",
+                                                    "theme": "system"}}))
         self.assertEqual(s.web(), {"links": "system", "search": "https://x.test/?q=%s", "profile": "work.2",
-                                   "home": "https://start.test/", "browser": "/usr/bin/brave-browser"})
+                                   "home": "https://start.test/", "browser": "/usr/bin/brave-browser",
+                                   "theme": "system"})
         self.assertEqual(s.effective()["web"], s.web())
 
     def test_invalid_web_settings_fall_back_per_field(self):
@@ -152,6 +154,18 @@ class SettingsFileNormalisation(TempHome):
         self.assertEqual(json.loads(path.read_text())["web"], {"browser": "/usr/bin/vivaldi", "home": "https://start.test/"})
         s.write(s.theme(), s.keys(), [], dict(web, browser="auto", home="about:blank"), s.agent())
         self.assertNotIn("web", json.loads(path.read_text()))
+
+    def test_the_web_theme_is_dark_unless_the_file_names_light_or_system(self):
+        for stored, want in (("light", "light"), ("system", "system"), ("dark", "dark"),
+                             ("Light", "dark"), ("", "dark"), (1, "dark"), (None, "dark"), (["light"], "dark")):
+            with self.subTest(stored=stored):
+                self.assertEqual(S.Settings(self.settings_file({"web": {"theme": stored}})).web()["theme"], want)
+        path = self.settings_file({})
+        s = S.Settings(path)
+        s.write(s.theme(), s.keys(), [], dict(s.web(), theme="light"), s.agent())
+        self.assertEqual(json.loads(path.read_text())["web"], {"theme": "light"})
+        s.write(s.theme(), s.keys(), [], dict(s.web(), theme="dark"), s.agent())
+        self.assertNotIn("web", json.loads(path.read_text()), "the default is not written")
 
     def test_the_agent_is_omp_unless_the_file_names_a_known_one(self):
         self.assertEqual(S.Settings(self.settings_file({})).agent(), "omp")
@@ -494,6 +508,51 @@ class Bindings(unittest.TestCase):
         # a fixed binding that is also a WezTerm default still refuses
         out = S.check_binding("quota_popup", "ALT+h", self.KEYS, {S.combo_id({"ALT"}, "h"): "X"})
         self.assertIn("error", [k for k, _ in out])
+
+
+class ScheduleSettings(unittest.TestCase):
+    def test_defaults_and_garbage(self):
+        want = {"max_parallel": 2, "tz": "local", "allow_full": False, "daily_budget_usd": 0,
+                "notify_events": ["failed", "limit", "missed"]}
+        for stored in (None, {}, [], "x", {"max_parallel": 0, "tz": "Mars/Base", "allow_full": "yes",
+                                          "daily_budget_usd": -1, "notify_events": []}):
+            self.assertEqual(S.schedule_settings(stored), want, stored)
+        got = S.schedule_settings({})
+        got["notify_events"].append("done")
+        self.assertEqual(S.schedule_settings({})["notify_events"], ["failed", "limit", "missed"])
+
+    def test_valid_values_and_event_order(self):
+        got = S.schedule_settings({"max_parallel": 8, "tz": "Europe/Berlin", "allow_full": True,
+                                   "daily_budget_usd": 2.5, "notify_events": ["done", "failed"]})
+        self.assertEqual(got, {"max_parallel": 8, "tz": "Europe/Berlin", "allow_full": True,
+                               "daily_budget_usd": 2.5, "notify_events": ["failed", "done"]})
+
+    def test_bounds_and_types(self):
+        for bad in (9, True, 1.5, "3"):
+            self.assertEqual(S.schedule_settings({"max_parallel": bad})["max_parallel"], 2, bad)
+        self.assertEqual(S.schedule_settings({"max_parallel": 1})["max_parallel"], 1)
+        self.assertIs(S.schedule_settings({"allow_full": 1})["allow_full"], False)
+        self.assertEqual(S.schedule_settings({"notify_events": ["failed", "bogus"]})["notify_events"],
+                         ["failed", "limit", "missed"])
+        self.assertEqual(S.schedule_settings({"daily_budget_usd": True})["daily_budget_usd"], 0)
+
+    def test_bots_binding_is_a_checked_leader_key(self):
+        self.assertEqual(S.BINDINGS["bots_panel"][1], "LEADER+t")
+        keys = S.effective_keys({})
+        self.assertEqual(S.check_binding("bots_panel", "LEADER+t", keys), [])
+        self.assertEqual([k for k, _ in S.check_binding("bots_panel", "LEADER+a", keys)], ["error"])
+        self.assertEqual([k for k, _ in S.check_binding("bots_panel", "CTRL+t", keys)], ["error"])
+
+    def test_settings_object_reads_the_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "s.json"
+            p.write_text(json.dumps({"schedule": {"max_parallel": 3}}))
+            self.assertEqual(S.Settings(p).schedule()["max_parallel"], 3)
+            # writing other settings keeps the key
+            s = S.Settings(p)
+            s.write(s.theme(), s.keys(), [], s.web(), s.agent())
+            self.assertEqual(json.loads(p.read_text())["schedule"], {"max_parallel": 3})
+
 
 
 class ComboRoundTrip(unittest.TestCase):

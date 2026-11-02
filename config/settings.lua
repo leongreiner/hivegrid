@@ -9,6 +9,8 @@
 --                          "new web pane" open on an empty answer, browser = 'auto' or the absolute
 --                          path of a Chromium-family binary } (see below)
 --   S.session           -> { enabled = false only when the file says "session": { "enabled": false } }
+--   S.auto_continue     -> { enabled = false only when the file says "auto_continue": { "enabled": false } }:
+--                          a usage-limited omp agent is continued after the reset (config/autocontinue.lua)
 --   S.agent             -> 'omp' (default) or 'claude': the coding agent new tabs, grids and the account
 --                          pills start (key "agent"; any other value is omp)
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
@@ -101,7 +103,9 @@ local function build(wezterm)
   -- names the browser profile (cookies and logins) new web panes use; home is the location a
   -- new web pane opens when nothing is typed (checked by web.lua's normalize_url, which this
   -- file cannot call: an unusable one is about:blank there); browser is 'auto' (the fork's own
-  -- search) or the absolute path the Settings panel validated. The fork reads the same key itself
+  -- search) or the absolute path the Settings panel validated; theme is 'dark' (default), 'light'
+  -- or 'system': the colour scheme pages are shown in (the fork emulates prefers-color-scheme
+  -- for dark and light, nothing for system). The fork reads the same key itself
   -- when it starts a browser (mux/src/webpane.rs), so every way of opening a web pane agrees.
   local web = type(data.web) == 'table' and data.web or {}
   S.web = {
@@ -113,6 +117,7 @@ local function build(wezterm)
       and web.profile or 'main',
     home = (type(web.home) == 'string' and web.home:find('%S')) and web.home:match('^%s*(.-)%s*$') or 'about:blank',
     browser = type(web.browser) == 'string' and web.browser:match('^%s*(/.-)%s*$') or 'auto',
+    theme = (web.theme == 'light' or web.theme == 'system') and web.theme or 'dark',
   }
 
   -- Session restore (config/session.lua): the layout is saved and built again after a crash or a
@@ -120,9 +125,46 @@ local function build(wezterm)
   local session = type(data.session) == 'table' and data.session or {}
   S.session = { enabled = session.enabled ~= false }
 
+  -- Continue a usage-limited agent once its limit has reset (config/autocontinue.lua). Only
+  -- "auto_continue": { "enabled": false } turns it off; the panel does not edit it. Only the
+  -- Lua config reads it: the hive and the phone page take what it publishes (autocontinue.json).
+  local auto = type(data.auto_continue) == 'table' and data.auto_continue or {}
+  S.auto_continue = { enabled = auto.enabled ~= false }
+
   -- The agent started in new tabs, grids and for an account pill (key "agent"): 'omp' or
   -- 'claude' (Claude Code); anything else is omp. Mirrors bin/hivegrid_settings_core.py.
   S.agent = data.agent == 'claude' and 'claude' or 'omp'
+
+  -- Scheduled bots (key "schedule"): the effective values, defaults for anything missing or
+  -- invalid. Mirrors schedule_settings in bin/hivegrid_settings_core.py; a zone name is only
+  -- shape-checked here (Python looks it up).
+  local sched = type(data.schedule) == 'table' and data.schedule or {}
+  local EVENTS = { 'failed', 'limit', 'missed', 'done' }
+  local function whole(v) return type(v) == 'number' and v % 1 == 0 end
+  S.schedule = {
+    max_parallel = (whole(sched.max_parallel) and sched.max_parallel >= 1 and sched.max_parallel <= 8)
+      and math.floor(sched.max_parallel) or 2,
+    tz = (sched.tz == 'local' or (type(sched.tz) == 'string' and sched.tz:match('^[%w_+-]+/[%w_+/-]+$')
+      and not sched.tz:find('//', 1, true))) and sched.tz or 'local',
+    allow_full = sched.allow_full == true,
+    daily_budget_usd = (type(sched.daily_budget_usd) == 'number' and sched.daily_budget_usd >= 0
+      and sched.daily_budget_usd < 1e6) and sched.daily_budget_usd or 0,
+    notify_events = { 'failed', 'limit', 'missed' },
+  }
+  if type(sched.notify_events) == 'table' and #sched.notify_events > 0 then
+    local want, ok, n = {}, true, 0
+    for _, e in pairs(sched.notify_events) do
+      n = n + 1
+      local known = false
+      for _, k in ipairs(EVENTS) do known = known or k == e end
+      if known then want[e] = true else ok = false end
+    end
+    if ok and n == #sched.notify_events then
+      local list = {}
+      for _, k in ipairs(EVENTS) do if want[k] then list[#list + 1] = k end end
+      S.schedule.notify_events = list
+    end
+  end
 
   -- Accounts ------------------------------------------------------------------
 

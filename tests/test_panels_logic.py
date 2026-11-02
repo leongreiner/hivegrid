@@ -778,6 +778,17 @@ class WebSettingsTest(Env):
         self.assertEqual(self.model.web["browser"], good)
         self.assertEqual(self.page.web_value("browser"), "Custom  " + P.tilde(good))
 
+    def test_the_page_colours_row_offers_dark_light_and_system(self):
+        self.assertEqual(self.model.web["theme"], "dark")
+        modal = self.modal_for("theme")
+        self.assertEqual(len(modal.options), 3)
+        modal.key(self.ui, set(), "DownArrow")
+        modal.key(self.ui, set(), "Enter")
+        self.assertEqual(self.model.web["theme"], "light")
+        self.page.cursor[3] = P.WEB_ROWS.index("theme")
+        self.page.key(self.ui, set(), "r")
+        self.assertEqual(self.model.web["theme"], "dark")
+
     def test_reset_of_the_browser_row_goes_back_to_auto(self):
         self.model.web["browser"] = "/usr/bin/chromium"
         self.page.cursor[3] = P.WEB_ROWS.index("browser")

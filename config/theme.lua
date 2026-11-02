@@ -63,9 +63,10 @@ for kind, s in pairs {
   working = { '↻', 'working', 'accent', 6 },
   idle = { '·', 'idle', 'grey', 7 },
   exited = { '○', 'exited', 'muted', 8 },
-  web = { '◍', 'web', 'cyan', 9 },
-  other = { '›', 'running', 'dim', 10 },
-  shell = { '›', 'shell', 'dim', 11 },
+  schedule = { '◷', 'waiting', 'cyan', 9 },
+  web = { '◍', 'web', 'cyan', 10 },
+  other = { '›', 'running', 'dim', 11 },
+  shell = { '›', 'shell', 'dim', 12 },
 } do
   M.STATES[kind] = { glyph = s[1], text = s[2], key = s[3], color = M.P[s[3]], rank = s[4] }
 end

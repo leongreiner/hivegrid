@@ -918,8 +918,19 @@ class TestChatApi(RichCase):
         self.write_state(3, sessionFile="/etc/passwd")
         self.assertEqual(self.chat()[1]["source"], "screen")
 
-    def test_a_vanished_file_falls_back_to_the_screen(self):
-        os.unlink(self.path)
+    def test_a_fresh_agent_whose_session_file_is_not_written_yet_has_an_empty_chat_not_the_screen(self):
+        os.unlink(self.path)                      # omp named its session file; it writes it with the first message
+        r, data = self.chat()
+        self.assertEqual((r.status, data["source"], data["items"], data["gen"]), (200, "session", [], 0))
+        rev = data["rev"]
+        self.make_session(jl(msg("user", text("hello"))), name=os.path.basename(self.path))
+        self.clock.t += 5
+        _, data = self.chat()
+        self.assertEqual((data["source"], data["items"][0]["text"]), ("session", "hello"))
+        self.assertNotEqual(data["rev"], rev)
+
+    def test_a_session_file_that_cannot_be_the_agents_never_makes_an_empty_chat(self):
+        self.write_state(3, sessionFile=os.path.join(self.home, "elsewhere", "nothing.jsonl"))
         self.assertEqual(self.chat()[1]["source"], "screen")
 
     def test_session_text_is_data(self):

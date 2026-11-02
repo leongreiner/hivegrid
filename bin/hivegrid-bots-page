@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Makes sure the local hivegrid-remote runs for the Bots page of the window. See docs/schedules.md, "Host page"."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import hivegrid_botspage  # noqa: E402
+
+sys.exit(hivegrid_botspage.main())

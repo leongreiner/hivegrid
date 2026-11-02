@@ -1,24 +1,30 @@
-"""The four Hivegrid panels: settings, usage history, agent overview, system monitor."""
+"""The Hivegrid panels: settings, usage history, agent overview, system monitor, bots."""
 import bisect
+import copy
+import datetime as dt
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 import textwrap
 import time
 from collections import deque
 from pathlib import Path
 
+import hivegrid_remote_data as RD
+import hivegrid_schedule as HS
 import hivegrid_ui as U
-from hivegrid_agents import (AGENT_PROCS, SHELLS, format_cost, format_tokens, is_chrome, is_web, parse_usage, state_dir,
-                             totals_text, usage_totals, web_build_cached, web_label)
+from hivegrid_agents import (AGENT_PROCS, SHELLS, format_cost, format_tokens, is_chrome, is_web, parse_usage,
+                             state_dir, totals_text, usage_totals, web_build_cached, web_label)
 from hivegrid_settings_core import (
-    AGENT_DEFAULT, AGENT_NAMES, AGENTS, BINDINGS, BROWSER_AUTO, PRESETS, VERSION, WEB_DEFAULTS, about_info, find_wezterm,
+    AGENT_DEFAULT, AGENT_NAMES, AGENTS, BINDINGS, BROWSER_AUTO, PRESETS, VERSION, WEB_DEFAULTS, WEB_THEMES, about_info, find_wezterm,
     cache_dir, check_binding,
     check_browser, current_entry, detect_browsers, discover_accounts, effective_keys, format_combo, merge_accounts,
     normalize, normalize_home, omp_profiles, pair_profile, quota_state, remove_account, tilde, untilde,
-    valid_label, valid_profile, valid_search, wezterm_defaults,
+    SCHEDULE_DEFAULTS, valid_label, valid_profile, valid_search, wezterm_defaults,
 )
 
 ACCENTS = ["#4f9dff", "#38bdf8", "#34d399", "#fbbf24", "#a78bfa", "#f87171", "#f472b6", "#e5e7eb"]
@@ -28,6 +34,19 @@ BOLD, DIM = U.BOLD, U.DIM
 def fit(text, n):
     text = str(text)
     return text if len(text) <= n else text[: max(n - 1, 0)] + "…"
+
+
+def chat_text(text, limit):
+    """Display text for the shared chat parser: no control characters except newline, at most `limit` characters."""
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\r\n", "\n").replace("\t", "    ")
+    text = "".join(c for c in text if c == "\n" or c.isprintable())
+    return text if len(text) <= limit else text[: max(limit - 1, 0)] + "…"
+
+
+def chat_line(text, limit):
+    return chat_text(" ".join(str(text or "").split()), limit)
 
 
 def human_age(secs):
@@ -95,10 +114,12 @@ class CaptureModal(U.Modal):
         return True
 
 
-WEB_ROWS = ("links", "browser", "home", "search", "profile")
-WEB_LABELS = {"links": "Open links in", "browser": "Browser", "home": "Home page", "search": "Search engine",
+WEB_ROWS = ("links", "theme", "browser", "home", "search", "profile")
+WEB_LABELS = {"links": "Open links in", "theme": "Page colours", "browser": "Browser", "home": "Home page", "search": "Search engine",
               "profile": "Default profile"}
 AUTO_BROWSER = "Auto (Google Chrome, then Chromium)"
+WEB_THEME_TEXT = {"dark": "dark (pages that follow the system scheme turn dark)", "light": "light",
+                  "system": "system (the browser's own, no emulation)"}
 CONFINED_SHORT = "their sandbox hides the profile directory and their launcher does not reliably pass on the DevTools pipe"
 
 
@@ -773,6 +794,12 @@ class SettingsPage(U.Page):
         if name == "browser":
             self.choose_browser(ui)
             return
+        if name == "theme":
+            order = list(WEB_THEMES)
+            ui.open_modal(U.ChoiceModal("Web: page colours", [WEB_THEME_TEXT[t] for t in order],
+                                        order.index(self.model.web["theme"]),
+                                        lambda idx: self.set_web(ui, "theme", order[idx])))
+            return
 
         def ok(text):
             text = text.strip()
@@ -827,6 +854,8 @@ class SettingsPage(U.Page):
         value = self.model.web[name]
         if name == "links":
             return "a web pane beside the terminal" if value == "pane" else "the system browser"
+        if name == "theme":
+            return WEB_THEME_TEXT[value]
         if name == "browser":
             if value == BROWSER_AUTO:
                 return AUTO_BROWSER
@@ -851,7 +880,7 @@ class SettingsPage(U.Page):
                    BOLD if changed else 0)
             cv.hit(x + 36, row, tw - 38, 1, lambda b, n=name, i=i: (self.cursor.__setitem__(3, i), self.edit_web(ui, n)))
             bx = x + tw + 2
-            bx += ui.button(cv, bx, row, {"links": "Switch", "browser": "Choose…"}.get(name, "Edit…"),
+            bx += ui.button(cv, bx, row, {"links": "Switch", "theme": "Choose…", "browser": "Choose…"}.get(name, "Edit…"),
                             lambda b, n=name: self.edit_web(ui, n), accent=sel) + 1
             if changed:
                 ui.button(cv, bx, row, "Reset", lambda b, n=name: self.reset_web(ui, n))
@@ -1826,3 +1855,1163 @@ class MonitorPage(U.Page):
                                 cv.put(x + 3 + c, gy + 1 + r, ch, colour)
             gy += gh + 1
         return col
+
+
+# ---- bots ---------------------------------------------------------------------------
+# The Bots panel: scheduled omp agents (bin/hivegrid_schedule.py is the library, bin/hivegrid_scheduler.py
+# the daemon that runs them). The page reads the Store, the state directories and the runtime summary,
+# and changes things only through the library (Store, update_state, send_command).
+
+BOT_KIND_ICON = {"task": "▪", "agent": "◆"}
+BOT_SORT = {"attention": 0, "limit": 0, "working": 1, "done": 2, "schedule": 3, "idle": 4}
+# Result words by run status: the one state vocabulary (U.STATES) names how much a result wants the eye.
+RUN_STATE = {"ok": "done", "limit": "limit", "failed": "attention", "timeout": "attention", "cost": "attention",
+             "missed": "attention", "skipped": "idle", "deferred": "idle", "cancelled": "idle"}
+RESULT_COLOR = {"ok": "green", "failed": "red", "timeout": "red", "limit": "red", "cost": "amber", "missed": "amber"}
+EDIT_MARK = "--- task.prompt: everything below this line is the prompt ---"
+SCHEDULER_UNIT = "hivegrid-scheduler.service"
+
+
+def span_text(secs):
+    """A span as short text: `45m`, `2h05m`, `2h`, `3d`; `now` when it is over."""
+    secs = int(secs)
+    if secs <= 0:
+        return "now"
+    if secs < 60:
+        return "<1m"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 36000:
+        h, m = divmod(secs // 60, 60)
+        return f"{h}h{m:02d}m" if m else f"{h}h"
+    if secs < 2 * 86400:
+        return f"{secs // 3600}h"
+    d, h = divmod(secs // 3600, 24)
+    return f"{d}d{h}h" if d < 7 and h else f"{d}d"
+
+
+def clock_text(epoch, tz="local", now=None):
+    """A time for a preview: `09:00` today, `Mon 09:00` within a week, else `Nov 3 09:00`."""
+    try:
+        import zoneinfo
+        zone = None if tz in (None, "local") else zoneinfo.ZoneInfo(tz)
+    except Exception:  # noqa: BLE001 - an unknown zone reads as local
+        zone = None
+    t = dt.datetime.fromtimestamp(epoch, zone)
+    n = dt.datetime.fromtimestamp(now if now is not None else time.time(), zone)
+    days = (t.date() - n.date()).days
+    if days == 0:
+        return t.strftime("%H:%M")
+    if 0 < days < 7:
+        return t.strftime("%a %H:%M")
+    return f"{t.strftime('%b')} {t.day} {t.strftime('%H:%M')}"
+
+
+def bot_state(sched, st, runs):
+    """The state kind a bot shows (see hivegrid_schedule.build_summary): working while a run is live,
+    attention or limit for an unseen bad result or a pause, done for an unseen ok result, idle when
+    disabled or finished, else schedule (waiting for its next run)."""
+    unseen = [r for r in runs if r.get("seen") is False]
+    bad = [r for r in unseen if r.get("status") in HS.ATTENTION_STATUS]
+    if st.get("running"):
+        return "working"
+    if st.get("paused_reason") or bad:
+        return "limit" if not st.get("paused_reason") and bad[-1].get("status") == "limit" else "attention"
+    if any(r.get("status") == "ok" for r in unseen):
+        return "done"
+    if not sched["enabled"] or st.get("done"):
+        return "idle"
+    return "schedule"
+
+
+def load_bots(store, env, now):
+    """The rows of the list: one per valid schedule, sorted like the summary (needs you, running,
+    done, waiting, idle, then by next run and name)."""
+    rows = []
+    for s in store.read():
+        sdir = HS.state_dir(s["id"], env)
+        st = HS.load_state(sdir)
+        runs = HS.read_runs(sdir)
+        rows.append({
+            "id": s["id"], "name": s["name"], "kind": s["kind"], "sched": s, "state": bot_state(s, st, runs),
+            "enabled": s["enabled"], "when_text": HS.describe(s["when"], now), "next_at": HS.next_run(s, st, now),
+            "last": runs[-1] if runs else None, "unseen": sum(1 for r in runs if r.get("seen") is False),
+            "running": st.get("running") or None, "paused_reason": st.get("paused_reason"),
+            "done": bool(st.get("done")), "run_count": len(runs),
+        })
+    rows.sort(key=lambda r: (BOT_SORT[r["state"]], r["next_at"] or 1 << 60, r["name"].lower()))
+    return rows
+
+
+def session_run(runs):
+    """The newest run record that has a session file, or None."""
+    return next((r for r in reversed(runs) if r.get("session_file")), None)
+
+
+def edit_text(rec):
+    """The text the editor opens for a bot: its record as JSON, with the (often long) prompt as plain
+    text under a marker line."""
+    doc = copy.deepcopy(rec)
+    prompt = doc["task"]["prompt"]
+    doc["task"]["prompt"] = "(see below)"
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n\n" + EDIT_MARK + "\n" + prompt + "\n"
+
+
+def parse_edit_text(text):
+    """The record dict of edit_text()'s format; ValueError with the reason (JSON errors name line and column)."""
+    head, sep, tail = text.partition("\n" + EDIT_MARK + "\n")
+    try:
+        doc, end = json.JSONDecoder().raw_decode(head.lstrip())
+    except ValueError as exc:
+        raise ValueError(f"not valid JSON: {exc}") from None
+    if not isinstance(doc, dict):
+        raise ValueError("the record must be a JSON object")
+    task = doc.get("task")
+    if sep:
+        if not isinstance(task, dict):
+            raise ValueError("task must be an object")
+        task["prompt"] = tail.strip("\n")
+    elif head.lstrip()[end:].strip() or (isinstance(task, dict) and task.get("prompt") == "(see below)"):
+        raise ValueError(f"the marker line `{EDIT_MARK}` is missing: the prompt would be lost")
+    return doc
+
+
+def scheduler_command(env=None, exists=os.path.exists):
+    """(argv, text) that starts the scheduler: `systemctl --user start hivegrid-scheduler` when its user
+    unit is installed, else the hivegrid-scheduler program run directly."""
+    env = os.environ if env is None else env
+    base = env.get("XDG_CONFIG_HOME")
+    base = base if base and os.path.isabs(base) else os.path.join(env.get("HOME") or os.path.expanduser("~"), ".config")
+    if exists(os.path.join(base, "systemd", "user", SCHEDULER_UNIT)):
+        return ["systemctl", "--user", "start", SCHEDULER_UNIT], "systemctl --user start hivegrid-scheduler"
+    here = os.path.join(os.path.dirname(os.path.realpath(__file__)), "hivegrid-scheduler")
+    return [here if exists(here) else (shutil.which("hivegrid-scheduler") or "hivegrid-scheduler")], "hivegrid-scheduler"
+
+
+def start_scheduler(env=None, popen=subprocess.Popen, run=subprocess.run, exists=os.path.exists):
+    """Starts the scheduler (see scheduler_command); -> (ok, message). The program form runs detached
+    in its own session, so it outlives the panel."""
+    argv, text = scheduler_command(env, exists)
+    try:
+        if argv[0] == "systemctl":
+            r = run(argv, capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return False, f"`{text}` failed: {(r.stderr or r.stdout or 'exit ' + str(r.returncode)).strip()[:120]}"
+        else:
+            popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not start the scheduler (`{text}`): {getattr(exc, 'strerror', None) or exc}"
+    return True, f"starting the scheduler (`{text}`): this line turns green when it reports"
+
+
+def origin_context():
+    """(directory with ~, omp profile) of the pane the panel was opened over (--origin), or ("", "")."""
+    text = wezterm_cli("list", "--format", "json")
+    fid = focused_pane()
+    if text is None or fid is None:
+        return "", ""
+    row = next((r for r in parse_panes(text, foreground_by_tty()) if r["pane"] == fid), None)
+    return (row["cwd"], row["profile"]) if row and not row.get("proc") == "web" else ("", "")
+
+
+class WhenModal(U.PromptModal):
+    """The prompt for a `when` text with a live reading under it: what it means and the next 3 times."""
+
+    def __init__(self, title, text, on_ok, tz="local", now=time.time, hint=""):
+        super().__init__(title, text, on_ok, hint)
+        self.tz, self.now = tz, now
+
+    def reading(self):
+        """-> (lines [(text, palette key)]): the parse of the text typed so far."""
+        if not self.text.strip():
+            return [("weekdays 9am · every 30m · 0 9 * * 1-5 · tomorrow 8:30 · 2026-11-03 09:00", "dim")]
+        try:
+            now = self.now()
+            got = HS.parse_when(self.text, now=now, tz=self.tz)
+        except ValueError as exc:
+            return [(str(exc), "amber")]
+        when = got["when"]
+        lines = [(f"→ {HS.describe(when, now)}", "text")]
+        lines.append(("next  " + " · ".join(clock_text(e, when.get("tz", "local"), now) for e in got["next"]), "muted"))
+        return lines
+
+    def render(self, ui, cv):
+        p = ui.pal
+        x, y, w, h = U.box(ui, cv, 74, 12, self.title)
+        cv.fill(x + 2, y + 2, w - 4, 1, bg=p["deep"])
+        cv.put(x + 3, y + 2, self.text[-(w - 8):], p["bright"], p["deep"])
+        cv.put(x + 3 + min(len(self.text), w - 8), y + 2, "▏", p["accent"], p["deep"])
+        if self.hint:
+            cv.put(x + 2, y + 4, U.fit_cells(self.hint, w - 4), p["muted"], p["surface"])
+        for k, (line, color) in enumerate(self.reading()):
+            cv.put(x + 2, y + 6 + k, U.fit_cells(line, w - 4), p[color], p["surface"])
+        if self.error:
+            cv.put(x + 2, y + 9, U.fit_cells(self.error, w - 4), p["red"], p["surface"])
+        U.dialog_footer(ui, cv, x, y + h - 2, w, [("OK", lambda b: ui.finish(self, self.key(ui, set(), "Enter")), True),
+                                                  ("Cancel", lambda b: ui.close_modal(), False)], "Enter OK  Esc cancel")
+
+
+class HelpModal(U.Modal):
+    def __init__(self, title, lines):
+        self.title, self.lines = title, lines
+
+    def render(self, ui, cv):
+        p = ui.pal
+        width = min(max(U.text_width(f"{k}  {t}") for k, t in self.lines) + 8, cv.w - 4)
+        x, y, w, h = U.box(ui, cv, width, len(self.lines) + 5, self.title)
+        kw = max(U.text_width(k) for k, _ in self.lines)
+        for i, (key, text) in enumerate(self.lines):
+            cv.put(x + 3, y + 2 + i, key, p["text"], p["surface"], BOLD)
+            cv.put(x + 3 + kw + 2, y + 2 + i, U.fit_cells(text, w - kw - 8), p["muted"], p["surface"])
+        U.dialog_footer(ui, cv, x, y + h - 2, w, [("Close", lambda b: ui.close_modal(), True)], "any key")
+
+    def key(self, ui, mods, key):
+        return True
+
+
+BOT_HELP = [
+    ("n", "new bot (name, kind, task, when, folder, account, permissions, mode)"),
+    ("b", "Briefing: the important reports of all bots (Enter reads one, a marks all seen)"),
+    ("t", "Talk: the bot's conversation, live; type and Enter to send, Esc back"),
+    ("Enter", "details: the run history; marks the results seen"),
+    ("e", "edit the bot's record and prompt in $EDITOR (checked before it is saved)"),
+    ("m", "show / edit the bot's memory.md in $EDITOR"),
+    ("space", "pause or resume (a breaker pause is cleared by resume)"),
+    ("r", "run now"),
+    ("s", "skip the next scheduled run"),
+    ("c", "cancel the live run"),
+    ("d", "delete the bot and its history"),
+    ("↑↓", "choose;  Esc goes back, q closes"),
+    ("", "▪ task  ◆ agent;  ● an unseen result"),
+]
+
+
+class BotWizard:
+    """The new-bot dialogs, chained: name, kind, task, when, folder, account, permissions, mode. Esc in
+    any of them drops the bot; nothing is written before the last answer."""
+
+    KINDS = ["task – runs its prompt on schedule", "agent – standing task, identity, memory"]
+    PERMS = [("edit", "edit – read and write files (default)"), ("readonly", "readonly – read and search only"),
+             ("full", "full – also shell commands (opt-in)")]
+    MODES = [("headless", "headless – in the background (default)"), ("visible", "visible – runs headless for now"),
+             ("hybrid", "hybrid – runs headless for now")]
+
+    def __init__(self, page, ui, cwd="", profile=""):
+        self.page, self.ui = page, ui
+        self.cwd, self.profile = cwd, profile
+        self.spec = {"enabled": True, "task": {}, "run": {}}
+        self.accounts = []
+
+    def ask(self, modal):
+        self.ui.open_modal(modal)
+
+    def start(self):
+        self.ask(U.PromptModal("New bot · name", "", self.on_name, hint="A short label, for example: morning digest"))
+
+    def on_name(self, text):
+        name = text.strip()
+        if not name:
+            return "give the bot a name"
+        if len(name) > HS.MAX_NAME:
+            return f"at most {HS.MAX_NAME} characters"
+        self.spec["name"] = name
+        self.ask(U.ChoiceModal("New bot · kind", self.KINDS, 0, self.on_kind))
+
+    def on_kind(self, i):
+        self.spec["kind"] = ("task", "agent")[i]
+        agent = i == 1
+        self.ask(U.PromptModal("New bot · " + ("standing task" if agent else "task"), "", self.on_prompt,
+                               hint="What it does on every run (long prompts: edit later with e)"))
+
+    def on_prompt(self, text):
+        if not text.strip():
+            return "write what the bot should do"
+        if len(text) > HS.MAX_PROMPT:
+            return f"at most {HS.MAX_PROMPT} characters"
+        self.spec["task"]["prompt"] = text.strip()
+        if self.spec["kind"] == "agent":
+            self.ask(U.PromptModal("New bot · identity", "", self.on_identity,
+                                   hint="Who is this agent? Optional: Enter to skip"))
+        else:
+            self.ask_when()
+
+    def on_identity(self, text):
+        if len(text) > 8000:
+            return "at most 8000 characters"
+        if text.strip():
+            self.spec["identity"] = {"system": text.strip()}
+        self.ask_when()
+
+    def ask_when(self):
+        self.ask(WhenModal("New bot · when", "", self.on_when, tz=self.page.cfg()["tz"], now=self.page.now,
+                           hint="A phrase, a cron expression or a date"))
+
+    def on_when(self, text):
+        try:
+            got = HS.parse_when(text, now=self.page.now(), tz=self.page.cfg()["tz"])
+        except ValueError as exc:
+            return str(exc)
+        self.spec["when"] = got["when"]
+        self.ask(U.PromptModal("New bot · folder", self.cwd or "~", self.on_cwd,
+                               hint="The folder it works in (the focused pane's by default)"))
+
+    def on_cwd(self, text):
+        path = text.strip()
+        full = os.path.expanduser(path)
+        if not path or not os.path.isabs(full):
+            return "an absolute path, or one starting with ~"
+        if not os.path.isdir(full):
+            return "that folder does not exist"
+        self.spec["run"]["cwd"] = path
+        try:
+            self.accounts = [a["label"] for a in self.page.model.settings.accounts()]
+        except Exception:  # noqa: BLE001 - accounts are optional context
+            self.accounts = []
+        current = next((i + 1 for i, label in enumerate(self.accounts) if label == self.profile), 0)
+        self.ask(U.ChoiceModal("New bot · account", ["default account"] + [fit(a, 36) for a in self.accounts],
+                               current, self.on_account))
+
+    def on_account(self, i):
+        if i > 0:
+            self.spec["run"]["account"] = self.accounts[i - 1]
+        self.ask_permissions()
+
+    def ask_permissions(self):
+        self.ask(U.ChoiceModal("New bot · permissions", [t for _, t in self.PERMS], 0, self.on_permissions))
+
+    def on_permissions(self, i):
+        perm = self.PERMS[i][0]
+        if perm == "full":
+            if not self.page.cfg()["allow_full"]:
+                self.ui.say("full needs \"schedule\": {\"allow_full\": true} in settings.json", True)
+                self.ask_permissions()
+                return
+            self.ask(U.ConfirmModal("Full permissions let the bot run any shell command without asking, with no one "
+                                    "watching. Continue?", self.ask_time, "Full permissions", yes="Allow full",
+                                    no="Back", on_no=self.ask_permissions))
+            return
+        self.spec["run"]["permissions"] = perm
+        self.ask_mode()
+
+    def ask_time(self):
+        self.spec["run"]["permissions"] = "full"
+        self.ask(U.PromptModal("New bot · longest run", "30m", self.on_time,
+                               hint="Full needs a limit: 30m, 2h (1 minute to 24 hours)"))
+
+    def on_time(self, text):
+        try:
+            secs = HS.parse_duration(text)
+        except ValueError as exc:
+            return str(exc)
+        if not 60 <= secs <= 86400:
+            return "between 1 minute and 24 hours"
+        self.spec["run"]["max_time_s"] = secs
+        self.ask(U.PromptModal("New bot · most it may spend", "2", self.on_cost,
+                               hint="US dollars per run, above 0 and at most 100"))
+
+    def on_cost(self, text):
+        try:
+            cost = float(text.strip().lstrip("$"))
+        except ValueError:
+            return "a number of dollars"
+        if not 0 < cost <= 100:
+            return "above 0 and at most 100"
+        self.spec["run"]["max_cost_usd"] = cost
+        self.ask_mode()
+
+    def ask_mode(self):
+        self.ask(U.ChoiceModal("New bot · mode", [t for _, t in self.MODES], 0, self.on_mode))
+
+    def on_mode(self, i):
+        self.spec["run"]["mode"] = self.MODES[i][0]
+        self.page.create(self.ui, self.spec)
+
+
+class BotsPage(U.Page):
+    title = "Bots"
+
+    def __init__(self, model, env=None, now=time.time, select=None, new=False, cwd=None, profile=None,
+                 editor=None, start=None):
+        self.model, self.env, self.now = model, env, now
+        self.store = HS.Store(env=env)
+        self.select, self.new, self.cwd, self.profile = select, new, cwd, profile
+        self.editor = editor or (lambda argv: subprocess.run(argv))  # tests replace both
+        self.start = start or (lambda: start_scheduler(env))
+        self.rows, self.cursor, self.top, self.page_rows = [], 0, 0, 10
+        self.error, self.errors = "", []
+        self.alive, self.doc = False, None
+        self.detail = None  # id of the bot whose runs are shown
+        self.runs, self.run_cursor, self.fresh = [], 0, set()
+        self.mode = "list"  # "list" (and detail), "briefing" or "talk"
+        self.brief, self.brief_cursor, self.brief_open = [], 0, False
+        self.talk_id, self.draft, self.scroll, self.talk_note = None, "", 0, ("", False)
+        self.chat = RD.ChatCache(chat_text, chat_line)
+        self._stamp, self._talk_at = None, 0.0
+        self._at = 0.0
+        self._shown = False
+
+    # data ---------------------------------------------------------------------
+    def cfg(self):
+        try:
+            return self.model.settings.schedule()
+        except Exception:  # noqa: BLE001 - settings are context: defaults when unreadable
+            return dict(SCHEDULE_DEFAULTS)
+
+    def refresh(self):
+        now = self.now()
+        current = self.current()["id"] if self.current() else None
+        try:
+            self.rows, self.error = load_bots(self.store, self.env, now), ""
+        except (HS.ScheduleError, OSError) as exc:
+            self.rows, self.error = [], f"The bots could not be read: {exc}"
+        self.errors = list(self.store.errors)
+        self.doc = HS.read_summary(HS.summary_path(self.env))
+        self.alive = HS.daemon_alive(self.env, now)
+        self.cursor = next((i for i, r in enumerate(self.rows) if r["id"] == current), self.cursor)
+        self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
+        if self.detail:
+            self.load_runs()
+        try:
+            self.brief = HS.briefing(self.env)
+        except (HS.ScheduleError, OSError):
+            self.brief = []
+        self.brief_cursor = max(0, min(self.brief_cursor, len(self.brief) - 1))
+        if self.mode == "talk" and not self.row(self.talk_id):
+            self.mode = "list"
+
+    def load_runs(self):
+        row = self.row(self.detail)
+        if row is None:
+            self.detail, self.runs = None, []
+            return
+        self.runs = list(reversed(HS.read_runs(HS.state_dir(self.detail, self.env))))
+        self.run_cursor = max(0, min(self.run_cursor, len(self.runs) - 1))
+
+    def current(self):
+        return self.rows[self.cursor] if 0 <= self.cursor < len(self.rows) else None
+
+    def row(self, sid):
+        return next((r for r in self.rows if r["id"] == sid), None)
+
+    def on_show(self, ui):
+        self._at = self.now()
+        self.refresh()
+        if self.select:
+            i = next((i for i, r in enumerate(self.rows) if r["id"] == self.select), None)
+            if i is not None:
+                self.cursor = i
+            self.select = None
+        if self.new and not self._shown:
+            self._shown = True
+            cwd, profile = (self.cwd or "", self.profile or "")
+            if not cwd:
+                cwd, found = origin_context()
+                profile = profile or found
+            BotWizard(self, ui, cwd, profile).start()
+        self._shown = True
+
+    def tick(self, ui):
+        now = self.now()
+        if now - self._at >= 2:
+            self._at = now
+            self.refresh()
+            return True
+        if self.mode == "talk":
+            row = self.row(self.talk_id)
+            live = bool(row and row["state"] == "working")
+            if live and now - self._talk_at >= 1 or (not live and self.talk_stamp() != self._stamp):
+                self._talk_at = now
+                return True
+            return False
+        return any(r["state"] == "working" for r in self.rows)
+
+    def hints(self):
+        if self.mode == "talk":
+            return "↵ send  PgUp/PgDn scroll  Esc back"
+        if self.mode == "briefing":
+            return "↑↓ report  ↵ read  a all seen  Esc back  ? help  q close"
+        if self.detail:
+            return "↑↓ run  v report  r run now  Esc back  ? help  q close"
+        return "n new  ↵ details  space pause  r run  e edit  m memory  s skip  d delete  ? help  q close"
+
+    def captures(self, mods, key):
+        if mods and mods != {"SHIFT"}:
+            return False
+        if self.mode == "talk":
+            return True
+        if self.mode == "briefing" and key in ("Escape", "Backspace", "a", "Enter", "b"):
+            return True
+        if self.detail and key in ("Escape", "Backspace"):
+            return True
+        return key in ("n", "e", "r", "s", "d", "m", "c", "v", "b", "t", "?", "Enter", "Space")
+
+    # commands -----------------------------------------------------------------
+    def tell(self, op, sid):
+        """Sends `op` for bot `sid` to a live scheduler; False when none is running."""
+        if not self.alive:
+            return False
+        try:
+            HS.send_command(HS.command_dir(self.env), {"op": op} if sid is None else {"op": op, "id": sid})
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def state_dir(self, row):
+        return HS.init_state_dir(row["sched"], self.now(), self.env)
+
+    def create(self, ui, spec):
+        try:
+            rec = self.store.add(spec, now=int(self.now()), origin="panel")
+            HS.init_state_dir(rec, self.now(), self.env)
+        except (ValueError, OSError) as exc:
+            ui.say(f"could not create the bot: {exc}", True)
+            return
+        self.tell("reload", None)
+        self.refresh()
+        self.cursor = next((i for i, r in enumerate(self.rows) if r["id"] == rec["id"]), self.cursor)
+        ui.say(f"created {rec['name']}: {HS.describe(rec['when'], self.now())}")
+
+    def toggle_pause(self, ui, row):
+        sid = row["id"]
+        resume = not row["enabled"] or bool(row["paused_reason"]) or row["done"]
+        try:
+            new = self.store.change(sid, {"enabled": resume}, now=int(self.now()))
+            if resume:
+                sdir = HS.init_state_dir(new, self.now(), self.env)
+
+                def fn(st):
+                    st["paused_reason"], st["consec_failures"], st["done"] = None, 0, False
+                    st["baseline"] = int(self.now())
+                HS.update_state(sdir, fn)
+        except (ValueError, KeyError, OSError) as exc:
+            ui.say(f"could not change {row['name']}: {exc}", True)
+            return
+        self.tell("reload", None)
+        self.refresh()
+        ui.say(f"{'resumed' if resume else 'paused'} {row['name']}")
+
+    def run_now(self, ui, row):
+        if self.tell("run-now", row["id"]):
+            ui.say(f"asked the scheduler to run {row['name']} now")
+            return
+
+        def mark():
+            HS.update_state(self.state_dir(row), lambda st: st.update(run_now=True))
+
+        def mark_only():
+            mark()
+            ui.say(f"{row['name']} runs as soon as the scheduler starts (not running now)")
+
+        def start_and_mark():
+            mark()
+            ok, message = self.start()
+            ui.say(message if ok else f"{message}; {row['name']} will run when the scheduler starts", not ok)
+
+        ui.open_modal(U.ConfirmModal(f"The scheduler is not running. Start it now and run {row['name']}?",
+                                     start_and_mark, "Run now", yes="Start scheduler", no="Run when it starts",
+                                     on_no=mark_only))
+
+    def skip_next(self, ui, row):
+        if self.tell("skip", row["id"]):
+            ui.say(f"asked the scheduler to skip the next run of {row['name']}")
+            return
+        sched = row["sched"]
+        st = HS.update_state(self.state_dir(row), lambda s: HS.skip_next(sched, s, self.now()))
+        self.refresh()
+        nxt = HS.next_run(sched, st, self.now())
+        ui.say(f"skipped; next {clock_text(nxt, sched['when'].get('tz', 'local'), self.now()) if nxt else 'none'}")
+
+    def cancel_run(self, ui, row):
+        if not row["running"]:
+            ui.say(f"{row['name']} is not running", True)
+        elif self.tell("cancel", row["id"]):
+            ui.say(f"asked the scheduler to cancel the run of {row['name']}")
+        else:
+            ui.say("the scheduler is not running: it can not cancel a run", True)
+
+    def delete(self, ui, row):
+        def go():
+            try:
+                self.store.remove(row["id"])
+                sdir = HS.state_dir(row["id"], self.env)
+                if os.path.isdir(sdir) and not os.path.islink(sdir):
+                    shutil.rmtree(sdir, ignore_errors=True)
+            except (OSError, ValueError) as exc:
+                ui.say(f"could not delete {row['name']}: {exc}", True)
+                return
+            self.tell("reload", None)
+            self.detail = None
+            self.refresh()
+            ui.say(f"deleted {row['name']}")
+        ui.open_modal(U.ConfirmModal(f"Delete {row['name']} and its run history?", go, "Delete bot"))
+
+    def view_report(self, ui, run):
+        path = run.get("report_path") if run else None
+        if not path or not os.path.isfile(path):
+            ui.say("that run left no report", True)
+            return
+        pager = os.environ.get("PAGER") or "less"
+        ui.suspend()
+        try:
+            self.editor(shlex.split(pager) + [path])
+        except (OSError, ValueError) as exc:
+            ui.say(f"could not run the pager: {exc}", True)
+        finally:
+            ui.resume()
+
+    # editing ------------------------------------------------------------------
+    def run_editor(self, ui, path):
+        """Runs $VISUAL / $EDITOR on `path` with the terminal handed over; -> an error text or None."""
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or next((c for c in ("nano", "vi") if shutil.which(c)), "")
+        if not editor:
+            return "No editor found: set $EDITOR."
+        try:
+            argv = shlex.split(editor) + [path]
+        except ValueError as exc:
+            return f"$EDITOR does not parse: {exc}"
+        ui.suspend()
+        try:
+            r = self.editor(argv)
+        except OSError as exc:
+            return f"could not run {argv[0]}: {exc.strerror or exc}"
+        finally:
+            ui.resume()
+        code = getattr(r, "returncode", 0)
+        return f"{argv[0]} exited with status {code}: nothing was changed" if code else None
+
+    def edit(self, ui, row):
+        tmp = tempfile.mkdtemp(prefix="hivegrid-bot-")
+        path = os.path.join(tmp, f"{row['id']}.json.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(edit_text(row["sched"]))
+        self.edit_again(ui, row, tmp, path)
+
+    def edit_again(self, ui, row, tmp, path):
+        done = lambda: shutil.rmtree(tmp, ignore_errors=True)  # noqa: E731
+        err = self.run_editor(ui, path)
+        if err:
+            done()
+            ui.say(err, True)
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                new = f.read()
+            if new == edit_text(row["sched"]):
+                done()
+                ui.say("no changes")
+                return
+            self.apply(row, parse_edit_text(new))
+        except (ValueError, KeyError, OSError) as exc:
+            ui.open_modal(U.ConfirmModal(f"Not saved: {exc.args[0] if isinstance(exc, KeyError) else exc}", lambda: self.edit_again(ui, row, tmp, path),
+                                         "Invalid bot", yes="Edit again", no="Discard", on_no=done))
+            return
+        done()
+        self.refresh()
+        ui.say(f"saved {row['name']}")
+
+    def apply(self, row, doc):
+        """Replaces the record of `row` by `doc` (ValueError with the reason when it does not validate)."""
+        sid, now = row["id"], int(self.now())
+        perms = doc.get("run", {}).get("permissions") if isinstance(doc.get("run"), dict) else None
+        if perms == "full" and row["sched"]["run"]["permissions"] != "full" and not self.cfg()["allow_full"]:
+            raise ValueError("permissions full needs \"schedule\": {\"allow_full\": true} in settings.json")
+        if doc.get("id") != sid:
+            raise ValueError("the id cannot change")
+
+        def fn(recs):
+            for i, r in enumerate(recs):
+                if r["id"] == sid:
+                    recs[i] = HS.validate(dict(doc, created=r["created"], updated=now))
+                    return copy.deepcopy(recs[i])
+            raise KeyError(f"{row['name']} is gone")
+        new = self.store.mutate(fn)
+        HS.init_state_dir(new, now, self.env)
+        HS.sync_identity(new, self.env)
+        self.tell("reload", None)
+
+    def edit_memory(self, ui, row):
+        sched = row["sched"]
+        path = HS.memory_path(row["id"], self.env)
+        if not sched["identity"]["memory"] and not os.path.exists(path):
+            ui.say(f"{row['name']} has no memory: agents always have one, a task only with identity.memory", True)
+            return
+        self.state_dir(row)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                before = f.read()
+        except FileNotFoundError:
+            before = ""
+        except OSError as exc:
+            ui.say(f"could not read memory.md: {exc.strerror or exc}", True)
+            return
+        tmp = tempfile.mkdtemp(prefix="hivegrid-bot-")
+        try:
+            copy_path = os.path.join(tmp, "memory.md")
+            with open(copy_path, "w", encoding="utf-8") as f:
+                f.write(before)
+            err = self.run_editor(ui, copy_path)
+            if err:
+                ui.say(err, True)
+                return
+            with open(copy_path, encoding="utf-8", errors="replace") as f:
+                after = f.read()
+            if after == before:
+                ui.say("memory unchanged")
+                return
+            HS.atomic_write(path, after)
+            cut = HS.enforce_memory_cap(sched, self.env)
+            cap = sched["identity"]["memory_max_bytes"]
+            ui.say(f"memory saved" + (f"; cut to its cap of {cap} bytes (the oldest lines went)" if cut else ""))
+        except OSError as exc:
+            ui.say(f"could not save memory.md: {exc.strerror or exc}", True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # events -------------------------------------------------------------------
+    def open_detail(self, ui, row=None):
+        row = row or self.current()
+        if row is None:
+            return
+        self.detail, self.run_cursor = row["id"], 0
+        self.load_runs()
+        self.fresh = {r.get("run") for r in self.runs if r.get("seen") is False}
+        if self.fresh:
+            HS.mark_seen(row["id"], env=self.env)
+            self.refresh()
+
+    def move(self, step):
+        if self.mode == "briefing":
+            self.brief_cursor = max(0, min(len(self.brief) - 1, self.brief_cursor + step))
+        elif self.mode == "talk":
+            self.scroll = max(0, self.scroll - step * 3)
+        elif self.detail:
+            self.run_cursor = max(0, min(len(self.runs) - 1, self.run_cursor + step))
+        else:
+            self.cursor = max(0, min(len(self.rows) - 1, self.cursor + step))
+
+    def wheel(self, ui, dy):
+        self.move(dy)
+
+    def key(self, ui, mods, key):
+        steps = {"UpArrow": -1, "DownArrow": 1, "PageUp": -self.page_rows, "PageDown": self.page_rows,
+                 "Home": -10 ** 6, "End": 10 ** 6}
+        row = self.row(self.detail) if self.detail else self.current()
+        if self.mode == "talk":
+            return self.talk_key(ui, mods, key)
+        if self.mode == "briefing" and self.briefing_key(ui, key):
+            return
+        if key == "b":
+            self.open_briefing()
+            return
+        if key == "t" and row:
+            self.open_talk(row["id"])
+            return
+        if key in steps:
+            self.move(steps[key])
+        elif key == "n":
+            cwd, profile = (self.cwd or "", self.profile or "")
+            if not cwd:
+                cwd, found = origin_context()
+                profile = profile or found
+            BotWizard(self, ui, cwd, profile).start()
+        elif key == "?":
+            ui.open_modal(HelpModal("Bots", BOT_HELP))
+        elif key in ("Escape", "Backspace") and self.detail:
+            self.detail = None
+        elif row is None:
+            return
+        elif key == "Enter" and not self.detail:
+            self.open_detail(ui)
+        elif key == "e":
+            self.edit(ui, row)
+        elif key == "m":
+            self.edit_memory(ui, row)
+        elif key == "Space":
+            self.toggle_pause(ui, row)
+        elif key == "r":
+            self.run_now(ui, row)
+        elif key == "s":
+            self.skip_next(ui, row)
+        elif key == "c":
+            self.cancel_run(ui, row)
+        elif key == "d":
+            self.delete(ui, row)
+        elif key == "v" and self.detail and self.runs:
+            self.view_report(ui, self.runs[self.run_cursor])
+
+    # drawing ------------------------------------------------------------------
+    def status_cells(self, p, now):
+        """The scheduler status as [(text, colour)] segments."""
+        if self.alive:
+            hb = (self.doc or {}).get("scheduler", {}).get("heartbeat")
+            age = f" · heartbeat {span_text(now - hb)} ago" if isinstance(hb, (int, float)) and now - hb >= 60 else ""
+            return [("● Scheduler running", p["green"]), (age, p["dim"])]
+        return [("○ Scheduler not running", p["amber"]), (" · start it: ", p["muted"]),
+                (scheduler_command(self.env)[1], p["text"])]
+
+    def columns(self, inner):
+        """[(key, width)] of the columns beside the name that fit `inner` cells: the least useful go first."""
+        cols = [("kind", 9), ("when", 19), ("next", 16), ("last", 17), ("account", 10), ("access", 10), ("mode", 10)]
+        for drop in ("mode", "access", "account", "kind", "when"):
+            if sum(w for _, w in cols) + 18 <= inner:
+                break
+            cols = [c for c in cols if c[0] != drop]
+        return cols
+
+    def cells(self, ui, r, now):
+        """The text cell of every column of row r: {key: (text, colour, attrs)}."""
+        p = ui.pal
+        sched, last = r["sched"], r["last"]
+        if r["running"]:
+            nxt = (f"running {human_age(now - (r['running'].get('started') or now))}", p["accent"])
+        elif r["paused_reason"]:
+            nxt = ("paused", p["amber"])
+        elif not r["enabled"] or r["done"] or r["next_at"] is None:
+            nxt = ("finished" if r["done"] else "off" if not r["enabled"] else "—", p["dim"])
+        else:
+            nxt = ("in " + span_text(r["next_at"] - now), p["text"])
+        if last:
+            status = last.get("status") or "?"
+            age = span_text(now - (last.get("ended") or last.get("started") or now))
+            color = p[RESULT_COLOR.get(status, "dim")]
+            unseen = last.get("seen") is False
+            res = (("● " if unseen else "") + f"{status} {age}", color if unseen else U.mix(color, p["dim"], 0.55), BOLD if unseen else 0)
+        else:
+            res = ("no run yet", p["dim"], 0)
+        perm = sched["run"]["permissions"]
+        return {
+            "kind": (f"{BOT_KIND_ICON[r['kind']]} {r['kind']}", p["text"] if r["kind"] == "agent" else p["muted"], 0),
+            "when": (r["when_text"], p["muted"], 0), "next": (*nxt, 0), "last": res,
+            "account": (sched["run"]["account"] or "default", p["muted"] if sched["run"]["account"] else p["dim"], 0),
+            "access": (perm, p["red"] if perm == "full" else p["muted"], BOLD if perm == "full" else 0),
+            "mode": (sched["run"]["mode"], p["dim"], 0),
+        }
+
+    def render(self, ui, cv, x, y, w, h):
+        p = ui.pal
+        now = self.now()
+        col = None
+        if w >= U.WIDE_COLS:
+            ox, tw = U.content_box(w, 130)
+            x, w, col = x + ox, tw, (x + ox, tw)
+        # scheduler status and the buttons on the first row
+        right = x + w - 1
+        unseen = sum(1 for e in self.brief if not e["seen"])
+        chips = [("Briefing" + (f" ● {unseen}" if unseen else ""), lambda b: self.open_briefing(), "button"),
+                 ("New", lambda b: self.key(ui, set(), "n"), "primary")]
+        if not self.alive:
+            chips.insert(0, ("Start", lambda b: self.start_now(ui), "button"))
+        for label, fn, kind in reversed(chips):
+            right -= U.chip_width(label)
+            U.chip(cv, p, right, y, label, kind=kind, bg=p["base"], hit=fn)
+            right -= 1
+        pos = x + 2
+        for text, colour in self.status_cells(p, now):
+            room = right - pos - 1
+            if room <= 0:
+                break
+            pos += cv.put(pos, y, U.fit_cells(text, room), colour)
+        if self.mode == "talk" and self.row(self.talk_id):
+            self.render_talk(ui, cv, x, y + 2, w, h - 2, now)
+            return col
+        if self.mode == "briefing":
+            self.render_briefing(ui, cv, x, y + 2, w, h - 2, now)
+            return col
+        if self.detail and self.row(self.detail):
+            self.render_detail(ui, cv, x, y + 2, w, h - 2, now)
+            return col
+        if self.error:
+            U.empty_state(cv, p, x + 2, y + 2, w - 4, self.error)
+            return col
+        if not self.rows:
+            U.empty_state(cv, p, x + 2, y + 2, w - 4, "No bots yet.",
+                          "A bot runs an omp agent on a schedule in the background and reports here. Press n to "
+                          "create one, or use hivegrid-schedule add on the command line.")
+            self.render_notes(cv, p, x, y + 6, w)
+            return col
+        inner = w - 4 - 1
+        cols = self.columns(inner)
+        name_w = inner - sum(wd for _, wd in cols)
+        hy = y + 2
+        pos = x + 4
+        cv.put(pos, hy, "name".ljust(name_w - 2), p["muted"], None, BOLD)
+        pos += name_w
+        heads = {"kind": "kind", "when": "when", "next": "next", "last": "last result", "account": "account",
+                 "access": "access", "mode": "mode"}
+        for key, wd in cols:
+            cv.put(pos, hy, heads[key], p["muted"], None, BOLD)
+            pos += wd
+        cv.fill(x, hy + 1, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        self.page_rows = body = max(h - 7, 1)
+        self.cursor = max(0, min(self.cursor, len(self.rows) - 1))
+        self.top = min(max(self.top, self.cursor - body + 1), self.cursor, max(len(self.rows) - body, 0))
+        for i in range(self.top, min(self.top + body, len(self.rows))):
+            r = self.rows[i]
+            row = hy + 2 + i - self.top
+            sel = i == self.cursor
+            glyph, _, gcolor = U.state_style(p, r["state"], now if r["state"] == "working" else None)
+            bg = U.list_row(cv, p, row, x=x, w=w, selected=sel, bg=p["base"], glyph=glyph, glyph_color=gcolor,
+                            hit=lambda b, i=i: (setattr(self, "cursor", i), self.open_detail(ui))).bg
+            name_color = p["bright"] if sel or r["unseen"] else p["text"]
+            cv.put(x + 4, row, U.fit_text(r["name"], name_w - 2), name_color, bg, BOLD if sel or r["unseen"] else 0)
+            cells = self.cells(ui, r, now)
+            pos = x + 4 + name_w
+            for key, wd in cols:
+                text, colour, attrs = cells[key]
+                cv.put(pos, row, U.fit_text(text, wd - 2), colour, bg, attrs)
+                pos += wd
+        shown = min(body, len(self.rows) - self.top)
+        self.render_notes(cv, p, x, hy + 2 + shown + 1, w)
+        return col
+
+    def render_notes(self, cv, p, x, y, w):
+        n, running = len(self.rows), sum(1 for r in self.rows if r["state"] == "working")
+        unseen = sum(r["unseen"] for r in self.rows)
+        line = f"{n} bot{'s' if n != 1 else ''} · {running} running" + (f" · {unseen} unseen result{'s' if unseen != 1 else ''}" if unseen else "")
+        cv.put(x + 2, y, U.fit_cells(line, w - 4), p["dim"])
+        if self.errors:
+            sid, msg = self.errors[0]
+            more = f" (+{len(self.errors) - 1} more)" if len(self.errors) > 1 else ""
+            cv.put(x + 2, y + 1, U.fit_cells(f"{len(self.errors)} schedule{'s' if len(self.errors) != 1 else ''} skipped: {sid}: {msg}{more}", w - 4), p["amber"])
+
+    # briefing -----------------------------------------------------------------
+    def open_briefing(self):
+        self.mode, self.brief_open = "briefing", False
+        self.refresh()
+
+    def briefing_key(self, ui, key):
+        """Keys of the Briefing page; True when handled."""
+        entry = self.brief[self.brief_cursor] if self.brief else None
+        if key in ("Escape", "Backspace", "b"):
+            self.mode = "list"
+        elif key == "a":
+            n = HS.mark_briefing_seen(self.env)
+            self.refresh()
+            ui.say(f"marked {n} report{'s' if n != 1 else ''} seen" if n else "nothing new")
+        elif key == "Enter" and entry:
+            self.brief_open = not self.brief_open
+            if self.brief_open and not entry["seen"]:
+                HS.mark_seen(entry["bot_id"], entry["run"], env=self.env)
+                self.refresh()
+        else:
+            return False
+        return True
+
+    def report_text(self, entry):
+        """The report file of a Briefing entry (the first 4000 characters), else its headline."""
+        try:
+            with open(HS.report_path(entry["bot_id"], entry["run"], self.env), encoding="utf-8", errors="replace") as f:
+                text = f.read(4000)
+        except OSError:
+            return entry["headline"]
+        return chat_text(text, 4000).strip() or entry["headline"]
+
+    def render_briefing(self, ui, cv, x, y, w, h, now):
+        p = ui.pal
+        U.chip(cv, p, x + 1, y, "‹ Back", kind="button", bg=p["base"], hit=lambda b: setattr(self, "mode", "list"))
+        unseen = sum(1 for e in self.brief if not e["seen"])
+        pos = x + 1 + U.chip_width("‹ Back") + 2
+        pos += cv.put(pos, y, "Briefing", p["bright"], None, BOLD)
+        cv.put(pos + 2, y, f"{unseen} new" if unseen else "nothing new", p["accent"] if unseen else p["dim"])
+        if unseen:
+            U.chip(cv, p, x + w - 1 - U.chip_width("Mark all seen"), y, "Mark all seen", kind="button", bg=p["base"],
+                   hit=lambda b: self.briefing_key(ui, "a"))
+        cv.fill(x, y + 1, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        if not self.brief:
+            U.empty_state(cv, p, x + 2, y + 3, w - 4, "Nothing important.",
+                          "Only what you should know or decide shows here. Quiet runs stay in each bot's own history.")
+            return
+        open_h = min(7, max(h - 8, 0)) if self.brief_open else 0
+        rows = max((h - 3 - open_h) // 2, 1)
+        self.page_rows = rows
+        top = min(max(self.brief_cursor - rows + 1, 0), max(len(self.brief) - rows, 0))
+        for k in range(top, min(top + rows, len(self.brief))):
+            e = self.brief[k]
+            fresh = not e["seen"]
+            glyph, _, color = U.state_style(p, RUN_STATE.get(e["status"], "done"))
+            age = span_text(now - (e.get("ended") or now))
+            U.list_row(cv, p, y + 2 + (k - top) * 2, x=x, w=w, lines=2, selected=k == self.brief_cursor, bg=p["base"],
+                       glyph="●" if fresh else glyph, glyph_color=p["accent"] if fresh else color,
+                       name=e["headline"], name_color=p["bright"] if fresh else p["text"], name_attrs=BOLD if fresh else None,
+                       sub=f"{e['bot_name']} · {e['status']} · {age} ago",
+                       hit=lambda b, k=k: (setattr(self, "brief_cursor", k), self.briefing_key(ui, "Enter")))
+        if open_h:
+            by = y + 2 + min(rows, len(self.brief)) * 2
+            cv.fill(x, by, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+            lines = []
+            for para in self.report_text(self.brief[self.brief_cursor]).splitlines():
+                lines += textwrap.wrap(para, max(w - 4, 10)) or [""]
+            for j, line in enumerate(lines[:open_h - 1]):
+                cv.put(x + 2, by + 1 + j, line, p["text"])
+
+    # talk ---------------------------------------------------------------------
+    def open_talk(self, sid):
+        self.mode, self.talk_id, self.draft, self.scroll, self.talk_note = "talk", sid, "", 0, ("", False)
+        self.detail = None
+        self._stamp = None
+
+    def talk_stamp(self):
+        sf = HS.conversation(self.talk_id, self.env)["session_file"] if self.talk_id else None
+        return self.chat.stamp(sf) if sf else None
+
+    def talk_key(self, ui, mods, key):
+        if key == "Escape":
+            self.mode = "list"
+        elif key == "Enter":
+            self.send(ui)
+        elif key == "Backspace":
+            self.draft = self.draft[:-1]
+        elif key == "PageUp":
+            self.scroll += max(self.page_rows, 5)
+        elif key == "PageDown":
+            self.scroll = max(self.scroll - max(self.page_rows, 5), 0)
+        elif key == "Space" and not mods:
+            self.draft += " "
+        elif len(key) == 1 and mods <= {"SHIFT"} and len(self.draft) < HS.CHAT_MAX:
+            self.draft += key.upper() if "SHIFT" in mods else key
+
+    def send(self, ui):
+        text = self.draft.strip()
+        if not text:
+            return
+        try:
+            got = HS.say(self.talk_id, text, env=self.env, now=self.now())
+        except HS.ScheduleError as exc:
+            code = getattr(exc, "code", None)
+            if code == "no_daemon":
+                self.talk_note = (f"scheduler not running: {scheduler_command(self.env)[1]}", True)
+            elif code == "queue_full":
+                self.talk_note = ("queue_full: 5 messages already wait for this bot", True)
+            else:
+                self.talk_note = (str(exc), True)
+            return
+        except ValueError as exc:
+            self.talk_note = (str(exc), True)
+            return
+        self.draft, self.scroll = "", 0
+        self.talk_note = (f"queued #{got['position']}: it runs when the bot is free" if got["queued"] else "sent", False)
+
+    def transcript(self, path, width):
+        """[(text, palette key, attrs)] lines of the session's chat (the shared parser), tool calls one line each."""
+        got = self.chat.window(path, 200) if path else None
+        out = []
+        for it in got[0] if got else []:
+            kind, role, text = it["kind"], it["role"], it["text"] or ""
+            if kind == "tool":
+                tool = it["tool"] or {}
+                mark = {"error": "red", "running": "accent"}.get(tool.get("status"), "dim")
+                out.append((U.fit_cells(f"▸ {tool.get('name', 'tool')} {text}".rstrip(), width), mark, 0))
+            elif kind == "text" and role in ("user", "assistant"):
+                lead = "› " if role == "user" else "  "
+                for para in text.splitlines() or [""]:
+                    for j, line in enumerate(textwrap.wrap(para, max(width - 2, 10)) or [""]):
+                        out.append(((lead if j == 0 else "  ") + line, "accent" if role == "user" else "text",
+                                    BOLD if role == "user" else 0))
+                out.append(("", "text", 0))
+            elif kind in ("limit", "note"):
+                out.append((U.fit_cells(f"· {text}", width), "amber" if kind == "limit" else "dim", 0))
+        return out
+
+    def render_talk(self, ui, cv, x, y, w, h, now):
+        p = ui.pal
+        r = self.row(self.talk_id)
+        info = HS.conversation(self.talk_id, self.env)
+        U.chip(cv, p, x + 1, y, "‹ Back", kind="button", bg=p["base"], hit=lambda b: setattr(self, "mode", "list"))
+        glyph, label, gcolor = U.state_style(p, r["state"], now if r["state"] == "working" else None)
+        pos = x + 1 + U.chip_width("‹ Back") + 2
+        pos += cv.put(pos, y, f"{BOT_KIND_ICON[r['kind']]} ", p["muted"])
+        pos += cv.put(pos, y, U.fit_cells(r["name"], max(w - pos - 24, 8)), p["bright"], None, BOLD)
+        cv.put(pos + 2, y, f"{glyph} {label}", gcolor)
+        live = f"a {info['activity']} is live" if info["activity"] else "idle"
+        cv.put(x + 2, y + 1, U.fit_cells(f"Talk · {live}" + (f" · {info['queue']} waiting" if info["queue"] else ""), w - 4), p["muted"])
+        cv.fill(x, y + 2, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        body = max(h - 6, 1)
+        self.page_rows = body
+        sf = info["session_file"]
+        lines = self.transcript(sf, w - 4)
+        self._stamp = self.chat.stamp(sf) if sf else None
+        if not lines:
+            U.empty_state(cv, p, x + 2, y + 3, w - 4, "No messages yet.",
+                          "The session has no messages yet." if sf else "Write below: the bot answers in its own session.")
+        self.scroll = max(0, min(self.scroll, max(len(lines) - body, 0)))
+        end = len(lines) - self.scroll
+        for j, (text, key, attrs) in enumerate(lines[max(end - body, 0):end]):
+            cv.put(x + 2, y + 3 + j, U.fit_cells(text, w - 4), p[key], None, attrs)
+        if self.scroll:
+            cv.put(x + w - 14, y + 2, f"↓ {self.scroll} more", p["dim"], p["base"])
+        note, bad = self.talk_note
+        if info["error"] and not note:
+            note, bad = f"last turn failed: {info['error']}", True
+        if note:
+            cv.put(x + 2, y + h - 3, U.fit_cells(note, w - 4), p["red"] if bad else p["muted"])
+        cv.fill(x + 1, y + h - 2, w - 2, 1, bg=p["deep"])
+        cv.hit(x + 1, y + h - 2, w - 2, 1, lambda b: None)
+        shown = self.draft[-(w - 8):]
+        cv.put(x + 3, y + h - 2, "▏" + shown, p["accent"], p["deep"])
+        cv.put(x + 4, y + h - 2, shown, p["bright"], p["deep"])
+        if not shown:
+            cv.put(x + 5, y + h - 2, "Talk to the bot", p["dim"], p["deep"])
+
+    def start_now(self, ui):
+        ok, message = self.start()
+        ui.say(message, not ok)
+
+    def render_detail(self, ui, cv, x, y, w, h, now):
+        p = ui.pal
+        r = self.row(self.detail)
+        sched = r["sched"]
+        U.chip(cv, p, x + 1, y, "‹ Back", kind="button", bg=p["base"], hit=lambda b: setattr(self, "detail", None))
+        U.chip(cv, p, x + w - 1 - U.chip_width("Talk"), y, "Talk", kind="primary", bg=p["base"],
+               hit=lambda b, sid=self.detail: self.open_talk(sid))
+        glyph, label, gcolor = U.state_style(p, r["state"], now if r["state"] == "working" else None)
+        pos = x + 1 + U.chip_width("‹ Back") + 2
+        pos += cv.put(pos, y, f"{BOT_KIND_ICON[r['kind']]} ", p["muted"])
+        pos += cv.put(pos, y, U.fit_cells(r["name"], max(w - pos - 24, 8)), p["bright"], None, BOLD)
+        cv.put(pos + 2, y, f"{glyph} {label}", gcolor)
+        run = sched["run"]
+        nxt = f"next in {span_text(r['next_at'] - now)}" if r["next_at"] and r["enabled"] and not r["paused_reason"] else "no next run"
+        facts = [f"{r['when_text']}", nxt, U.home_path(run["cwd"]), f"account {run['account'] or 'default'}",
+                 f"{run['permissions']} · {run['mode']}"]
+        cv.put(x + 2, y + 1, U.fit_cells(" · ".join(facts), w - 4), p["muted"])
+        note = ""
+        if r["paused_reason"]:
+            cv.put(x + 2, y + 2, U.fit_cells(f"Paused: {r['paused_reason']} · space resumes it", w - 4), p["amber"])
+        else:
+            prompt = " ".join(sched["task"]["prompt"].split())
+            cv.put(x + 2, y + 2, U.fit_cells(prompt, w - 4), p["dim"])
+        cv.put(x + 2, y + 3, "runs", p["muted"], None, BOLD)
+        cv.fill(x, y + 4, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+        if not self.runs:
+            U.empty_state(cv, p, x + 2, y + 5, w - 4, "No runs yet.", "The first one appears here after the schedule fires" + (f"; press r to run it now." if self.row(self.detail) else "."))
+            return
+        block = min(5, max(h - 10, 0))  # lines for the selected run's full text
+        per = 2
+        body = max((h - 5 - (block + 1 if block else 0)) // per, 1)
+        self.page_rows = body
+        self.run_cursor = max(0, min(self.run_cursor, len(self.runs) - 1))
+        top = min(max(self.run_cursor - body + 1, 0), max(len(self.runs) - body, 0))
+        for k in range(top, min(top + body, len(self.runs))):
+            rec = self.runs[k]
+            ry = y + 5 + (k - top) * per
+            status = rec.get("status") or "?"
+            sglyph, _, scolor = U.state_style(p, RUN_STATE.get(status, "idle"))
+            took = span_text((rec["ended"] - rec["started"])) if rec.get("ended") and rec.get("started") else "—"
+            cost = f"${rec['cost_usd']:.2f}" if isinstance(rec.get("cost_usd"), (int, float)) else "—"
+            fresh = rec.get("run") in self.fresh
+            name = f"{'● ' if fresh else ''}{status} · {span_text(now - (rec.get('ended') or rec.get('started') or now))} ago · took {took}"
+            sub = (rec.get("error") if status not in ("ok",) and rec.get("error") else rec.get("summary")) or ""
+            U.list_row(cv, p, ry, x=x, w=w, lines=per, selected=k == self.run_cursor, bg=p["base"], glyph=sglyph, glyph_color=scolor,
+                       num=f"#{rec.get('run')}", num_w=4, name=name, name_color=p["bright"] if fresh else p["text"],
+                       name_attrs=BOLD if fresh else None, right=f"{rec.get('trigger') or ''} · {cost}", sub=" ".join(sub.split()),
+                       hit=lambda b, k=k: setattr(self, "run_cursor", k))
+        if block:
+            rec = self.runs[self.run_cursor]
+            by = y + 5 + min(body, len(self.runs)) * per + 1
+            cv.fill(x, by, w, 1, fg=U.rule_color(p, p["base"]), ch="─")
+            text = rec.get("summary") or rec.get("error") or "No summary."
+            if rec.get("error") and rec.get("status") != "ok" and rec.get("summary"):
+                text = f"{rec['summary']} — {rec['error']}"
+            lines = textwrap.wrap(" ".join(text.split()), max(w - 4, 10))[:block]
+            for j, line in enumerate(lines):
+                cv.put(x + 2, by + 1 + j, line, p["text"] if rec.get("status") == "ok" else p["amber"])

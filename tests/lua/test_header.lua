@@ -178,6 +178,22 @@ T.test('plan: a tier that is not narrower than the current one is skipped', func
   T.eq({ g.A.tier, g.B.tier, g.C.tier }, { 1, math.huge, 1 }, 'equal-width tiers are skipped, only the drop acts')
 end)
 
+T.test('plan: the bots group D narrows to its second tier, then is dropped, before anything else', function(wz)
+  local hd = module(wz)
+  T.eq(hd.PLAN[1], { 'tier', 'D', 2 })
+  T.eq(hd.PLAN[2], { 'drop', 'D' })
+  local function run(avail)
+    local g = { A = group(40, 30, 20, 12), B = group(40, 30, 20, 12, 5), C = group(30, 14, 4), D = group(20, 12, 4) }
+    local ok = hd.fit(g, 0, avail)
+    return { ok, g.A.tier, g.B.tier, g.C.tier, g.D.tier }
+  end
+  T.eq(run(300), { true, 1, 1, 1, 1 })
+  T.eq(run(135), { true, 1, 1, 1, 2 }, 'D narrows first')
+  T.eq(run(125), { false, 1, 1, 1, math.huge }, 'then D goes, the rest untouched')
+  local g = { A = group(10), B = group(), C = group(6), D = group() }
+  T.eq(hd.fit(g, 0, 100), true, 'groups without tiers are fine')
+end)
+
 -- The whole header ---------------------------------------------------------------------------------
 
 -- Loads config/wezterm.lua over fixture quota and system files; returns a window of one tab.
@@ -251,6 +267,25 @@ T.test('the whole header narrows with the window and keeps the project and the C
   T.ok(seen[1]:find('5h', 1, true))
   T.ok(not seen[4]:find('5h', 1, true) and not seen[4]:find('GPU', 1, true), 'narrow: the metadata went first')
   for i = 2, #seen do T.ok(#seen[i] <= #seen[i - 1], 'never wider than the window before') end
+end)
+
+T.test('the page switcher leads the right side on the fork with the web pane, and never goes when the window narrows', function(wz)
+  T.clock(T0)
+  wz.stub.web = true
+  local right = main(wz, agents(wz, repo('hivegrid')), 2560)
+  local canvas, bots, project = right:find('Canvas', 1, true), right:find('Bots', 1, true), right:find('hivegrid', 1, true)
+  T.ok(canvas and bots and project and canvas < bots and bots < project, 'Canvas, Bots, then the project: ' .. right)
+  local wz2 = T.fresh()
+  T.clock(T0)
+  wz2.stub.web = true
+  local narrow = main(wz2, agents(wz2, repo('hivegrid')), 640)
+  T.ok(narrow:find('Canvas', 1, true) and narrow:find('Bots', 1, true), 'still there at 640 px: ' .. narrow)
+end)
+
+T.test('on stock WezTerm there is no page switcher', function(wz)
+  T.clock(T0)
+  local right = main(wz, agents(wz, repo('hivegrid')), 2560)
+  T.ok(not right:find('Canvas', 1, true), right)
 end)
 
 T.test('without a repository the project is the directory and there is no branch', function(wz)

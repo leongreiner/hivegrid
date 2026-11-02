@@ -64,8 +64,8 @@ T.test('STATES: the shared agent vocabulary; limit sits right after needs you', 
     bell = { '!', 'bell', 'red', 3 }, done = { '✓', 'done', 'green', 4 },
     busy = { '◔', 'busy', 'amber', 5 }, working = { '↻', 'working', 'accent', 6 },
     idle = { '·', 'idle', 'grey', 7 }, exited = { '○', 'exited', 'muted', 8 },
-    web = { '◍', 'web', 'cyan', 9 }, other = { '›', 'running', 'dim', 10 },
-    shell = { '›', 'shell', 'dim', 11 },
+    schedule = { '◷', 'waiting', 'cyan', 9 }, web = { '◍', 'web', 'cyan', 10 },
+    other = { '›', 'running', 'dim', 11 }, shell = { '›', 'shell', 'dim', 12 },
   }
   local n = 0
   for kind, s in pairs(th.STATES) do
@@ -75,7 +75,7 @@ T.test('STATES: the shared agent vocabulary; limit sits right after needs you', 
     T.eq({ s.glyph, s.text, s.key, s.rank }, w, kind)
     T.eq(s.color, th.P[w[3]], kind .. ' colour follows the palette')
   end
-  T.eq(n, 11)
+  T.eq(n, 12)
 end)
 
 -- Meter -----------------------------------------------------------------------------

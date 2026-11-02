@@ -524,7 +524,8 @@ class TestRemoteSettings(unittest.TestCase):
 
     def test_the_terminal_is_off_unless_the_file_says_true(self):
         self.assertEqual(self.remote(None), {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
-                                             "notify_url": None, "notify_events": ["attention", "done", "limit"]})
+                                             "notify_url": None, "notify_events": ["attention", "done", "limit"],
+                                             "push": False, "push_contact": None})
         for stored in ({}, {"remote": {}}, {"remote": {"terminal": False}}, {"remote": {"terminal": 1}}, {"remote": {"terminal": "true"}},
                        {"remote": {"terminal": "yes"}}, {"remote": {"terminal": None}}, {"remote": "terminal"}, {"remote": [True]},
                        {"remote": True}, {"remote": {"Terminal": True}}, "{not json", "[1]"):
@@ -903,6 +904,17 @@ class TestTerminalFlow(TerminalAppCase):
         self.assertEqual([a for a in self.fake.calls if a[0] in ("spawn", "send-text", "kill-pane")], [])
 
 
+    def test_opening_a_terminal_shows_it_on_the_host_and_a_failure_never_fails_the_phone(self):
+        import unittest.mock
+        self.app.attach_cmd = ["hivegrid-remote", "attach", "--port", "1"]
+        with unittest.mock.patch.object(R.A, "spawn_terminal_pane", return_value=9) as spawn:
+            sid = self.open()["id"]
+        self.assertEqual(spawn.call_args[0][0], ["hivegrid-remote", "attach", "--port", "1", sid])
+        with unittest.mock.patch.object(R.A, "spawn_terminal_pane", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.call("POST", "/api/terminals", {})[0].status, 200)
+        self.assertIn("terminal host pane failed: RuntimeError", "\n".join(self.logs))
+
+
 class TestStatic(TR.AppCase):
     def test_the_emulator_is_served_to_the_page_without_a_token(self):
         for path, ctype in (("/term.js", "text/javascript"), ("/term-view.js", "text/javascript"), ("/term.css", "text/css")):
@@ -922,10 +934,10 @@ class TestStatic(TR.AppCase):
         css = self.call("GET", "/term.css", token=None)[0].body.decode()
         self.assertIn("HGTermView.overview(", app_js)
         self.assertIn("root.HGTermView = { open: open, overview: overview", view)
-        # the swipe listeners exist only through pagerSet(meta.terminal): with the terminal off nothing is registered
+        # the swipe listeners exist only through pagerSet(...): with neither the terminal nor the bots nothing is registered
         self.assertEqual(app_js.count('f.call(document, "pointerdown", pagerDown'), 1)
         self.assertNotIn('document.addEventListener("pointerdown"', app_js)
-        self.assertIn("pagerSet(!!meta.terminal)", app_js)
+        self.assertIn("pagerSet((!!meta.terminal || hasBots()) && !EMBED)", app_js)
         self.assertEqual(app_js.count("pagerDown"), 2, "registered in one place only (definition and the one registration)")
         # the page's rules: no inline script or style, colours only from the theme
         for text in (app_js, view):

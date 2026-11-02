@@ -2,8 +2,9 @@
 
 Three layers, each its own set of files (docs/autostart.md):
 
-  user (no sudo)        systemd user units for `hivegrid-remote` and for Hivegrid itself (restarted when it
-                        crashes, started with the graphical session), and `loginctl enable-linger`;
+  user (no sudo)        systemd user units for `hivegrid-remote`, for `hivegrid-scheduler` (the Bots) and for
+                        Hivegrid itself (restarted when it crashes, started with the graphical session), and
+                        `loginctl enable-linger`;
   --sysctl, --watchdog  a sysctl drop-in that turns kernel faults into a reboot, and the hardware watchdog
                         for a hard hang (files below /etc, written with sudo);
   --autologin           display-manager auto-login, so the session that Hivegrid needs exists after a boot
@@ -27,6 +28,7 @@ from pathlib import Path
 
 MARK = "Managed by hivegrid-autostart"
 REMOTE_UNIT = "hivegrid-remote.service"
+SCHEDULER_UNIT = "hivegrid-scheduler.service"
 GUI_UNIT = "hivegrid.service"
 SYSCTL_FILE = "/etc/sysctl.d/90-hivegrid-recovery.conf"
 WATCHDOG_FILE = "/etc/systemd/system.conf.d/90-hivegrid-watchdog.conf"
@@ -178,6 +180,40 @@ def render_remote_unit(exec_path, home):
         "# No NoNewPrivileges, LockPersonality or RestrictAddressFamilies: in a user unit each of them",
         "# sets the no-new-privs flag (seccomp), which every shell of the phone terminal inherits and",
         "# which makes sudo refuse to run.",
+        "UMask=0077",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ])
+
+
+def render_scheduler_unit(exec_path, home):
+    return "\n".join([
+        f"# {MARK} (docs/autostart.md): `hivegrid-autostart install` rewrites this file,",
+        "# `uninstall` removes it.",
+        "[Unit]",
+        "Description=Hivegrid scheduler (runs the Bots: scheduled omp agents)",
+        "# Never give up: a bot that is due must find the scheduler there whatever happened before.",
+        "StartLimitIntervalSec=0",
+        "",
+        "[Service]",
+        f"ExecStart={_unit_exec(exec_path, home)} run",
+        "Restart=always",
+        "# Wait 3 s after the first crash, 6, 12, ... up to 60 s after repeated ones (systemd 254+).",
+        "RestartSec=3",
+        "RestartSteps=5",
+        "RestartMaxDelaySec=60",
+        "# Exit 1: another scheduler holds the lock or the state directories cannot be used; 2: bad",
+        "# arguments. Looping cannot fix them.",
+        "RestartPreventExitStatus=1 2",
+        "# On stop only the scheduler gets SIGTERM: it ends its runs itself and records them as cancelled;",
+        "# whatever is left in the control group is killed after TimeoutStopSec.",
+        "KillMode=mixed",
+        "TimeoutStopSec=30",
+        "# No NoNewPrivileges, LockPersonality or RestrictAddressFamilies: in a user unit each of them",
+        "# sets the no-new-privs flag (seccomp), which every bot run inherits and which makes sudo refuse",
+        "# to run (a bot with permissions `full` may need it).",
         "UMask=0077",
         "",
         "[Install]",
@@ -571,6 +607,13 @@ def remote_exec(ctx):
     return None
 
 
+def scheduler_exec(ctx):
+    for cand in (ctx.bin_dir / "hivegrid-scheduler", Path(__file__).resolve().parent / "hivegrid-scheduler"):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def gui_exec(ctx):
     cand = ctx.bin_dir / "hivegrid"
     if cand.is_file() and os.access(cand, os.X_OK):
@@ -636,6 +679,20 @@ def cmd_status(ctx):
                  "tailscale serve: " + (" / ".join(s.strip() for s in first) if first else "no output"))
         if not first or "No serve config" in out:
             todo.append("tailscale serve --bg --https=443 http://127.0.0.1:8787   (see docs/remote.md)")
+
+    ctx.say("\nhivegrid-scheduler (runs the Bots)")
+    sexec = scheduler_exec(ctx)
+    if sexec is None:
+        ctx.line("todo", f"hivegrid-scheduler not found in {ctx.bin_dir} or next to this program: run install.sh first")
+        todo.append("install Hivegrid (install.sh) so that hivegrid-scheduler exists")
+    else:
+        st = unit_state(ctx, SCHEDULER_UNIT, render_scheduler_unit(sexec, ctx.home))
+        enabled, active = unit_flags(ctx, SCHEDULER_UNIT)
+        ctx.line("ok" if st == "current" else "todo", f"unit {ctx.unit_dir / SCHEDULER_UNIT}: {st}"
+                 + (" (a unit of your own; install replaces it and keeps a .orig copy)" if st == "foreign" else ""))
+        ctx.line("ok" if enabled == "enabled" else "todo", f"enabled at login/boot: {enabled}; running now: {active}")
+        if st != "current" or enabled != "enabled":
+            todo.append("hivegrid-autostart install   (scheduler unit)")
 
     ctx.say("\nHivegrid window")
     gexec = gui_exec(ctx)
@@ -765,11 +822,16 @@ def install_user(ctx, linger):
     ctx.say("\nuser services (no sudo)")
     changed = False
     rexec = remote_exec(ctx)
+    sexec = scheduler_exec(ctx)
     gexec = gui_exec(ctx)
     if rexec is None:
         ctx.fail(f"hivegrid-remote not found in {ctx.bin_dir} or next to this program (run install.sh)")
     else:
         changed |= _install_unit(ctx, REMOTE_UNIT, render_remote_unit(rexec, ctx.home))
+    if sexec is None:
+        ctx.fail(f"hivegrid-scheduler not found in {ctx.bin_dir} or next to this program (run install.sh)")
+    else:
+        changed |= _install_unit(ctx, SCHEDULER_UNIT, render_scheduler_unit(sexec, ctx.home))
     if gexec is None:
         ctx.fail("no `hivegrid` launcher found (run install.sh)")
     else:
@@ -784,6 +846,8 @@ def install_user(ctx, linger):
             ctx.line("warn", f"no token file {token_file(ctx)}: enabling the remote unit, not starting it. "
                              "Run `hivegrid-remote token`, then `systemctl --user start hivegrid-remote`.")
         _enable_unit(ctx, REMOTE_UNIT, has_token)
+    if sexec is not None:
+        _enable_unit(ctx, SCHEDULER_UNIT, True)
     if gexec is not None:
         _enable_unit(ctx, GUI_UNIT, False)
         ctx.line("info", "Hivegrid is not started now (that would open a second window next to yours): "
@@ -926,11 +990,11 @@ def _uninstall_unit(ctx, name):
 def uninstall_user(ctx):
     ctx.say("\nuser services")
     changed = False
-    for name in (REMOTE_UNIT, GUI_UNIT):
+    for name in (REMOTE_UNIT, SCHEDULER_UNIT, GUI_UNIT):
         changed |= _uninstall_unit(ctx, name)
     if changed:
         ctx.run(["systemctl", "--user", "daemon-reload"])
-        ctx.line("info", "a running Hivegrid or hivegrid-remote is not stopped; "
+        ctx.line("info", "a running Hivegrid, hivegrid-remote or hivegrid-scheduler is not stopped; "
                          "stop it with `systemctl --user stop ...` if you want that")
     state = ctx.load_state()
     if state.get("linger_by_us"):
@@ -1016,9 +1080,11 @@ def cmd_render(ctx, args):
     out = Path(args.dir)
     out.mkdir(parents=True, exist_ok=True)
     rexec = remote_exec(ctx) or ctx.bin_dir / "hivegrid-remote"
+    sexec = scheduler_exec(ctx) or ctx.bin_dir / "hivegrid-scheduler"
     gexec = gui_exec(ctx) or ctx.bin_dir / "hivegrid"
     files = {
         REMOTE_UNIT: render_remote_unit(rexec, ctx.home),
+        SCHEDULER_UNIT: render_scheduler_unit(sexec, ctx.home),
         GUI_UNIT: render_gui_unit(gexec, ctx.home),
         os.path.basename(SYSCTL_FILE): render_sysctl(),
         os.path.basename(WATCHDOG_FILE): render_watchdog(),

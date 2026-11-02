@@ -57,6 +57,23 @@ if not T._popen_wrapped then
   end
 end
 
+-- Base64 decoding, as wezterm.base64_decode.
+local B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function wezterm.base64_decode(text)
+  local out = {}
+  local acc, n = 0, 0
+  for ch in text:gmatch('[^=]') do
+    acc = (acc << 6) | (B64:find(ch, 1, true) - 1)
+    n = n + 6
+    if n >= 8 then
+      n = n - 8
+      out[#out + 1] = string.char((acc >> n) & 255)
+      acc = acc & ((1 << n) - 1)
+    end
+  end
+  return table.concat(out)
+end
+
 function wezterm.run_child_process(argv)
   stub.children[#stub.children + 1] = copy(argv)
   local ok, out, err = stub.on_child(argv)
@@ -520,6 +537,17 @@ function fake.pane(o)
   function p:get_foreground_process_info() return o.process_info end
   function p:has_unseen_output() return o.unseen or false end
   function p:get_user_vars() return o.user_vars or {} end
+  -- Output injected into the terminal state: p.injected lists the strings; an OSC 1337
+  -- SetUserVar (value base64) updates the pane's user vars like the terminal does.
+  p.injected = {}
+  function p:inject_output(text)
+    self.injected[#self.injected + 1] = text
+    local name, value = text:match('\27%]1337;SetUserVar=([^=]*)=([%w+/=]*)\7')
+    if name then
+      o.user_vars = o.user_vars or {}
+      o.user_vars[name] = wezterm.base64_decode(value)
+    end
+  end
   function p:is_alt_screen_active() return o.alt_screen or false end
   function p:get_dimensions()
     return o.dims or { cols = 80, viewport_rows = 24, scrollback_rows = 24, physical_top = 0 }

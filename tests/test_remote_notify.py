@@ -143,5 +143,62 @@ class NotifierTest(unittest.TestCase):
         headers["Title"].encode("ascii")
 
 
+class BotEventTest(unittest.TestCase):
+    """The daemon's helper for a bot's result: title, body and the deep link."""
+
+    def event(self, name="digest", status="failed", summary="boom", base="https://box.tail1234.ts.net"):
+        posts = []
+        N.bot_event(URL, name, status, summary, base, post=lambda u, d, h: posts.append((u, d.decode("utf-8"), h)))
+        return posts[0]
+
+    def test_title_and_body_say_which_bot_and_what_happened(self):
+        url, body, headers = self.event()
+        self.assertEqual((url, body), (URL, "boom"))
+        self.assertEqual((headers["Title"], headers["Priority"], headers["Tags"]), ("Hivegrid bot: digest failed", "4", "x"))
+        titles = {s: self.event(status=s)[2]["Title"] for s in ("ok", "limit", "timeout", "cost", "missed")}
+        self.assertEqual(titles, {"ok": "Hivegrid bot: digest finished", "limit": "Hivegrid bot: digest hit its usage limit",
+                                  "timeout": "Hivegrid bot: digest timed out", "cost": "Hivegrid bot: digest hit its cost cap",
+                                  "missed": "Hivegrid bot: digest missed a run"})
+        self.assertEqual(self.event(status="strange")[2]["Priority"], "3")
+
+    def test_tapping_the_notification_opens_the_bots_menu_when_the_page_address_is_known(self):
+        self.assertEqual(self.event()[2]["Click"], "https://box.tail1234.ts.net/#/bots")
+        self.assertEqual(self.event(base="https://box.ts.net/")[2]["Click"], "https://box.ts.net/#/bots")
+        for base in (None, "", "ftp://x/y", "http://user:pw@h/", "not a url", "http://h/?x=1", 5):
+            self.assertNotIn("Click", self.event(base=base)[2], base)
+
+    def test_the_text_is_one_clean_short_line_and_the_headers_stay_ascii(self):
+        _, body, headers = self.event(name="d\u00fcgest\r\nX-Evil: 1", summary="a\x1b[31m\nb " + "z" * 400)
+        self.assertNotIn("\x1b", body)
+        self.assertNotIn("\n", body)
+        self.assertLessEqual(len(body), 200)
+        self.assertTrue(all("\n" not in v and "\r" not in v for v in headers.values()))
+        headers["Title"].encode("ascii")
+        self.assertLessEqual(len(headers["Title"]), 120)
+
+    def test_send_keeps_its_shape_and_a_failing_server_raises_for_the_caller_to_log(self):
+        posts = []
+        N.send(URL, "t", "b", "5", "bell", post=lambda u, d, h: posts.append((u, d, h)))
+        self.assertEqual(posts, [(URL, b"b", {"Title": "t", "Priority": "5", "Tags": "bell"})])
+
+        def refuse(u, d, h):
+            raise OSError("down")
+        with self.assertRaises(OSError):
+            N.bot_event(URL, "x", "ok", "y", None, post=refuse)
+
+    def test_page_url_is_read_from_settings_tolerantly(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            self.assertIsNone(N.page_url(path), "no file")
+            for doc, want in (({"remote": {"base_url": "https://box.ts.net"}}, "https://box.ts.net"), ({"remote": {"base_url": "x"}}, None),
+                              ({"remote": {}}, None), ({"remote": 5}, None), ([], None), ({"remote": {"base_url": 5}}, None)):
+                with open(path, "w") as f:
+                    json.dump(doc, f)
+                self.assertEqual(N.page_url(path), want, doc)
+            with open(path, "w") as f:
+                f.write("{broken")
+            self.assertIsNone(N.page_url(path))
+
+
 if __name__ == "__main__":
     unittest.main()

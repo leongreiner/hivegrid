@@ -7,7 +7,7 @@
 --                          state's colour, count, label. Sits on the one pill the header has;
 --                          the agent part is the click target `agents`.
 --   hd.git(dir)         -> branch, repo root of a directory (a .git/HEAD read, cached a few seconds)
---   hd.fit(groups, lead_w, avail) -> boolean: runs PLAN over the groups { A, B, C } (each
+--   hd.fit(groups, lead_w, avail) -> boolean: runs PLAN over the groups { A, B, C, D } (each
 --                          { tiers }) and sets .tier on each; true when it fits without a drop
 -- Quota (B) and system stats (C) are muted text by default and take a colour only past a warning
 -- threshold (see claudequota.lua, sysstats.lua), so only green, amber and red carry meaning.
@@ -21,11 +21,14 @@ return function(_config, wezterm, as)
   -- it. Metadata narrows first: the quota bars, the system amounts, then the context's workspace
   -- and branch; the quota group goes before the context loses its last words. The context's
   -- last tier (a short project name and the agent counts), the CPU chip alone and the mode and
-  -- zoom pills are never dropped; the pills' key hints go before any group narrows.
+  -- zoom pills are never dropped; the pills' key hints go before any group narrows. The bots chip
+  -- (D, config/bots.lua) is the least needed: it loses its next run, then goes before anything else. The page
+  -- switcher (P, config/pages.lua) is never dropped; it only loses the Briefing count when nothing else is left to narrow.
   api.PLAN = {
+    { 'tier', 'D', 2 }, { 'drop', 'D' },
     { 'tier', 'B', 2 }, { 'tier', 'C', 2 }, { 'tier', 'A', 2 }, { 'tier', 'B', 3 },
     { 'tier', 'B', 4 }, { 'tier', 'A', 3 }, { 'tier', 'C', 3 }, { 'tier', 'B', 5 },
-    { 'drop', 'B' }, { 'tier', 'A', 4 },
+    { 'drop', 'B' }, { 'tier', 'A', 4 }, { 'tier', 'P', 2 },
   }
   -- Cells between two groups of the right status.
   api.GAP = 2

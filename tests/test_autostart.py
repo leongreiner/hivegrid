@@ -107,7 +107,7 @@ class AutostartTest(unittest.TestCase):
         self.root = os.path.join(self.tmp, "root")
         self.bin = os.path.join(self.home, ".local", "bin")
         os.makedirs(self.bin)
-        for name in ("hivegrid-remote", "hivegrid"):
+        for name in ("hivegrid-remote", "hivegrid-scheduler", "hivegrid"):
             with open(os.path.join(self.bin, name), "w") as fh:
                 fh.write("#!/bin/sh\n")
             os.chmod(os.path.join(self.bin, name), 0o755)
@@ -238,12 +238,13 @@ class AutostartTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(tree(self.tmp), before)
         self.assertEqual(self.runner.calls, [])
-        for path in (self.unit("hivegrid-remote.service"), self.unit("hivegrid.service")):
+        for path in (self.unit("hivegrid-remote.service"), self.unit("hivegrid-scheduler.service"), self.unit("hivegrid.service")):
             self.assertIn(f"would write {path}\n", out)
         for path in ("/etc/sysctl.d/90-hivegrid-recovery.conf", "/etc/gdm3/custom.conf"):
             self.assertIn(f"would write {path} (as root)\n", out)
         self.assertIn("would run: systemctl --user daemon-reload", out)
         self.assertIn("would run: systemctl --user enable --now hivegrid-remote.service", out)
+        self.assertIn("would run: systemctl --user enable --now hivegrid-scheduler.service", out)
         self.assertIn("would run: systemctl --user enable hivegrid.service", out)
         self.assertIn("would run: loginctl enable-linger tester", out)
         self.assertRegex(out, r"would run: sudo install -D -m 0644 /dev/stdin \S*/etc/sysctl\.d/90-hivegrid-recovery\.conf")
@@ -268,9 +269,11 @@ class AutostartTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("ExecStart=%h/.local/bin/hivegrid-remote serve", slurp(self.unit("hivegrid-remote.service")))
         self.assertIn("ExecStart=%h/.local/bin/hivegrid start", slurp(self.unit("hivegrid.service")))
+        self.assertIn("ExecStart=%h/.local/bin/hivegrid-scheduler run\n", slurp(self.unit("hivegrid-scheduler.service")))
         cmds = [c for c, _ in self.runner.calls]
         self.assertIn(["systemctl", "--user", "daemon-reload"], cmds)
         self.assertIn(["systemctl", "--user", "enable", "--now", "hivegrid-remote.service"], cmds)
+        self.assertIn(["systemctl", "--user", "enable", "--now", "hivegrid-scheduler.service"], cmds)  # the bots wait for no token
         self.assertIn(["systemctl", "--user", "enable", "hivegrid.service"], cmds)  # not started: it would open a second window
         self.assertIn(["loginctl", "enable-linger", "tester"], cmds)
         self.assertFalse(any(sudo for _, sudo in self.runner.calls), "the user part never needs sudo")
@@ -296,12 +299,53 @@ class AutostartTest(unittest.TestCase):
         for key in ("NoNewPrivileges", "LockPersonality", "RestrictAddressFamilies"):
             self.assertNotRegex(unit, r"(?m)^" + key + "=")
 
+    def test_scheduler_unit_restarts_always_and_leaves_sudo_working_in_bot_runs(self):
+        unit = A.render_scheduler_unit("/home/tester/.local/bin/hivegrid-scheduler", "/home/tester")
+        lines = unit.splitlines()
+        for want in ("Restart=always", "StartLimitIntervalSec=0", "RestartPreventExitStatus=1 2", "UMask=0077",
+                     "WantedBy=default.target", "ExecStart=%h/.local/bin/hivegrid-scheduler run"):
+            self.assertIn(want, lines)
+        self.assertIn(A.MARK, unit)
+        # In a user unit these set the no-new-privs flag, which every bot run inherits: sudo refuses to run.
+        for key in ("NoNewPrivileges", "LockPersonality", "RestrictAddressFamilies"):
+            self.assertNotRegex(unit, r"(?m)^" + key + "=")
+
+    def test_scheduler_unit_is_installed_enabled_and_started_without_a_token(self):
+        os.unlink(self.token)
+        rc, out = self.cli("install", "--bin-dir", self.bin)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(slurp(self.unit("hivegrid-scheduler.service")),
+                         A.render_scheduler_unit(os.path.join(self.bin, "hivegrid-scheduler"), self.home))
+        self.assertIn("hivegrid-scheduler.service", self.runner.enabled)
+        self.assertIn("hivegrid-scheduler.service", self.runner.active)
+
+    def test_status_reports_the_scheduler_unit(self):
+        rc, out = self.cli("status", "--bin-dir", self.bin)
+        self.assertRegex(out, r"hivegrid-scheduler \(runs the Bots\)")
+        self.assertRegex(out, r"todo +unit \S*hivegrid-scheduler\.service: missing")
+        self.assertIn("hivegrid-autostart install   (scheduler unit)", out)
+        self.cli("install", "--bin-dir", self.bin)
+        rc, out = self.cli("status", "--bin-dir", self.bin)
+        self.assertRegex(out, r"ok +unit \S*hivegrid-scheduler\.service: current")
+        self.assertRegex(out, r"ok +enabled at login/boot: enabled; running now: active")
+
+    def test_render_writes_the_scheduler_unit_and_uninstall_removes_it(self):
+        out_dir = os.path.join(self.tmp, "rendered")
+        rc, out = self.cli("render", out_dir, "--bin-dir", self.bin)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("hivegrid-scheduler.service", os.listdir(out_dir))
+        self.cli("install", "--bin-dir", self.bin)
+        rc, out = self.cli("uninstall", "--bin-dir", self.bin)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.exists(self.unit("hivegrid-scheduler.service")))
+        self.assertNotIn("hivegrid-scheduler.service", self.runner.enabled)
+
     def test_no_token_enables_but_does_not_start_the_remote_unit(self):
         os.unlink(self.token)
         rc, out = self.cli("install", "--bin-dir", self.bin)
         cmds = [c for c, _ in self.runner.calls]
         self.assertIn(["systemctl", "--user", "enable", "hivegrid-remote.service"], cmds)
-        self.assertNotIn("--now", [a for c in cmds for a in c])
+        self.assertNotIn(["systemctl", "--user", "enable", "--now", "hivegrid-remote.service"], cmds)
         self.assertIn("hivegrid-remote token", out)
 
     def test_unit_of_your_own_is_kept_and_restored(self):

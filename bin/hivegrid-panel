@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hivegrid panels: settings, usage history, agent overview and system monitor in one terminal UI.
 
-Usage: hivegrid-panel [settings|usage|agents|monitor|hive] [options]
+Usage: hivegrid-panel [settings|usage|agents|monitor|hive|bots] [options]
        hivegrid-panel picker [--spec FILE] [--dump COLSxROWS]   (the chooser config/picker.lua opens)
 
 Runs in a terminal (WezTerm overlay or tab); the mouse works, so do the keys: Tab or F1-F4 and
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from hivegrid_settings_core import Model, Settings, settings_path  # noqa: E402
 
-PANELS = ["settings", "usage", "agents", "monitor", "hive"]
+PANELS = ["settings", "usage", "agents", "monitor", "hive", "bots"]
 
 
 def main(argv=None):
@@ -37,6 +37,7 @@ def main(argv=None):
         import hivegrid_picker
         return hivegrid_picker.main(argv[1:])
     panel, path, account, rng, history, do_print, dump = "settings", None, None, "24h", None, False, None
+    select, new = None, False
     while argv:
         a = argv.pop(0)
         if a in ("-h", "--help"):
@@ -46,6 +47,8 @@ def main(argv=None):
             panel = a
         elif a == "--print":
             do_print = True
+        elif a == "--new":
+            new = True
         elif a == "--dump" and argv:
             try:
                 cols, rows = argv.pop(0).lower().split("x")
@@ -53,7 +56,7 @@ def main(argv=None):
             except ValueError:
                 print("hivegrid-panel: --dump takes COLSxROWS", file=sys.stderr)
                 return 2
-        elif a in ("--settings", "--account", "--range", "--history", "--origin") and argv:
+        elif a in ("--settings", "--account", "--range", "--history", "--origin", "--select") and argv:
             value = argv.pop(0)
             if a == "--settings":
                 path = value
@@ -62,7 +65,9 @@ def main(argv=None):
             elif a == "--range":
                 rng = value
             elif a == "--origin":
-                os.environ["HIVEGRID_ORIGIN_PANE"] = value  # the pane the overlay covers (hive)
+                os.environ["HIVEGRID_ORIGIN_PANE"] = value  # the pane the overlay covers (hive, bots)
+            elif a == "--select":
+                select = value
             else:
                 history = value
         else:
@@ -82,7 +87,7 @@ def main(argv=None):
 
     model = Model(settings)
     pages = [P.SettingsPage(model), P.UsagePage(model, account=account, range_name=rng, history=history),
-             P.AgentsPage(model), P.MonitorPage(model), HV.HivePage(model)]
+             P.AgentsPage(model), P.MonitorPage(model), HV.HivePage(model), P.BotsPage(model, select=select, new=new)]
     ui = U.UI(model, pages, active=PANELS.index(panel))
     if dump:
         import io

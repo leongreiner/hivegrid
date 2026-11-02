@@ -118,6 +118,7 @@ BINDINGS = {
     "usage_panel": ("Usage history panel", "LEADER+h", "leader"),
     "hive_panel": ("Agent hive panel", "LEADER+a", "leader"),
     "web_leader": ("Web pane: commands", "LEADER+w", "leader"),
+    "bots_panel": ("Bots page (scheduled agents)", "LEADER+t", "leader"),
 }
 
 # Bindings of the Hivegrid config that this panel does not change.
@@ -159,10 +160,13 @@ def agent_setting(stored):
 # ntfy server (an http or https URL without spaces or credentials; anything else means no notifications) and
 # notify_events says which agent states send one (a non-empty subset of attention, done, limit; all three
 # by default). Only hivegrid-remote reads this; the Lua config and the settings panel do not (the panel
-# keeps the keys when it saves other settings).
+# keeps the keys when it saves other settings). push is true only when the user asked for Web Push to the phone
+# (the literal true; hivegrid_remote_push.py) and push_contact is the VAPID contact a push service may use to reach
+# the operator: a mailto: or https URL (anything else means the default).
 REMOTE_NOTIFY_EVENTS = ("attention", "done", "limit")
 REMOTE_DEFAULTS = {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
-                   "notify_url": None, "notify_events": list(REMOTE_NOTIFY_EVENTS)}
+                   "notify_url": None, "notify_events": list(REMOTE_NOTIFY_EVENTS),
+                   "push": False, "push_contact": None}
 REMOTE_MINUTES = (1, 24 * 60)
 
 
@@ -188,8 +192,58 @@ def remote_settings(stored):
     ev = stored.get("notify_events")
     if isinstance(ev, list) and ev and all(isinstance(e, str) and e in REMOTE_NOTIFY_EVENTS for e in ev):
         out["notify_events"] = [e for e in REMOTE_NOTIFY_EVENTS if e in ev]
+    out["push"] = stored.get("push") is True
+    contact = stored.get("push_contact")
+    ok = isinstance(contact, str) and 8 <= len(contact) <= 200 and contact.isprintable() and " " not in contact
+    out["push_contact"] = contact if ok and re.fullmatch(r"mailto:[^@\s]+@[^@\s]+|https://[^/@?#\s]+(/[^?#\s]*)?", contact) else None
     return out
 
+
+# ---- schedule (the Bots: scheduled omp agents) --------------------------------------
+
+# settings.json "schedule": max_parallel is how many runs the scheduler runs at once (1 to 8);
+# tz the zone wall-clock words of a new bot mean ("local" or an IANA name); allow_full lets a
+# bot run with permissions `full` (only the literal true counts; the phone never can); daily_budget_usd
+# stops starting runs once a day's cost reaches it (0 = off); notify_events says which run results
+# send a notification (a non-empty subset of failed, limit, missed, done). The scheduler
+# (hivegrid_scheduler.py) reads this file itself and degrades to these defaults.
+SCHEDULE_EVENTS = ("failed", "limit", "missed", "done")
+SCHEDULE_DEFAULTS = {"max_parallel": 2, "tz": "local", "allow_full": False, "daily_budget_usd": 0,
+                     "notify_events": ["failed", "limit", "missed"]}
+SCHEDULE_PARALLEL = (1, 8)
+
+
+def valid_tz(v):
+    """True for "local" and for an IANA zone name this machine knows."""
+    if v == "local":
+        return True
+    if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+){0,2}", v):
+        return False
+    try:
+        import zoneinfo
+        zoneinfo.ZoneInfo(v)
+    except Exception:  # noqa: BLE001 - unknown key, no tz database, bad file: all mean "not usable"
+        return False
+    return True
+
+
+def schedule_settings(stored):
+    """The effective schedule settings of the stored `schedule` value: defaults for anything missing or invalid."""
+    stored = stored if isinstance(stored, dict) else {}
+    out = dict(SCHEDULE_DEFAULTS)
+    out["notify_events"] = list(SCHEDULE_DEFAULTS["notify_events"])
+    v = stored.get("max_parallel")
+    if type(v) is int and SCHEDULE_PARALLEL[0] <= v <= SCHEDULE_PARALLEL[1]:
+        out["max_parallel"] = v
+    if valid_tz(stored.get("tz")):
+        out["tz"] = stored["tz"]
+    out["allow_full"] = stored.get("allow_full") is True
+    v = stored.get("daily_budget_usd")
+    if type(v) in (int, float) and 0 <= v < 1e6 and v == v:
+        out["daily_budget_usd"] = v
+    ev = stored.get("notify_events")
+    if isinstance(ev, list) and ev and all(isinstance(e, str) and e in SCHEDULE_EVENTS for e in ev):
+        out["notify_events"] = [e for e in SCHEDULE_EVENTS if e in ev]
     return out
 
 
@@ -201,10 +255,13 @@ def remote_settings(stored):
 # profile names the browser profile (cookies, logins) new web panes use; home is the page the
 # browser button and "new web pane" open when no address is typed (any location normalize_url
 # accepts, about:blank by default); browser is "auto" (the engine's own search: Google Chrome,
-# then Chromium) or the absolute path of a Chromium-family binary. Mirrors config/settings.lua.
+# then Chromium) or the absolute path of a Chromium-family binary; theme is the colour scheme web
+# pages are shown in: "dark" (pages answer prefers-color-scheme: dark), "light", or "system" (the
+# browser's own, no emulation). Mirrors config/settings.lua.
 WEB_DEFAULTS = {"links": "pane", "search": "https://www.google.com/search?q=%s", "profile": "main",
-                "home": "about:blank", "browser": "auto"}
+                "home": "about:blank", "browser": "auto", "theme": "dark"}
 WEB_LINKS = ("pane", "system")
+WEB_THEMES = ("dark", "light", "system")
 BROWSER_AUTO = "auto"
 
 
@@ -345,6 +402,8 @@ def web_settings(stored):
         out["search"] = search if isinstance(search, str) and valid_search(search) is None else ""
     if isinstance(stored.get("profile"), str) and valid_profile(stored["profile"]) is None:
         out["profile"] = stored["profile"]
+    if stored.get("theme") in WEB_THEMES:
+        out["theme"] = stored["theme"]
     if isinstance(stored.get("home"), str) and normalize_home(stored["home"])[0]:
         out["home"] = stored["home"].strip()
     browser = stored.get("browser")
@@ -682,6 +741,9 @@ class Settings:
 
     def remote(self):
         return remote_settings(self.data.get("remote"))
+
+    def schedule(self):
+        return schedule_settings(self.data.get("schedule"))
 
     def effective(self):
         return {"version": SCHEMA, "theme": self.theme(), "keys": self.keys(), "accounts": self.accounts(),
