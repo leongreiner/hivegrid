@@ -399,10 +399,23 @@ class Gui:
 
 # ---------------------------------------------------------------- the scheduler
 
+def user_bin_path(env):
+    """`env["PATH"]` with `$HOME/.local/bin` appended when it is missing. A systemd user unit gets only the system
+    PATH, and `omp` (like the `hivegrid-*` tools) lives in `~/.local/bin`: without it every run fails with
+    "cannot start omp"."""
+    home = env.get("HOME")
+    path = env.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
+    if not home:
+        return path
+    extra = os.path.join(home, ".local", "bin")
+    return path if extra in path.split(os.pathsep) else path + os.pathsep + extra
+
+
 class Scheduler:
     def __init__(self, env=None, *, clock=time.time, accounts=None, quota=None, notify=None, notify_async=False,
                  jitter=None, log=None, settings=None, push=None, gui=None):
         self.env = dict(os.environ if env is None else env)
+        self.env["PATH"] = user_bin_path(self.env)
         self.clock = clock
         self.accounts_fn = accounts or (lambda: default_accounts(self.env))
         self.quota_fn = quota or default_quota

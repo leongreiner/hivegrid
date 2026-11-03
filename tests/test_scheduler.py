@@ -710,7 +710,7 @@ class Command(SchedulerCase):
         self.assertEqual(env["HIVEGRID_RUN"], "1")
         self.assertEqual(env["HIVEGRID_RUN_REPORT"], S.report_path(rec["id"], 1, self.env))
         self.assertEqual(env["HOME"], self.home)
-        self.assertEqual(env["PATH"], self.env["PATH"])
+        self.assertEqual(env["PATH"], self.env["PATH"] + os.pathsep + os.path.join(self.home, ".local", "bin"))
 
     def test_without_an_account_the_parents_profile_is_not_inherited_either(self):
         self.add()
@@ -739,6 +739,19 @@ class Command(SchedulerCase):
         run, = self.runs(rec)
         self.assertEqual(run["status"], "failed")
         self.assertIn("cannot start omp", run["error"])
+
+    def test_omp_in_the_home_bin_is_found_when_the_unit_path_lacks_it(self):
+        # a systemd user unit's PATH has no ~/.local/bin, where omp is installed
+        bindir = os.path.join(self.home, ".local", "bin")
+        os.makedirs(bindir)
+        os.symlink(self.fake, os.path.join(bindir, "omp"))
+        del self.env["HIVEGRID_OMP_BIN"]
+        self.env["PATH"] = "/usr/bin:/bin"
+        self.add()
+        sch = self.scheduler()
+        sch.tick()
+        self.settle(sch)
+        self.assertEqual(len(self.calls()), 1)
 
 
 class Guards(SchedulerCase):
