@@ -921,6 +921,35 @@ textarea.field { resize: vertical; line-height: 1.4; min-height: 88px; }
 }
 #app.embed.bots-on > .top { display: none; }
 #app.embed .bots-back { display: none; }
+/* grid: every agent as a live tile on one screen (#/grid), for the desktop; opening a tile goes to its chat (#/a/<id>) */
+.grid-btn { display: none; }
+@media (min-width: 900px) { .grid-btn { display: inline-flex; } }
+#app.embed .grid-btn { display: none; }
+.grid-pane { flex: 1; min-width: 0; min-height: 0; display: none; flex-direction: column; background: var(--base); }
+#app.grid-on .list-pane, #app.grid-on .detail-pane, #app.grid-on .tov-pane, #app.grid-on .bots-pane { display: none !important; }
+#app.grid-on .grid-pane { display: flex; }
+#app.grid-on > .top { display: flex; }
+.grid-scroll { flex: 1; min-height: 0; overflow: auto; padding: 10px calc(10px + var(--sar)) 10px calc(10px + var(--sal)); display: grid; gap: 10px; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); grid-auto-rows: minmax(300px, 38vh); }
+.gtile { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--deep); border: 1px solid var(--rule-base); border-top: 2px solid var(--sc, var(--rule-base)); border-radius: 6px; overflow: hidden; }
+.gt-head { flex: none; display: flex; align-items: baseline; gap: 1ch; padding: 6px 10px 0 4px; min-width: 0; }
+.gt-link { display: flex; align-items: baseline; flex: 1; min-width: 0; color: var(--bright); }
+.gt-link:hover .gt-title { text-decoration: underline; }
+.gt-num { color: var(--muted); margin-right: 1ch; flex: none; }
+.gt-title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.gt-age { flex: none; font-size: 12px; color: var(--muted); }
+.gt-sub { flex: none; padding: 0 10px 4px calc(4px + 2ch); font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gt-sub .st { color: var(--sc, var(--muted)); font-weight: 700; }
+.gt-tail { flex: 1; min-height: 0; margin: 0; padding: 6px 10px; overflow: auto; font: inherit; font-size: 12px; line-height: 1.35; color: var(--text); background: var(--base); border-top: 1px solid var(--rule-base); white-space: pre-wrap; overflow-wrap: anywhere; }
+.gt-pend { flex: none; padding: 6px 10px; border-top: 1px solid var(--rule-base); background: var(--pill); }
+.gt-pend .what { margin: 0 0 6px; overflow-wrap: anywhere; }
+.gt-pend .pbtns { display: flex; flex-wrap: wrap; gap: 6px; }
+.gt-pend .btn { min-height: 30px; padding: 0 12px; }
+.gt-pend .btn.opt { flex: 1 1 auto; justify-content: flex-start; }
+.gt-compose { flex: none; display: flex; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--rule-base); }
+.gt-compose input.field { flex: 1; min-width: 0; min-height: 32px; }
+.gt-compose .btn { min-height: 32px; }
+.grid-empty { grid-column: 1 / -1; padding: 40px 12px; text-align: center; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
@@ -1292,6 +1321,7 @@ APP_JS = r"""(function () {
     return L;
   }
   var listLoop = Loop(listStep);
+  var gridLoop = Loop(gridStep);
   var chatLoop = Loop(chatStep);
   var botsLoop = Loop(botsStep);
   var briefLoop = Loop(briefStep);
@@ -1465,8 +1495,9 @@ APP_JS = r"""(function () {
     U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
+    U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1529,13 +1560,160 @@ APP_JS = r"""(function () {
     U.tov = h("section", { class: "tov-pane", hidden: true, "aria-label": "Terminals" });
     U.bots = buildBotsPane();
     U.live = h("div", { class: "sr-only", role: "status", "aria-live": "polite" });
-    app.appendChild(h("div", { class: "split" }, listPane, detailPane, U.tov, U.bots, U.botsEmpty));
+    G.on = false;
+    G.tiles = {};
+    G.etags = {};
+    U.gridScroll = h("div", { class: "grid-scroll" });
+    U.grid = h("section", { class: "grid-pane", hidden: true, "aria-label": "Agent grid" }, U.gridScroll);
+    app.appendChild(h("div", { class: "split" }, listPane, detailPane, U.tov, U.bots, U.botsEmpty, U.grid));
     app.appendChild(U.live);
     buildMenu();
     app.appendChild(M.root);
     app.classList.toggle("ro", !!(meta && meta.readonly));
     app.classList.toggle("embed", EMBED);
     U.ro.hidden = !(meta && meta.readonly);
+  }
+
+  // ---------------------------------------------------------------- grid: every agent as a tile (#/grid)
+  var G = { on: false, tiles: {}, etags: {} };
+  var GRID_LINES = 40;
+  var GRID_PERIOD = 1500;
+  function gridWanted() { return inApp && !EMBED && window.location.hash === "#/grid"; }
+  function routeGrid() {
+    if (!inApp || !U.grid) { return; }
+    var want = gridWanted();
+    if (want === G.on) { return; }
+    G.on = want;
+    document.getElementById("app").classList.toggle("grid-on", want);
+    U.grid.hidden = !want;
+    U.gridBtn.classList.toggle("on", want);
+    U.gridBtn.setAttribute("href", want ? "#/" : "#/grid");
+    U.gridBtn.setAttribute("aria-label", want ? "Back to the agent list" : "Agent grid");
+    if (want) { renderGrid(); gridLoop.start(); announce("Agent grid"); }
+    else { gridLoop.stop(); }
+  }
+  function gridPending(t, a) {
+    var p = a.pending;
+    var can = a.can || {};
+    var key = JSON.stringify([p, !!can.keys]);
+    if (key === t.pendKey) { return; }
+    t.pendKey = key;
+    clear(t.pend);
+    t.pend.hidden = !p;
+    if (!p) { return; }
+    function key1(label, k, cls) {
+      return h("button", { class: "btn key " + (cls || ""), type: "button", disabled: !can.keys, onclick: function () { sendKeys(a.id, [k], false, null); } }, label);
+    }
+    if (p.kind === "approval") {
+      t.pend.appendChild(h("p", { class: "what" }, h("b", null, p.tool || "tool"), p.summary ? "  " + p.summary : ""));
+      t.pend.appendChild(h("div", { class: "pbtns" }, key1("yes", "y", "ok"), key1("no", "n", "bad"), key1("enter", "enter"), key1("esc", "esc")));
+    } else if (p.kind === "ask") {
+      t.pend.appendChild(h("p", { class: "what" }, p.question || ""));
+      var box = h("div", { class: "pbtns" });
+      var start = typeof p.recommended === "number" ? p.recommended : 0;
+      (p.options || []).forEach(function (o, i) {
+        if (i > 8) { return; }
+        var keys = [];
+        for (var k = start; k < i; k++) { keys.push("down"); }
+        for (var j = start; j > i; j--) { keys.push("up"); }
+        keys.push("enter");
+        box.appendChild(h("button", { class: "btn key opt", type: "button", disabled: !can.keys, onclick: function () { sendKeys(a.id, keys, false, null); } }, h("kbd", null, String(i + 1)), o));
+      });
+      box.appendChild(key1("esc", "esc"));
+      t.pend.appendChild(box);
+    } else {
+      t.pend.appendChild(h("p", { class: "what" }, p.kind === "plan_review" ? "Plan review: " : "Waiting for you: ",
+        h("a", { href: "#/a/" + encodeURIComponent(a.id) }, "open the chat to answer")));
+    }
+  }
+  function gridSend(t) {
+    var a = findAgent(t.id);
+    var mode = a && a.can ? (a.can.prompt ? "prompt" : (a.can.keys ? "answer" : "none")) : "none";
+    var text = t.input.value.replace(/\r\n?/g, "\n");
+    if (mode === "none" || !text.trim()) { return; }
+    var max = limitOf(mode === "prompt" ? "prompt" : "key_text");
+    if (text.length > max) { toast("Too long: at most " + max + " characters.", true); return; }
+    t.input.value = "";
+    var req = mode === "answer" ? post(agentUrl(t.id, "keys"), { text: text, keys: ["enter"] }, null) : post(agentUrl(t.id, "prompt"), { text: text }, null);
+    req.then(function (r) { if (!r && !t.input.value) { t.input.value = text; } });
+  }
+  function makeTile(a) {
+    var t = { id: a.id, pendKey: null };
+    t.glyph = h("span", { class: "glyph", "aria-hidden": "true" });
+    t.num = h("span", { class: "gt-num" });
+    t.title = h("span", { class: "gt-title" });
+    t.age = h("span", { class: "gt-age" });
+    t.link = h("a", { class: "gt-link", href: "#/a/" + encodeURIComponent(a.id), title: "Open the chat" }, t.glyph, t.num, t.title);
+    t.sub = h("div", { class: "gt-sub" });
+    t.tail = h("pre", { class: "gt-tail", tabindex: "0", "aria-label": "Screen of agent " + a.label });
+    t.pend = h("div", { class: "gt-pend", hidden: true, role: "group", "aria-label": "Needs your answer" });
+    t.input = h("input", { class: "field", type: "text", placeholder: "Message", "aria-label": "Message to agent " + a.label, autocomplete: "off", onkeydown: function (ev) {
+      if (ev.key === "Enter" && !ev.isComposing && !ev.shiftKey) { ev.preventDefault(); gridSend(t); }
+    } });
+    t.send = h("button", { class: "btn primary", type: "button", onclick: function () { gridSend(t); } }, "send");
+    t.compose = h("div", { class: "gt-compose write" }, t.input, t.send);
+    t.el = h("article", { class: "gtile" }, h("div", { class: "gt-head" }, t.link, t.age), t.sub, t.tail, t.pend, t.compose);
+    return t;
+  }
+  function updateTile(t, a) {
+    var si = stateInfo(a.state);
+    t.el.className = "gtile " + stClass(a.state);
+    t.glyph.className = "glyph";
+    setGlyph(t.glyph, a.state);
+    t.num.textContent = a.label;
+    t.title.textContent = a.title || "(untitled)";
+    clear(t.age);
+    t.age.appendChild(ageNode(a));
+    var sub = [h("span", { class: "st" }, si.label)];
+    [a.cwd, a.reason].forEach(function (x) { if (x) { sub.push(" · ", x); } });
+    clear(t.sub);
+    sub.forEach(function (n) { t.sub.appendChild(typeof n === "string" ? document.createTextNode(n) : n); });
+    var can = a.can || {};
+    var mode = can.prompt ? "prompt" : (can.keys ? "answer" : "none");
+    t.input.disabled = mode === "none";
+    t.send.disabled = mode === "none";
+    gridPending(t, a);
+  }
+  function renderGrid() {
+    if (!G.on || !U.grid || !agents) { return; }
+    var seen = {};
+    agents.forEach(function (a, i) {
+      seen[a.id] = true;
+      var t = G.tiles[a.id];
+      if (!t) { t = G.tiles[a.id] = makeTile(a); }
+      updateTile(t, a);
+      var at = U.gridScroll.children[i];
+      if (at !== t.el) { U.gridScroll.insertBefore(t.el, at || null); }
+    });
+    Object.keys(G.tiles).forEach(function (id) {
+      if (!seen[id]) { G.tiles[id].el.remove(); delete G.tiles[id]; delete G.etags[id]; }
+    });
+    var empty = U.gridScroll.querySelector(".grid-empty");
+    if (agents.length === 0 && !empty) { U.gridScroll.appendChild(h("div", { class: "grid-empty" }, "No agents running")); }
+    else if (agents.length > 0 && empty) { empty.remove(); }
+  }
+  function setGridTail(t, lines) {
+    var text = lines.slice(-GRID_LINES).join("\n").replace(/\s+$/, "");
+    if (t.tail.textContent === text) { return; }
+    var stick = t.tail.scrollHeight - t.tail.scrollTop - t.tail.clientHeight < 40;
+    t.tail.textContent = text;
+    if (stick) { t.tail.scrollTop = t.tail.scrollHeight; }
+  }
+  // One pass over every tile (a 304 costs nothing: the screens are ETag'd), then a pause.
+  function gridStep(L, run) {
+    var ids = Object.keys(G.tiles);
+    return Promise.all(ids.map(function (id) {
+      return api(agentUrl(id, "tail") + "?lines=" + GRID_LINES, { etag: G.etags[id], timeout: 10000, loop: null }).then(function (r) {
+        var t = G.tiles[id];
+        if (run !== L.run || !t || r.status === 401) { return; }
+        if (r.status === 200 && r.data && Array.isArray(r.data.lines)) {
+          G.etags[id] = r.etag || null;
+          setGridTail(t, r.data.lines);
+        }
+      }, function () { /* the next pass tries again */ });
+    })).then(function () {
+      return new Promise(function (resolve) { window.setTimeout(resolve, GRID_PERIOD); }).then(function () { return {}; });
+    });
   }
 
   // ---------------------------------------------------------------- agent list
@@ -1552,6 +1730,7 @@ APP_JS = r"""(function () {
     U.count.appendChild(h("span", { class: "wide-only" }, agents.length === 1 ? " agent" : " agents"));
     renderChips();
     renderList();
+    renderGrid();
     updateDetail();
     if (sheet && sheet.refresh) { sheet.refresh(); }
     if (starting && findAgent(starting.id)) {
@@ -3924,7 +4103,7 @@ APP_JS = r"""(function () {
     else if (mode === null && !termRoute()) { announce("Agents"); if (U.botsBtn && !U.botsBtn.hidden) { U.botsBtn.focus({ preventScroll: true }); } }
     if (!(mode === null && termRoute())) { pageSwitch(); }    // a move to the terminals is switched by routeTerm, once it is shown
   }
-  function routePages() { routeBots(); routeTerm(); }
+  function routePages() { routeBots(); routeTerm(); routeGrid(); }
 
   // ---- one bot
   function loadBot(id) {
