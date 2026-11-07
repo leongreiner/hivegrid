@@ -413,6 +413,8 @@ wezterm.on('status-click', function(window, pane, id, button)
     if pages_ref then pages_ref.show_canvas(window, pane) end
   elseif id == 'page:bots' then
     open_bots(window, pane)
+  elseif id:match('^page:host:') then
+    if pages_ref then pages_ref.toggle_host(window, pane, id:sub(#'page:host:' + 1)) end
   elseif id == 'agents' then
     window:perform_action(as.picker, pane)
   elseif id == 'brand' then
@@ -598,6 +600,7 @@ web = require('web')(config, wezterm, sb, layouts)
 -- Pages: the [Canvas] [Bots] switcher of the header and the Bots page (config/pages.lua).
 pages_ref = require('pages')(config, wezterm, {
   web = web,
+  hosts = function() return S.remote_hosts end,
   panel = function(window, pane, name, extra) window:perform_action(panel_action(name, extra), pane) end,
 })
 

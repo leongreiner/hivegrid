@@ -11,6 +11,9 @@
 --   S.session           -> { enabled = false only when the file says "session": { "enabled": false } }
 --   S.auto_continue     -> { enabled = false only when the file says "auto_continue": { "enabled": false } }:
 --                          a usage-limited omp agent is continued after the reset (config/autocontinue.lua)
+--   S.remote_hosts      -> names of the machines whose remote page the window can show: remote-hosts.json next to the
+--                          settings, { "hosts": [ { "name", "url" } ] } (machine-local, never part of a settings backup;
+--                          bin/hivegrid_hostpage.py validates the url, so only the names are read here)
 --   S.agent             -> 'omp' (default) or 'claude': the coding agent new tabs, grids and the account
 --                          pills start (key "agent"; any other value is omp)
 --   S.accounts()        -> visible omp/Claude accounts { label, profile, dir, creds }: the file's
@@ -134,6 +137,22 @@ local function build(wezterm)
   -- The agent started in new tabs, grids and for an account pill (key "agent"): 'omp' or
   -- 'claude' (Claude Code); anything else is omp. Mirrors bin/hivegrid_settings_core.py.
   S.agent = data.agent == 'claude' and 'claude' or 'omp'
+  S.remote_hosts = {}
+  do
+    local text = slurp(DIR .. '/remote-hosts.json')
+    local ok, parsed = pcall(wezterm.json_parse, text or '')
+    local list = ok and type(parsed) == 'table' and parsed.hosts
+    if type(list) == 'table' then
+      local seen = {}
+      for _, h in ipairs(list) do
+        local n = type(h) == 'table' and h.name
+        if type(n) == 'string' and #n <= 32 and n:match('^[a-z0-9][a-z0-9-]*$') and not seen[n] and #S.remote_hosts < 8 then
+          seen[n] = true
+          S.remote_hosts[#S.remote_hosts + 1] = n
+        end
+      end
+    end
+  end
 
   -- Scheduled bots (key "schedule"): the effective values, defaults for anything missing or
   -- invalid. Mirrors schedule_settings in bin/hivegrid_settings_core.py; a zone name is only

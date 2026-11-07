@@ -101,6 +101,20 @@ or start the server with `hivegrid-remote serve --terminal` (`HIVEGRID_REMOTE_TE
 
 **What the user service does to these shells.** Under `hivegrid-autostart install` the shells inherit its `UMask=0077`: files they create are mode `0600` (not `0644`). The unit sets no `NoNewPrivileges` (nor `LockPersonality` or `RestrictAddressFamilies`, which imply it in a user unit), so `sudo` works in a phone shell as in any other. A server started by hand has no umask change. After updating, run `hivegrid-autostart install` and `systemctl --user restart hivegrid-remote` (open shells end). A process started with `nohup` or `setsid` survives closing the terminal and a token rotation: `hivegrid-remote token --rotate` ends the shells, not the children they detached.
 
+## Remote host page
+
+The window can show another machine's remote page as a page of its own, so a Hivegrid on a laptop drives the agents of a workstation while the workstation stays the only host (its agents, scheduler, bots and memory do not move). The header switcher gets one chip per host, `[Canvas] [Bots] [slx-002]`; a click opens that host's page over the active tab, a click on Canvas, the same chip again or another tab ends it. The page is the host's own remote page (agents, live chats, prompts, approvals, new sessions, Bots, usage), in a web pane of the fork in its own browser profile (`hivegrid-host`), so the laptop and the phone are one page, one code path. It needs the web pane and a Chromium-family browser; there is no terminal version (a toast says why when it cannot open).
+
+**Set up.** On the laptop, once per host:
+
+1. List the host in `~/.config/hivegrid/remote-hosts.json` (a file of its own next to `settings.json`, so a settings backup never makes the host list itself): `{"hosts": [{"name": "slx-002", "url": "https://slx-002.<tailnet>.ts.net"}]}`. The name is lowercase letters, digits and `-`; the address must be inside your tailnet (a `*.ts.net` name over https, or a Tailscale IP); other addresses, paths, queries and credentials are refused. At most 8 hosts.
+2. Store the host's access token: `hivegrid-host-page token slx-002` asks for it on the terminal (hidden, never a command line) and writes `~/.config/hivegrid/hosts/slx-002/remote-token` (mode 0600). It is not part of any backup.
+3. Reload the config. `hivegrid-host-page list` shows each host and whether it has a token.
+
+The host must serve its page on your tailnet (`tailscale serve`, see Set up above) and this machine must resolve its name (Tailscale DNS on, or a hosts line). The token is control of the host's agents: use a Tailscale ACL that allows only your own machines, and rotate it with `hivegrid-remote token --rotate` on the host when it was ever shown.
+
+`hivegrid-host-page ensure --host NAME` (`bin/hivegrid_hostpage.py`) checks that the host answers `/healthz` (certificates are verified), writes `$XDG_RUNTIME_DIR/hivegrid-host-page.json` (`ts`, `ok`, `host`, `url`, `open`, `state` `up|unknown_host|no_token|down`, `message`, `command`) and, when ok, the one-shot page `hivegrid-host-open.html` (mode 0600) that sends the web pane to the host with the token in the address fragment, which the page stores and removes at once; the file is deleted 20 seconds after it opened. The token is in no command line, no log and no address that stays visible, and the status file carries none.
+
 ## Git overview
 
 **Actions › Git** opens the git overview of the agent's working directory, the phone's counterpart of the host's git view (`hivegrid-git`): one row per repository (the one around the folder and those below it) with the status dot (green clean, amber uncommitted changes, red conflicts: each also named for screen readers), branch, commits ahead and behind the upstream, staged, changed and untracked counts, a merge or rebase in progress and the CI result of the checked-out branch (`✓ ✗ ◔ – ?`, only for repositories with GitHub Actions workflows). The open repository lists its changed files with their status letters and its last 10 commits. **Refresh** reads again.

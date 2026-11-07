@@ -24,7 +24,7 @@ local function hide_system_chrome()
 end
 
 -- One window over a grid tab, the modules wired like config/wezterm.lua: opts.stock (stock WezTerm),
--- opts.no_chrome. `panels` records the fallbacks: { name, extra }.
+-- opts.no_chrome, opts.hosts (names of remote_hosts). `panels` records the fallbacks: { name, extra }.
 local function setup(wz, opts)
   opts = opts or {}
   local rt = T.tmpdir()
@@ -45,6 +45,7 @@ local function setup(wz, opts)
   local panels = {}
   local pages = require('pages')(config, wz, {
     web = web,
+    hosts = opts.hosts and function() return opts.hosts end or nil,
     panel = function(_, _, name, extra) panels[#panels + 1] = { name, extra } end,
   })
   local win, tab = wz.fake.grid({ { id = 1, width = 200, height = 50 } })
@@ -244,4 +245,68 @@ T.test('a bot picked while the page is open navigates it instead of opening a se
   pages.show_bots(win, wz.mux.get_pane(1), { select = 'daily-news' })
   T.eq(#wz.stub.background, started, 'nothing started')
   T.ok(table.concat(page.sent):find('navigate;http://127.0.0.1:8787/#/bots/daily-news', 1, true), table.concat(page.sent))
+end)
+
+-- Remote host pages ---------------------------------------------------------------------------------
+
+T.test('host chips follow remote_hosts and click as page:host:<name>; a bad name is not drawn', function(wz)
+  local pages = setup(wz, { hosts = { 'slx-002', 'Bad Name' } })
+  local items = pages.tiers(0, 'canvas')[1].items
+  T.ok(plain(items):find('slx-002', 1, true))
+  T.ok(not plain(items):find('Bad', 1, true))
+  local ids = {}
+  for _, it in ipairs(items) do
+    if type(it) == 'table' and it.Click then ids[#ids + 1] = it.Click end
+  end
+  T.eq(ids, { 'page:canvas', 'page:bots', 'page:host:slx-002' })
+  T.ok(plain(pages.tiers(0, 'host:slx-002')[1].items):find('slx-002', 1, true))
+end)
+
+T.test('a host page: hivegrid-host-page ensure, then the one-shot page in the host profile', function(wz)
+  local pages, win, _, _, rt = setup(wz, { hosts = { 'slx-002' } })
+  pages.show_host(win, wz.mux.get_pane(1), 'slx-002')
+  T.eq(wz.stub.background[1], { wz.home_dir .. '/.local/bin/hivegrid-host-page', 'ensure', '--host', 'slx-002' })
+  T.eq(overlay_of(win), nil, 'nothing opens before the host answered')
+  T.write(rt .. '/hivegrid-host-page.json', wz.json_encode({ ts = T0, ok = true, host = 'slx-002', open = rt .. '/hivegrid-host-open.html' }))
+  wz.stub.run_timers(1)
+  local o = overlay_of(win)
+  T.ok(o, 'the overlay opened')
+  T.eq(o.args.args, { 'hivegrid:web', 'file://' .. rt .. '/hivegrid-host-open.html' })
+  T.eq(o.args.set_environment_variables, { HIVEGRID_WEB_PROFILE = 'hivegrid-host' })
+  local page = wz.fake.pane { id = 78, user_vars = { hivegrid_web = '1' } }
+  win.active_pane_override = page
+  wz.stub.run_timers(1)
+  T.eq(pages.current(win), 'host:slx-002')
+  pages.toggle_host(win, wz.mux.get_pane(1), 'slx-002')
+  T.eq(pages.current(win), 'canvas', 'the same chip again goes back')
+end)
+
+T.test('a host that cannot be reached: a toast with the reason, no terminal panel, back on the canvas', function(wz)
+  local pages, win, _, panels, rt = setup(wz, { hosts = { 'slx-002' } })
+  pages.show_host(win, wz.mux.get_pane(1), 'slx-002')
+  T.write(rt .. '/hivegrid-host-page.json', wz.json_encode({ ts = T0, ok = false, host = 'slx-002', state = 'down', message = 'slx-002 did not answer' }))
+  wz.stub.run_timers(1)
+  T.eq(overlay_of(win), nil)
+  T.eq(panels, {})
+  T.ok(win.toasts[1].msg:find('did not answer', 1, true), win.toasts[1].msg)
+  T.eq(pages.current(win), 'canvas')
+end)
+
+T.test('an answer about another host is not taken; unknown hosts never reach the command line', function(wz)
+  local pages, win, _, _, rt = setup(wz, { hosts = { 'slx-002' } })
+  T.write(rt .. '/hivegrid-host-page.json', wz.json_encode({ ts = T0, ok = true, host = 'other', open = rt .. '/x.html' }))
+  pages.show_host(win, wz.mux.get_pane(1), 'slx-002')
+  wz.stub.run_timers(3)
+  T.eq(overlay_of(win), nil)
+  pages.show_host(win, wz.mux.get_pane(1), 'x;rm -rf')
+  pages.show_host(win, wz.mux.get_pane(1), 'not-listed')
+  T.eq(#wz.stub.background, 1)
+  T.eq(#win.toasts, 2)
+end)
+
+T.test('stock WezTerm: host pages do nothing and raise nothing', function(wz)
+  local pages, win = setup(wz, { stock = true, hosts = { 'slx-002' } })
+  pages.show_host(win, wz.mux.get_pane(1), 'slx-002')
+  T.eq(#wz.stub.background, 0)
+  T.eq(win.toasts, {})
 end)
