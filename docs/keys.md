@@ -33,7 +33,7 @@
 | | `LEADER+w`, then `n` | new web pane beside the last grid pane (asks for the URL; Enter alone opens the home page) |
 | | `LEADER+w`, then `t` | new tab in the web pane (the address field opens on a blank page; with no web pane, asks for a URL and opens one) |
 | | `LEADER+w`, then `x` / `]` / `[` / `1`-`9` | close the active tab / next / previous / pick tab N of the web pane |
-| | `Ctrl+T` / `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab` (or `Ctrl+PageDown` / `Ctrl+PageUp`), `Ctrl+1`-`9` in the web pane | the same, as in a browser (they never reach the page); a click on a tab, its `×` or the `+` in the strip, and a middle click on a tab, do it with the mouse |
+| | `Ctrl+T` / `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab` (or `Ctrl+PageDown` / `Ctrl+PageUp`), `Ctrl+1`-`9` in the web pane | the same, as in a browser (they never reach the page); a click on a tab, its `×` or the `+` in the strip, and a middle click on a tab, do it with the mouse; a middle click or Ctrl+click on a link in a page opens it in a new tab |
 | | browser button of the left bar | focus the tab's web pane; without one, open a web pane on the home page (no question; type the location in its header) |
 | | `LEADER+w`, then `b` / `f` | back / forward |
 | | `LEADER+w`, then `r` / `R` | reload / hard reload (`s` stops loading) |
