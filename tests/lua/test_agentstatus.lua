@@ -70,6 +70,22 @@ T.test('omp title glyph gives working, idle and needs you, the session title is 
   T.eq({ r[11].title, r[12].title, r[13].title }, { 'refactor parser', 'fix tests', 'approve plan' })
 end)
 
+T.test('an agent that is a script for bun or node is named by its script, other programs by their executable', function(wz)
+  local as = load()
+  local function run(id, exe, info) return wz.fake.pane { id = id, title = 'x', text = 'x', process_name = exe, process_info = info } end
+  local bun = run(31, '/home/u/.bun/bin/bun', { name = 'omp', argv = { 'bun', '/home/u/.bun/bin/omp', '--profile=seal' }, cwd = '/tmp' })
+  local node = run(32, '/usr/bin/node', { name = 'node', argv = { 'node', '/usr/lib/node_modules/.bin/claude' }, cwd = '/tmp' })
+  local vim = run(33, '/usr/bin/vim', { name = 'vim', argv = { 'vim', 'omp' }, cwd = '/tmp' })
+  local plain = run(34, '/home/u/.bun/bin/bun', { name = 'bun', argv = { 'bun', 'run', 'dev' }, cwd = '/tmp' })
+  local win, tab = grid2x2(wz, { bun, node, vim, plain }, 1, { focused = false })
+  rows(as, win, tab)
+  local f = function(id) return as.facts(id) end
+  T.eq({ f(31).proc, f(31).profile }, { 'omp', 'seal' }, 'omp runs as bun')
+  T.eq(f(32).proc, 'claude', 'argument names the script when the kernel name is the interpreter')
+  T.eq(f(33).proc, 'vim', 'only interpreters are looked behind')
+  T.eq(f(34).proc, 'bun', 'a bun program of the user\'s own stays bun')
+end)
+
 T.test('the title glyph stays authoritative after the screen has been quiet for long', function(wz)
   local as = load()
   local win, tab = grid2x2(wz, { omp(wz, 15, 'π ⠋ thinking'), omp(wz, 16, 'π > done here') }, 2,

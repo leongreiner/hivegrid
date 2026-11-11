@@ -293,6 +293,22 @@ local function profile_arg(argv)
   return nil
 end
 
+-- WezTerm names the foreground process by its executable, so an agent that is a script for an
+-- interpreter (omp is `#!/usr/bin/env bun`, Claude Code runs on node) reads as `bun` or `node`.
+-- For such an executable the kernel's process name (the script's name) and the script argument
+-- tell what runs. Any other program keeps its name (`vim omp` is not omp).
+local INTERPRETERS = { bun = true, node = true, nodejs = true, deno = true }
+
+local function agent_name(exe, info)
+  if not INTERPRETERS[exe] or type(info) ~= 'table' then return nil end
+  local name = basename(info.name)
+  if AGENTS[name] then return name end
+  local argv = type(info.argv) == 'table' and info.argv or {}
+  name = basename(argv[2])
+  if AGENTS[name] then return name end
+  return nil
+end
+
 -- The first lookup runs at once (a fresh pane needs its process to be classified); later
 -- ones are staggered per pane.
 local function refresh_slow(pane, st, now)
@@ -306,8 +322,10 @@ local function refresh_slow(pane, st, now)
   st.profile_arg = nil
   if st.proc ~= '' and not SHELLS[st.proc] then
     local okp, info = pcall(pane.get_foreground_process_info, pane)
-    path = okp and info and info.cwd or nil
-    st.profile_arg = okp and info and profile_arg(info.argv) or nil
+    if not okp then info = nil end
+    path = info and info.cwd or nil
+    st.proc = agent_name(st.proc, info) or st.proc
+    st.profile_arg = info and profile_arg(info.argv) or nil
   end
   if not path or path == '' then
     local okc, cwd = pcall(pane.get_current_working_dir, pane)
