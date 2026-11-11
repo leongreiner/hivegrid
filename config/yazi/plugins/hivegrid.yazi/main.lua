@@ -6,10 +6,12 @@
 --   plugin hivegrid close   close the explorer the way its bar button does (the user var
 --                           sidebar_click), so the keyboard returns to the grid pane; a plain
 --                           quit leaves it on the bar
---   plugin hivegrid edit    Enter / o: a folder is entered; text files (the selection, else
---                           the hovered file) open in $EDITOR in a new grid pane (the user var
---                           hivegrid_open_file, absolute paths one per line); anything else
---                           (a binary file, outside WezTerm) goes to yazi's own opener
+--   plugin hivegrid edit    Enter / o: a folder is entered; images and PDFs (HIVEGRID_VIEWER=1,
+--                           set by sidebar.lua when a web pane can open) are shown in a web pane
+--                           (the user var hivegrid_open_view, absolute paths one per line); text
+--                           files (the selection, else the hovered file) open in $EDITOR in a new
+--                           grid pane (the user var hivegrid_open_file, same format); anything
+--                           else (a binary file, outside WezTerm) goes to yazi's own opener
 -- Also the previewer of empty files (yazi.toml): "Empty file" centred like an empty
 -- folder's "No items", instead of yazi's reversed slab.
 local M = {}
@@ -59,6 +61,15 @@ local targets = ya.sync(function()
   return paths, false
 end)
 
+-- Files a web pane shows itself (Chromium's image and PDF viewers). web.lua keeps the same
+-- list for the paths it accepts; SVG is left out, it is text and edits as text.
+local VIEW = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true }
+
+local function viewable(path)
+  local ext = path:match('%.(%w+)$')
+  return ext ~= nil and VIEW[ext:lower()] == true
+end
+
 -- A file the editor can show: readable, no NUL byte in its first 8 KiB.
 local function is_text(path)
   local f = io.open(path, 'rb')
@@ -79,8 +90,17 @@ local function edit()
   if dir then return ya.emit('enter', {}) end
   if #paths == 0 then return end
   if not os.getenv('WEZTERM_PANE') then return ya.emit('open', {}) end
+  local all_view = os.getenv('HIVEGRID_VIEWER') == '1'
   for _, p in ipairs(paths) do
-    if is_dir(p) or not is_text(p) or p:find('\n') then return ya.emit('open', {}) end
+    if is_dir(p) or p:find('\n') then return ya.emit('open', {}) end
+    all_view = all_view and viewable(p)
+  end
+  if all_view then
+    if not M.set_var('hivegrid_open_view', table.concat(paths, '\n')) then ya.emit('open', {}) end
+    return
+  end
+  for _, p in ipairs(paths) do
+    if not is_text(p) then return ya.emit('open', {}) end
   end
   if not M.set_var('hivegrid_open_file', table.concat(paths, '\n')) then ya.emit('open', {}) end
 end

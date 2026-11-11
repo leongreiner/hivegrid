@@ -459,6 +459,8 @@ local function build(config, wezterm)
     local cmd = { 'env', 'PWD=' .. dir }
     if view == 'files' then
       cmd[#cmd + 1] = 'YAZI_CONFIG_HOME=' .. require('explorer').config_home()
+      -- Images and PDFs open in a web pane (hivegrid_open_view, config/web.lua) when one can open.
+      if M.web_button then cmd[#cmd + 1] = 'HIVEGRID_VIEWER=1' end
     end
     cmd[#cmd + 1] = VIEWS[view].bin
     return cmd

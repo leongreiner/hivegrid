@@ -419,6 +419,47 @@ T.test('open-uri falls back to the default when the web pane cannot be opened', 
   T.eq(wz.emit('open-uri', win, wz.mux.get_pane(1), 'https://example.com'), true)
 end)
 
+T.test('the explorer shows images and PDFs as file:// pages: the first in the tab\'s web pane, the rest in panes of their own', function(wz)
+  local _, win, tab = setup(wz, { { id = 1, left = 31, width = 100, height = 50 }, { id = 99, left = 0, width = 30, height = 50 } })
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 98, content = 99 } }
+  local dir = T.tmpdir()
+  local a, b = T.write(dir .. '/a b#1.PNG', 'x'), T.write(dir .. '/doc.pdf', 'x')
+  local explorer = wz.mux.get_pane(99)
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', a)
+  local term = wz.mux.get_pane(1)
+  T.eq(#term.splits, 1, 'no web pane yet: one is opened')
+  T.eq(term.splits[1].args, { 'hivegrid:web', 'file://' .. dir .. '/a%20b%231.PNG' })
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', b)
+  T.eq(#term.splits, 1, 'the tab\'s web pane is reused')
+  local page = wz.mux.get_pane(tab:panes()[#tab:panes()]:pane_id())
+  T.eq(sent(page), APC .. 'navigate;file://' .. dir .. '/doc.pdf\27\\')
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', a .. '\n' .. b)
+  T.eq(#page.splits, 1, 'the second of two files gets a new pane')
+end)
+
+T.test('hivegrid_open_view opens nothing for other panes, other files, missing files and other variables', function(wz)
+  local _, win, tab = setup(wz, { { id = 1, left = 31, width = 100, height = 50 }, { id = 99, left = 0, width = 30, height = 50 } })
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 98, content = 99 } }
+  local dir = T.tmpdir()
+  local png = T.write(dir .. '/a.png', 'x')
+  local txt = T.write(dir .. '/a.txt', 'x')
+  local explorer, term = wz.mux.get_pane(99), wz.mux.get_pane(1)
+  wz.emit('user-var-changed', win, term, 'hivegrid_open_view', png)
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_file', png)
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', txt)
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', dir .. '/missing.png')
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', 'a.png')
+  wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', dir)
+  T.eq(#term.splits, 0)
+end)
+
+T.test('hivegrid_open_view is ignored without a browser', function(wz)
+  local _, win, tab = setup(wz, { { id = 1, left = 31, width = 100, height = 50 }, { id = 99, left = 0, width = 30, height = 50 } }, { no_chrome = true })
+  wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 98, content = 99 } }
+  wz.emit('user-var-changed', win, wz.mux.get_pane(99), 'hivegrid_open_view', T.write(T.tmpdir() .. '/a.png', 'x'))
+  T.eq(#wz.mux.get_pane(1).splits, 0)
+end)
+
 -- Key table --------------------------------------------------------------------------------------
 
 T.test('LEADER+w activates the web table (rebindable); its keys drive the tab\'s web pane', function(wz)

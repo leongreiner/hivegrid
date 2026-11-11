@@ -3,6 +3,8 @@
 --   LEADER+w   web key table: l type a location in the pane's header (asks and opens a pane when
 --              there is none), h show/hide the header, g sign in to Google in a plain Chrome window, n new web pane, b back, f forward, r reload,
 --              R hard reload, s stop, y copy the URL, o open in the system browser, Esc leaves
+--   The explorer's Enter / o on an image or PDF (user var hivegrid_open_view) shows it as a
+--   file:// page in a web pane, see "Files" below
 --   The browser button of the sidebar bar: focuses the tab's web pane, else opens a web pane on
 --   the home page (settings key web.home, about:blank by default) without asking; the bar shows
 --   it only when a browser is found (sb.set_web_button, see sidebar.lua)
@@ -448,6 +450,40 @@ return function(config, wezterm, sb, layouts)
     if not here then return end
     local ok, opened = pcall(api.open, window, pane, uri)
     if ok and opened then return false end
+  end)
+
+  -- Files ---------------------------------------------------------------------------------------
+  -- The explorer announces Enter / o on images and PDFs as the user var hivegrid_open_view
+  -- (absolute paths, one per line; the same extensions as config/yazi/plugins/hivegrid.yazi).
+  -- Chromium shows them as file:// pages: the first in the tab's web pane (a new one when there
+  -- is none, like a clicked link), each further one in a pane of its own, at most MAX_VIEWS.
+  local VIEWABLE = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true }
+  local MAX_VIEWS = 4
+
+  local function file_url(path)
+    return 'file://' .. (path:gsub('[^%w%-_.~/]', function(c) return string.format('%%%02X', c:byte()) end))
+  end
+
+  local function viewable(path)
+    local ext = path:match('%.(%w+)$')
+    return path:sub(1, 1) == '/' and not path:find('%c') and ext ~= nil and VIEWABLE[ext:lower()] == true
+      and is_file(path)
+  end
+
+  wezterm.on('user-var-changed', function(window, pane, name, value)
+    if name ~= 'hivegrid_open_view' or not (sb and sb.is_sidebar(pane:pane_id())) then return end
+    local opened = 0
+    for path in tostring(value):gmatch('[^\n]+') do
+      if opened == MAX_VIEWS then break end
+      if viewable(path) then
+        local ok, err = api.open(window, pane, file_url(path), { new = opened > 0 })
+        if not ok then
+          toast(window, 'Could not open the file: ' .. tostring(err))
+          return
+        end
+        opened = opened + 1
+      end
+    end
   end)
 
   return api
