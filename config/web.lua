@@ -453,17 +453,17 @@ return function(config, wezterm, sb, layouts)
   end)
 
   -- Files ---------------------------------------------------------------------------------------
-  -- The explorer announces Enter / o and a double click on images, PDFs, video and audio as the
-  -- user var hivegrid_open_view (absolute paths, one per line; the same extensions as
-  -- config/yazi/plugins/hivegrid.yazi). Chromium shows them as file:// pages: the first in the
-  -- tab's web pane (a new one when there is none, like a clicked link), each further one in a
-  -- pane of its own, at most MAX_VIEWS.
+  -- The explorer announces Enter / o and a double click on images, PDFs, video, audio, HTML and
+  -- SVG as the user var hivegrid_open_view (absolute paths, one per line; the same extensions as
+  -- config/yazi/plugins/hivegrid.yazi). Chromium shows them as file:// pages, each in a new
+  -- browser tab of the tab's web pane (a pane opened on the first file when there is none, so
+  -- all files share one pane), at most MAX_VIEWS per announcement.
   local VIEWABLE = {
     png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true,
     mp4 = true, m4v = true, webm = true, ogv = true, mp3 = true, wav = true, ogg = true, oga = true,
-    opus = true, flac = true, m4a = true,
+    opus = true, flac = true, m4a = true, html = true, htm = true, svg = true,
   }
-  local MAX_VIEWS = 4
+  local MAX_VIEWS = 8
 
   local function file_url(path)
     return 'file://' .. (path:gsub('[^%w%-_.~/]', function(c) return string.format('%%%02X', c:byte()) end))
@@ -475,13 +475,28 @@ return function(config, wezterm, sb, layouts)
       and is_file(path)
   end
 
+  -- `url` in a new browser tab of the tab's web pane, which takes the focus; a tab without one
+  -- gets a web pane opened on `url`. Returns true and the pane, or false and a reason.
+  local function open_in_new_tab(window, pane, url)
+    local tab = tab_of(window, pane)
+    local existing = tab and web_of(tab)
+    if not existing then
+      local ok, new = api.open(window, pane, url, { new = true })
+      return ok, new
+    end
+    if not api.command(existing, 'tab;new', url) then return false, 'the web pane did not take the command' end
+    remember(tab:tab_id(), existing:pane_id())
+    existing:activate()
+    return true, existing
+  end
+
   wezterm.on('user-var-changed', function(window, pane, name, value)
     if name ~= 'hivegrid_open_view' or not (sb and sb.is_sidebar(pane:pane_id())) then return end
     local opened = 0
     for path in tostring(value):gmatch('[^\n]+') do
       if opened == MAX_VIEWS then break end
       if viewable(path) then
-        local ok, err = api.open(window, pane, file_url(path), { new = opened > 0 })
+        local ok, err = open_in_new_tab(window, pane, file_url(path))
         if not ok then
           toast(window, 'Could not open the file: ' .. tostring(err))
           return

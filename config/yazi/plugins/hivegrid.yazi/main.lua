@@ -1,8 +1,8 @@
 -- Talks to the Hivegrid WezTerm config (sidebar.lua) through user vars (OSC 1337
 -- SetUserVar), written to the controlling terminal rather than yazi's stdout so they reach
 -- WezTerm even while yazi owns the alternate screen.
---   plugin hivegrid open    open a terminal in the hovered folder (a file's folder), like a
---                           double click (init.lua): the user var hivegrid_open_dir
+--   plugin hivegrid open    open a terminal in the hovered folder (a file's folder): the user
+--                           var hivegrid_open_dir
 --   plugin hivegrid close   close the explorer the way its bar button does (the user var
 --                           sidebar_click), so the keyboard returns to the grid pane; a plain
 --                           quit leaves it on the bar
@@ -44,29 +44,19 @@ function M.set_var(name, value)
   return M.tty_write('\27]1337;SetUserVar=' .. name .. '=' .. base64(value) .. '\7')
 end
 
--- Files a web pane shows itself (Chromium's image, PDF, video and audio viewers). web.lua keeps
--- the same list for the paths it accepts; SVG is left out, it is text and edits as text.
+-- Files a web pane shows itself (Chromium's image, PDF, video, audio and HTML/SVG viewers).
+-- web.lua keeps the same list for the paths it accepts.
 -- Video and audio play as far as the browser's codecs go (Chrome has H.264 and AAC, Chromium
 -- builds without them play webm and ogg only).
 local VIEW = {
   png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true,
   mp4 = true, m4v = true, webm = true, ogv = true, mp3 = true, wav = true, ogg = true, oga = true,
-  opus = true, flac = true, m4a = true,
+  opus = true, flac = true, m4a = true, html = true, htm = true, svg = true,
 }
 
 local function viewable(path)
   local ext = path:match('%.(%w+)$')
   return ext ~= nil and VIEW[ext:lower()] == true
-end
-
--- A double click: a viewable file (when the sidebar says a web pane can open) is shown like
--- Enter does, anything else opens a terminal in that folder (a file's folder).
-function M.activate(path)
-  if os.getenv('HIVEGRID_VIEWER') == '1' and not path:find('\n') and viewable(path)
-    and M.set_var('hivegrid_open_view', path) then
-    return
-  end
-  M.open_dir(path)
 end
 
 function M.open_dir(path) M.set_var('hivegrid_open_dir', path) end
@@ -101,9 +91,9 @@ local function is_dir(path)
   return f ~= nil
 end
 
-local function edit()
-  local paths, dir = targets()
-  if dir then return ya.emit('enter', {}) end
+-- Opens files the way Enter does: viewable ones (HIVEGRID_VIEWER=1) in a web pane, text files in
+-- the editor, anything else through yazi's opener (which acts on the hovered entry).
+local function open_paths(paths)
   if #paths == 0 then return end
   if not os.getenv('WEZTERM_PANE') then return ya.emit('open', {}) end
   local all_view = os.getenv('HIVEGRID_VIEWER') == '1'
@@ -119,6 +109,18 @@ local function edit()
     if not is_text(p) then return ya.emit('open', {}) end
   end
   if not M.set_var('hivegrid_open_file', table.concat(paths, '\n')) then ya.emit('open', {}) end
+end
+
+local function edit()
+  local paths, dir = targets()
+  if dir then return ya.emit('enter', {}) end
+  open_paths(paths)
+end
+
+-- A double click (init.lua): a folder opens a terminal in it, a file opens like Enter does.
+function M.activate(path, is_folder)
+  if is_folder then return M.open_dir(path) end
+  open_paths({ path })
 end
 
 local serial = 0
