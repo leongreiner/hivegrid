@@ -44,6 +44,31 @@ function M.set_var(name, value)
   return M.tty_write('\27]1337;SetUserVar=' .. name .. '=' .. base64(value) .. '\7')
 end
 
+-- Files a web pane shows itself (Chromium's image, PDF, video and audio viewers). web.lua keeps
+-- the same list for the paths it accepts; SVG is left out, it is text and edits as text.
+-- Video and audio play as far as the browser's codecs go (Chrome has H.264 and AAC, Chromium
+-- builds without them play webm and ogg only).
+local VIEW = {
+  png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true,
+  mp4 = true, m4v = true, webm = true, ogv = true, mp3 = true, wav = true, ogg = true, oga = true,
+  opus = true, flac = true, m4a = true,
+}
+
+local function viewable(path)
+  local ext = path:match('%.(%w+)$')
+  return ext ~= nil and VIEW[ext:lower()] == true
+end
+
+-- A double click: a viewable file (when the sidebar says a web pane can open) is shown like
+-- Enter does, anything else opens a terminal in that folder (a file's folder).
+function M.activate(path)
+  if os.getenv('HIVEGRID_VIEWER') == '1' and not path:find('\n') and viewable(path)
+    and M.set_var('hivegrid_open_view', path) then
+    return
+  end
+  M.open_dir(path)
+end
+
 function M.open_dir(path) M.set_var('hivegrid_open_dir', path) end
 
 local hovered = ya.sync(function()
@@ -60,15 +85,6 @@ local targets = ya.sync(function()
   if #paths == 0 and h then return { tostring(h.url.path) }, h.cha.is_dir end
   return paths, false
 end)
-
--- Files a web pane shows itself (Chromium's image and PDF viewers). web.lua keeps the same
--- list for the paths it accepts; SVG is left out, it is text and edits as text.
-local VIEW = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true }
-
-local function viewable(path)
-  local ext = path:match('%.(%w+)$')
-  return ext ~= nil and VIEW[ext:lower()] == true
-end
 
 -- A file the editor can show: readable, no NUL byte in its first 8 KiB.
 local function is_text(path)

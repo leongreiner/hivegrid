@@ -453,11 +453,16 @@ return function(config, wezterm, sb, layouts)
   end)
 
   -- Files ---------------------------------------------------------------------------------------
-  -- The explorer announces Enter / o on images and PDFs as the user var hivegrid_open_view
-  -- (absolute paths, one per line; the same extensions as config/yazi/plugins/hivegrid.yazi).
-  -- Chromium shows them as file:// pages: the first in the tab's web pane (a new one when there
-  -- is none, like a clicked link), each further one in a pane of its own, at most MAX_VIEWS.
-  local VIEWABLE = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true }
+  -- The explorer announces Enter / o and a double click on images, PDFs, video and audio as the
+  -- user var hivegrid_open_view (absolute paths, one per line; the same extensions as
+  -- config/yazi/plugins/hivegrid.yazi). Chromium shows them as file:// pages: the first in the
+  -- tab's web pane (a new one when there is none, like a clicked link), each further one in a
+  -- pane of its own, at most MAX_VIEWS.
+  local VIEWABLE = {
+    png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, avif = true, pdf = true,
+    mp4 = true, m4v = true, webm = true, ogv = true, mp3 = true, wav = true, ogg = true, oga = true,
+    opus = true, flac = true, m4a = true,
+  }
   local MAX_VIEWS = 4
 
   local function file_url(path)

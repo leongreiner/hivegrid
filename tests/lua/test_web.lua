@@ -423,7 +423,7 @@ T.test('the explorer shows images and PDFs as file:// pages: the first in the ta
   local _, win, tab = setup(wz, { { id = 1, left = 31, width = 100, height = 50 }, { id = 99, left = 0, width = 30, height = 50 } })
   wz.GLOBAL.sidebar = { [tostring(tab:tab_id())] = { handle = 98, content = 99 } }
   local dir = T.tmpdir()
-  local a, b = T.write(dir .. '/a b#1.PNG', 'x'), T.write(dir .. '/doc.pdf', 'x')
+  local a, b = T.write(dir .. '/a b#1.PNG', 'x'), T.write(dir .. '/doc.mp4', 'x')
   local explorer = wz.mux.get_pane(99)
   wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', a)
   local term = wz.mux.get_pane(1)
@@ -432,7 +432,7 @@ T.test('the explorer shows images and PDFs as file:// pages: the first in the ta
   wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', b)
   T.eq(#term.splits, 1, 'the tab\'s web pane is reused')
   local page = wz.mux.get_pane(tab:panes()[#tab:panes()]:pane_id())
-  T.eq(sent(page), APC .. 'navigate;file://' .. dir .. '/doc.pdf\27\\')
+  T.eq(sent(page), APC .. 'navigate;file://' .. dir .. '/doc.mp4\27\\')
   wz.emit('user-var-changed', win, explorer, 'hivegrid_open_view', a .. '\n' .. b)
   T.eq(#page.splits, 1, 'the second of two files gets a new pane')
 end)

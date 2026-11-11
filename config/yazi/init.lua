@@ -3,8 +3,9 @@
 -- keymap.toml); the colours come from the theme.toml config/explorer.lua generates.
 local hg = require('hivegrid')
 
--- Double click on an entry asks WezTerm (the user var hivegrid_open_dir, handled in
--- sidebar.lua) to open a terminal in that folder, or in the file's folder.
+-- Double click on an entry asks WezTerm (the user var hivegrid_open_view, or hivegrid_open_dir;
+-- both handled in config/) to show a viewable file (image, PDF, video, audio) in a web pane, else
+-- to open a terminal in that folder, or in the file's folder (plugins/hivegrid.yazi, activate).
 -- yazi's own click handler only hovers the entry (right click also opens it), so a double
 -- click does nothing by itself in yazi.
 local DOUBLE_CLICK_SECS = 0.4
@@ -22,7 +23,7 @@ function Entity:click(event, up)
   if last.x == event.x and last.y == event.y and now - last.t <= DOUBLE_CLICK_SECS then
     local path = last.path
     last = {}
-    hg.open_dir(path)
+    hg.activate(path)
   else
     last = { x = event.x, y = event.y, t = now, path = tostring(self._file.url.path) }
   end
