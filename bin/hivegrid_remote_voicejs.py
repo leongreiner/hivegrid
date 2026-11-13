@@ -161,9 +161,10 @@ VOICE_JS = r"""(function () {
     if (m.setupComplete) {
       s.fails = 0;
       s.up = true;
+      s.held = false;
       // Google ends a connection after about ten minutes; the next one does not know what was said before.
       if (s.sessions++) { line(s, "note", "reconnected: the assistant starts a new conversation", "tool"); }
-      setState(s, s.muted ? "muted" : "listening");
+      setState(s, s.muted ? "muted" : (s.ptt ? "listening" : "listening"));
       return;
     }
     if (m.toolCall && m.toolCall.functionCalls) { m.toolCall.functionCalls.forEach(function (fc) { runTool(s, fc); }); }
@@ -192,7 +193,7 @@ VOICE_JS = r"""(function () {
     s.up = false;
     s.retry.hidden = true;
     setState(s, "connecting");
-    s.ctx.api("/api/voice/session", { body: {}, timeout: 15000 }).then(function (r) {
+    s.ctx.api("/api/voice/session", { body: { ptt: s.ptt }, timeout: 15000 }).then(function (r) {
       if (S !== s) { return; }
       if (r.status !== 200 || !r.data) { fail(s, r.data && r.data.message ? String(r.data.message) : "no session (" + r.status + ")"); return; }
       s.confirm = r.data.confirm || [];
@@ -237,7 +238,7 @@ VOICE_JS = r"""(function () {
         node.port.onmessage = function (ev) {
           if (S !== s) { return; }
           if (!s.calm) { s.orb.style.setProperty("--lvl", String(Math.min(1, ev.data.level * 6).toFixed(2))); }
-          if (s.muted || !s.ws || s.ws.readyState !== 1 || s.state === "connecting") { return; }
+          if (s.muted || !s.ws || s.ws.readyState !== 1 || s.state === "connecting" || (s.ptt && !s.held)) { return; }
           s.ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64(new Uint8Array(ev.data.pcm)), mimeType: "audio/pcm;rate=16000" } } }));
         };
         s.audio.createMediaStreamSource(stream).connect(node);
@@ -245,6 +246,15 @@ VOICE_JS = r"""(function () {
         return s.audio.resume();
       });
     });
+  }
+
+  function applyMode(s) {
+    s.talk.hidden = !s.ptt;
+    s.mode.textContent = s.ptt ? "Open mic" : "Noisy?";
+    s.mode.setAttribute("aria-pressed", String(s.ptt));
+    s.mode.title = s.ptt ? "Back to listening all the time" : "Hold a button to talk instead: background noise cannot interrupt";
+    s.held = false;
+    s.talk.classList.remove("held");
   }
 
   function close() {
@@ -268,6 +278,8 @@ VOICE_JS = r"""(function () {
     var s = { ctx: ctx, state: "connecting", ws: null, audio: null, stream: null, node: null, lock: null, muted: false, sessions: 0, fails: 0, up: false,
               sources: [], next: 0, tools: {}, cancelled: {}, open: { you: null, model: null }, confirm: [], back: document.activeElement,
               calm: !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) };
+    s.ptt = false;
+    try { s.ptt = window.localStorage.getItem("hgvoice.ptt") === "1"; } catch (e) { /* no storage */ }
     s.glyph = h("span", { class: "vg", "aria-hidden": "true" });
     s.orb = h("div", { class: "vorb" }, s.glyph);
     s.label = h("p", { class: "vstate", role: "status" });
@@ -281,13 +293,45 @@ VOICE_JS = r"""(function () {
     } }, "Mute");
     s.retry = h("button", { class: "btn primary", type: "button", hidden: true, onclick: function () { s.fails = 0; connect(s); } }, "Try again");
     s.end = h("button", { class: "btn danger", type: "button", onclick: close }, "End");
+    // Noisy place: the microphone is sent only while the talk button is held, so noise can neither start a turn nor cut the assistant off.
+    s.talk = h("button", { class: "btn primary vtalk", type: "button", "aria-label": "Hold to talk" }, "Hold to talk");
+    function talkOn(ev) {
+      ev.preventDefault();
+      if (s.held || !s.ws || s.ws.readyState !== 1 || s.state === "connecting") { return; }
+      s.held = true;
+      stopSpeech(s);
+      s.open.model = null;
+      s.talk.classList.add("held");
+      send(s, { realtimeInput: { activityStart: {} } });
+      settle(s);
+    }
+    function talkOff(ev) {
+      if (ev) { ev.preventDefault(); }
+      if (!s.held) { return; }
+      s.held = false;
+      s.talk.classList.remove("held");
+      send(s, { realtimeInput: { activityEnd: {} } });
+    }
+    s.talk.addEventListener("pointerdown", talkOn);
+    ["pointerup", "pointercancel", "pointerleave"].forEach(function (n) { s.talk.addEventListener(n, talkOff); });
+    s.talk.addEventListener("contextmenu", function (ev) { ev.preventDefault(); });
+    s.talk.addEventListener("keydown", function (ev) { if ((ev.key === " " || ev.key === "Enter") && !ev.repeat) { talkOn(ev); } });
+    s.talk.addEventListener("keyup", function (ev) { if (ev.key === " " || ev.key === "Enter") { talkOff(ev); } });
+    s.mode = h("button", { class: "btn", type: "button", "aria-pressed": String(s.ptt), onclick: function () {
+      s.ptt = !s.ptt;
+      try { window.localStorage.setItem("hgvoice.ptt", s.ptt ? "1" : "0"); } catch (e) { /* no storage */ }
+      applyMode(s);
+      s.sessions = 0;
+      connect(s);
+    } });
     s.el = h("div", { class: "voice v-connecting", role: "dialog", "aria-modal": "true", "aria-label": "Voice" },
       h("header", { class: "vtop" }, h("span", { class: "accent" }, "\u2b21 Voice"), h("span", { class: "vsub" }, "talk to manage your agents")),
-      h("div", { class: "vmid" }, s.orb, s.label), s.log, h("footer", { class: "vfoot" }, s.mute, s.retry, s.end));
+      h("div", { class: "vmid" }, s.orb, s.label), s.log, s.talk, h("footer", { class: "vfoot" }, s.mode, s.mute, s.retry, s.end));
     s.onKey = function (ev) { if (ev.key === "Escape" && !document.querySelector("dialog[open]")) { ev.preventDefault(); close(); } };
     document.addEventListener("keydown", s.onKey, true);
     document.body.appendChild(s.el);
     S = s;
+    applyMode(s);
     setState(s, "connecting");
     s.end.focus({ preventScroll: true });
     if (navigator.wakeLock && navigator.wakeLock.request) {
@@ -332,6 +376,9 @@ VOICE_CSS = r"""/* Voice mode: a full-screen overlay. Colours only from the them
 .vl .vt { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--bright); }
 .vl.me .vt { color: var(--text); }
 .vl.tool .vt { color: var(--dim); font-family: var(--mono); font-size: 13px; }
+.vtalk { align-self: center; width: min(320px, 90%); min-height: 76px; margin: 10px 0 4px; border-radius: 38px; font-size: 18px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.vtalk.held { background: var(--green); color: var(--deep); }
+.vtalk[hidden] { display: none; }
 .vfoot { display: flex; justify-content: center; gap: 12px; padding-top: 12px; border-top: 1px solid var(--rule-base); }
 .vfoot .btn { flex: 1 1 0; max-width: 200px; min-height: 52px; border-radius: 26px; font-size: 16px; }
 @media (prefers-reduced-motion: reduce) { .voice .vg, .voice.v-speaking .vorb { animation: none; } .vorb { transition: none; } }

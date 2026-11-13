@@ -101,6 +101,12 @@ class TestMint(unittest.TestCase):
         self.assertEqual(len(locked["tools"][0]["functionDeclarations"]), len(M.TOOLS))
         self.assertNotIn(KEY, json.dumps(body))
 
+    def test_noise_cannot_start_a_turn(self):
+        auto = V.session_setup("gemini-3.8-live", "Kore", "box")["realtimeInputConfig"]["automaticActivityDetection"]
+        self.assertEqual((auto["startOfSpeechSensitivity"], auto["silenceDurationMs"]), ("START_SENSITIVITY_LOW", 700))
+        held = V.session_setup("gemini-3.8-live", "Kore", "box", ptt=True)["realtimeInputConfig"]
+        self.assertEqual(held, {"automaticActivityDetection": {"disabled": True}}, "push to talk: the page says when a turn is")
+
     def test_a_refusal_is_said_without_the_key(self):
         for answer in ((400, {"error": {"status": "INVALID_ARGUMENT", "message": f"API key {KEY} not valid"}}), (200, {}), (500, {})):
             with self.assertRaises(V.VoiceError) as caught:
@@ -176,6 +182,12 @@ class TestSession(VoiceCase):
         self.assertEqual(self.jreq("POST", "/api/voice/session", {"model": "x"})[0].status, 400)
         self.assertEqual(self.jreq("POST", "/api/voice/session", {}, headers={"Origin": "https://evil.example"})[0].status, 403)
         self.assertEqual(self.minted, [])
+
+    def test_push_to_talk_asks_for_a_session_without_automatic_detection(self):
+        r, data = self.jreq("POST", "/api/voice/session", {"ptt": True})
+        self.assertEqual((r.status, data["ptt"]), (200, True))
+        self.assertTrue(self.minted[-1]["bidiGenerateContentSetup"]["realtimeInputConfig"]["automaticActivityDetection"]["disabled"])
+        self.assertEqual(self.jreq("POST", "/api/voice/session", {"ptt": "yes"})[0].status, 400)
 
     def test_sessions_are_rate_limited(self):
         self.tick = 0

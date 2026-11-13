@@ -108,9 +108,19 @@ def destructive(name):
     return bool(spec and spec[1]["annotations"]["destructiveHint"])
 
 
-def session_setup(model, voice, host):
+# Turn detection. Automatic: speech must be clearly speech to start a turn (noise stays below it) and a pause of 700 ms
+# ends it (Google's recommended 500 to 800; the 100 ms of its examples splits sentences). Push to talk (`ptt`): the page
+# says when you speak (activityStart/activityEnd), so nothing else can start a turn or cut the assistant off.
+AUTO_VAD = {"automaticActivityDetection": {"startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                                           "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                                           "prefixPaddingMs": 120, "silenceDurationMs": 700}}
+PTT_VAD = {"automaticActivityDetection": {"disabled": True}}
+
+
+def session_setup(model, voice, host, ptt=False):
     """The session setup the token is locked to (BidiGenerateContentSetup)."""
     return {
+        "realtimeInputConfig": PTT_VAD if ptt else AUTO_VAD,
         "model": "models/" + model,
         "generationConfig": {"responseModalities": ["AUDIO"],
                              "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
@@ -175,16 +185,16 @@ class Voice:
             return "voice mode is off: set remote.voice to true in settings.json"
         return "voice mode has no API key: put a Gemini API key into the gemini-key file (mode 0600) next to settings.json"
 
-    def session(self):
+    def session(self, ptt=False):
         """What the page needs to open a session: the WebSocket address, the token, the first message to send."""
         key = self.key()
         if not self.settings()["voice"] or key is None:
             raise VoiceError("voice_disabled", self.why_off())
         cfg = self.settings()
-        setup = session_setup(cfg["voice_model"], cfg["voice_name"], self.host)
+        setup = session_setup(cfg["voice_model"], cfg["voice_name"], self.host, ptt)
         token, expires = mint(key, setup, self.wall(), self.post)
         return {"ok": True, "url": WS_URL, "token": token, "expires": expires, "setup": {"model": setup["model"]},
-                "model": cfg["voice_model"], "voice": cfg["voice_name"],
+                "model": cfg["voice_model"], "voice": cfg["voice_name"], "ptt": bool(ptt),
                 "confirm": sorted(n for n in M.TOOLS if destructive(n))}
 
     def run(self, access_token, name, args, confirm=False, alive=None):

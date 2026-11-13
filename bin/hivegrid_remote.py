@@ -2119,11 +2119,13 @@ class App:
             raise HttpError("voice_disabled", "voice mode is not available on this server")
         try:
             if path == "/api/voice/session":
-                self._fields(body, ())
+                self._fields(body, ("ptt",))
+                if not isinstance(body.get("ptt", False), bool):
+                    raise HttpError("bad_request", "ptt must be true or false")
                 if not self.voice.enabled():
                     raise V.VoiceError("voice_disabled", self.voice.why_off())
                 self._spend(self.voice_bucket, "too many voice sessions started: wait a moment")
-                doc = self.voice.session()
+                doc = self.voice.session(body.get("ptt", False))
                 self.log("voice session")
                 return Response(200, _json_body(doc), headers={"Cache-Control": "no-store"})
             self._fields(body, ("name", "args", "confirm"))
