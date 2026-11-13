@@ -244,11 +244,29 @@ a { color: var(--accent); text-decoration: none; }
   background: var(--deep);
   border-bottom: 1px solid var(--rule);
 }
+.top { position: relative; }
+.nav-btn { display: none; position: relative; }
+.pages { display: contents; }
+.pages .btn::after { display: none; }
+/* narrow screens: the pages (agents, terminals, bots) sit behind a burger button, voice and the menu stay in the bar */
+@media (max-width: 640px) {
+  .nav-btn:not([hidden]) { display: inline-flex; }
+  .count { display: none; }
+  .pages { display: none; position: absolute; z-index: 40; top: 100%; right: calc(4px + var(--sar)); min-width: 220px; padding: 6px; gap: 2px;
+    flex-direction: column; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+  .top.nav-open .pages { display: flex; }
+  .pages .btn.icon { width: auto; height: 48px; justify-content: flex-start; gap: 12px; padding: 0 14px; font-size: 18px; border-radius: 8px; }
+  .pages .btn::after { display: inline; content: attr(aria-label); font-size: 15px; color: var(--text); font-weight: 500; }
+  .pages .btn.on { background: var(--raised); }
+  .pages .btn.on::after { color: var(--bright); }
+  .pages .bdot { position: static; margin-left: auto; }
+}
 .top-logo { width: 26px; height: 26px; flex: none; display: block; }
 .brand { font-weight: 700; color: var(--accent); white-space: nowrap; }
 .count { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .top .spacer { flex: 1; min-width: 0; }
-.top-chips { display: flex; align-items: center; gap: 6px; flex: none; }
+.top-chips { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
+.top-chips .status-chip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* ---------------------------------------------------------------- layout */
 .split { flex: 1; min-height: 0; display: flex; min-width: 0; position: relative; }
@@ -923,6 +941,7 @@ textarea.field { resize: vertical; line-height: 1.4; min-height: 88px; }
 #app.embed .bots-back { display: none; }
 /* grid: every agent as a live tile on one screen (#/grid), for the desktop; opening a tile goes to its chat (#/a/<id>) */
 .grid-btn { display: none; }
+@media (max-width: 899px) { .top .grid-btn.btn { display: none; } }
 @media (min-width: 900px) { .grid-btn { display: inline-flex; } }
 #app.embed .grid-btn { display: none; }
 .grid-pane { flex: 1; min-width: 0; min-height: 0; display: none; flex-direction: column; background: var(--base); }
@@ -1413,6 +1432,11 @@ APP_JS = r"""(function () {
     window.clearTimeout(metaTimer);
     metaTimer = window.setTimeout(loadMeta, Math.min(5000, 1000 * Math.pow(2, metaFails)));
   }
+  function setNav(on) {
+    if (!U.top) { return; }
+    U.top.classList.toggle("nav-open", on);
+    U.navBtn.setAttribute("aria-expanded", String(on));
+  }
   function applyMeta() {
     var app = document.getElementById("app");
     app.classList.toggle("ro", !!meta.readonly);
@@ -1420,6 +1444,7 @@ APP_JS = r"""(function () {
     if (U.agentsBtn) { U.agentsBtn.hidden = !(meta.terminal || hasBots()); }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
     if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
+    if (U.navBtn) { U.navBtn.hidden = !(meta.terminal || hasBots()); }
     if (U.voiceBtn) { U.voiceBtn.hidden = !hasVoice(); }
     pagerSet((!!meta.terminal || hasBots()) && !EMBED);
     routePages();
@@ -1492,15 +1517,23 @@ APP_JS = r"""(function () {
     U.count = h("span", { class: "count" });
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
-    U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u2261");
+    U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u22ef");
     U.agentsBtn = h("a", { class: "btn ghost icon", href: "#/", "aria-label": "Agents", hidden: !((meta && meta.terminal) || hasBots()) }, "\u25a3");
     U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
     U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
     U.voiceBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Voice", title: "Voice", "aria-haspopup": "dialog", hidden: !hasVoice(), onclick: openVoice }, "\u25c9");
+    U.navDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
+    U.navBtn = h("button", { class: "btn ghost icon nav-btn has-dot", type: "button", "aria-label": "Pages", "aria-haspopup": "true", "aria-expanded": "false", hidden: !((meta && meta.terminal) || hasBots()),
+      onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
+    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn);
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.voiceBtn, U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.voiceBtn, U.navBtn, U.pages, U.menuBtn);
+    U.top = top;
+    document.addEventListener("click", function (ev) { if (U.top.classList.contains("nav-open") && !U.pages.contains(ev.target)) { setNav(false); } });
+    window.addEventListener("hashchange", function () { setNav(false); });
+    window.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && U.top.classList.contains("nav-open")) { setNav(false); U.navBtn.focus({ preventScroll: true }); } });
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -3763,6 +3796,8 @@ APP_JS = r"""(function () {
     var u = sum ? sum.unseen || 0 : 0;
     U.botsDot.hidden = !(n > 0 || u > 0);
     U.botsDot.className = "bdot" + (n > 0 ? " attn" : "");
+    U.navDot.hidden = U.botsDot.hidden;
+    U.navDot.className = U.botsDot.className;
     U.botsBtn.setAttribute("aria-label", "Bots" + (n > 0 ? ", " + n + " need a look" : (u > 0 ? ", " + u + " new " + (u === 1 ? "report" : "reports") : "")));
   }
   function botsPost(id, verb, body, okMsg) {

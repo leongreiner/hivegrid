@@ -313,22 +313,26 @@ VOICE_CSS = r"""/* Voice mode: a full-screen overlay. Colours only from the them
 .voice.v-error { --sc: var(--red); }
 .vtop { display: flex; align-items: baseline; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--rule-base); font-weight: 700; }
 .vtop .vsub { color: var(--muted); font-weight: 400; font-size: 13px; }
-.vmid { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 0 18px; }
-.vorb { --lvl: 0; width: 132px; height: 132px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+.vmid { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 36px 0 22px; }
+.vorb { --lvl: 0; width: 168px; height: 168px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
   border: 2px solid var(--sc); background: color-mix(in srgb, var(--base) 88%, var(--sc) 12%);
   box-shadow: 0 0 0 calc(var(--lvl) * 18px) color-mix(in srgb, transparent 82%, var(--sc) 18%); transition: box-shadow 90ms linear, border-color 150ms; }
 .voice:not(.v-listening) .vorb { box-shadow: none; }
-.vg { font-size: 44px; line-height: 1; color: var(--sc); }
+.voice.v-speaking .vorb { animation: vbreath 1.6s ease-in-out infinite; }
+@keyframes vbreath { 50% { transform: scale(1.06); box-shadow: 0 0 0 16px color-mix(in srgb, transparent 84%, var(--sc) 16%); } }
+.vg { font-size: 56px; line-height: 1; color: var(--sc); }
 .voice.v-working .vg, .voice.v-connecting .vg { animation: vspin 1.2s linear infinite; }
 @keyframes vspin { to { transform: rotate(360deg); } }
 .vstate { margin: 0; color: var(--sc); font-weight: 700; text-align: center; overflow-wrap: anywhere; }
 .vlog { flex: 1 1 auto; min-height: 0; overflow-y: auto; width: 100%; max-width: 720px; margin: 0 auto; padding: 4px 0; }
-.vl { margin: 0 0 8px; display: flex; gap: 10px; line-height: 1.4; }
-.vl .vw { flex: 0 0 68px; color: var(--muted); font-size: 13px; padding-top: 1px; }
+.vl { margin: 0 0 8px; display: flex; gap: 10px; line-height: 1.4; padding: 8px 12px; border-radius: 12px; background: var(--surface); }
+.vl.me { background: var(--raised); }
+.vl.tool { background: transparent; padding: 0 12px; }
+.vl .vw { flex: 0 0 60px; color: var(--muted); font-size: 12px; padding-top: 2px; text-transform: uppercase; letter-spacing: .04em; }
 .vl .vt { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--bright); }
 .vl.me .vt { color: var(--text); }
 .vl.tool .vt { color: var(--dim); font-family: var(--mono); font-size: 13px; }
 .vfoot { display: flex; justify-content: center; gap: 12px; padding-top: 12px; border-top: 1px solid var(--rule-base); }
-.vfoot .btn { min-width: 96px; min-height: 44px; }
-@media (prefers-reduced-motion: reduce) { .voice .vg { animation: none; } .vorb { transition: none; } }
+.vfoot .btn { flex: 1 1 0; max-width: 200px; min-height: 52px; border-radius: 26px; font-size: 16px; }
+@media (prefers-reduced-motion: reduce) { .voice .vg, .voice.v-speaking .vorb { animation: none; } .vorb { transition: none; } }
 """
