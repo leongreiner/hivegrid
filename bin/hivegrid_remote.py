@@ -2661,10 +2661,6 @@ def build_parser():
     a.add_argument("--port", type=_port_arg, default=DEFAULT_PORT)
     a.add_argument("--token-file")
     a.add_argument("session")
-    m = sub.add_parser("mcp", help="serve the agents as MCP tools on stdin/stdout (for Claude Code; see docs/remote.md, MCP)")
-    m.add_argument("--host", metavar="NAME", help="a machine of remote-hosts.json instead of the local server")
-    m.add_argument("--port", type=_port_arg, default=None, help=f"the local server's port: default {DEFAULT_PORT}, or HIVEGRID_REMOTE_PORT")
-    m.add_argument("--token-file")
     return p
 
 
@@ -2796,45 +2792,10 @@ def cmd_attach(args):
     return AT.main(args.host, args.port, args.token_file or default_token_path(), args.session, read_token)
 
 
-def cmd_mcp(args):
-    """The MCP server for one host: the local server with its token file, or with --host a machine of
-    remote-hosts.json with the token `hivegrid-host-page token NAME` stored. A missing token is an error of each tool
-    call, not of the start: the client shows a tool's text, a server that does not start only says "failed"."""
-    if args.host:
-        import hivegrid_hostpage as HP
-        entry = next((h for h in HP.hosts() if h["name"] == args.host), None)
-        if entry is None:
-            print(f"hivegrid-remote: no host {args.host!r} in {HP.hosts_path()}", file=sys.stderr)
-            return 2
-        _url, host, port = HP.valid_url(entry["url"])
-
-        def token():
-            found = HP.read_token(args.host)
-            if found is None:
-                raise M.ApiError(0, "no_token", f"no access token for host {args.host}; run: hivegrid-host-page token {args.host}")
-            return found
-        return M.main(M.Remote(args.host, host, port, token, tls=entry["url"].startswith("https:")))
-    try:
-        port = resolve_port(args)
-    except ValueError as exc:
-        print(f"hivegrid-remote: {exc}", file=sys.stderr)
-        return 2
-    path = args.token_file or default_token_path()
-
-    def token():
-        try:
-            return read_token(path)
-        except TokenError as exc:
-            raise M.ApiError(0, "no_token", str(exc)) from None
-    return M.main(M.Remote(socket.gethostname().lower(), "127.0.0.1", port, token))
-
-
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "attach":
         return cmd_attach(args)
-    if args.cmd == "mcp":
-        return cmd_mcp(args)
     return cmd_token(args) if args.cmd == "token" else cmd_serve(args)
 
 

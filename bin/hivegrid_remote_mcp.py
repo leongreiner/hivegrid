@@ -1,21 +1,16 @@
-"""`hivegrid-remote mcp`: the agents of one Hivegrid as tools of an MCP client (Claude Code), over stdio.
+"""The agent tools of voice mode: what the voice model may call, as plain functions over one host's HTTP API.
 
-A translator and nothing else: every tool is one or a few calls of the server's own HTTP API (docs/remote.md, "API")
-with the token of the token file, so the checks, the limits and `--read-only` of hivegrid-remote hold here as they do
-for the phone page, and this program touches no pane, no session file and no setting itself. One process speaks for
-one host: the local server, or with `--host NAME` a machine of remote-hosts.json. The terminal API is not offered.
-Agents are named by the number the dock shows ("3", "2·3"), never by a pane id.
-
-The protocol is JSON-RPC 2.0 with one message per line (the MCP stdio transport): stdout carries nothing else, notes
-go to stderr. A tool call runs on a thread of its own, so a held one (`wait_for_agents`) does not block the others, and
-`notifications/cancelled` ends it. See docs/remote.md ("MCP").
+Every tool is one or a few calls of the server's own API (docs/remote.md, "API") with the caller's token, so the checks,
+the limits and `--read-only` of hivegrid-remote hold for it, and it touches no pane, session file or setting itself.
+`TOOLS` is the registry (name -> function and schema); `run_tool` runs one and answers (text, is error);
+hivegrid_remote_voice.py declares them to the voice model and calls them. Agents are named by the number the dock shows
+("3", "2·3"), never by a pane id. The terminal API is not offered.
 """
 import http.client
 import json
 import math
 import re
 import ssl
-import sys
 import threading
 import time
 import urllib.parse
@@ -657,7 +652,7 @@ def bot_action(ctx, args):
     return {"bot": b["id"], "action": args["action"], **{k: v for k, v in (done or {}).items() if k != "ok"}}
 
 
-# ---------------------------------------------------------------- the protocol
+# ---------------------------------------------------------------- running a tool
 
 TYPES = {"string": lambda v: isinstance(v, str), "boolean": lambda v: isinstance(v, bool),
          "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
@@ -700,100 +695,3 @@ def run_tool(name, args, ctx, log=None):
         if log:
             log(f"{name} failed: {type(exc).__name__}: {exc}")
         return f"internal error in {name}: {type(exc).__name__}", True
-
-
-def _spawn(fn):
-    threading.Thread(target=fn, daemon=True).start()
-
-
-class Server:
-    """The MCP side: `handle(message)` answers through `write(line)`. `spawn(fn)` runs a tool call (a thread)."""
-
-    def __init__(self, remote, write, clock=time.monotonic, wall=time.time, spawn=_spawn, log=None):
-        self.remote, self.write, self.clock, self.wall, self.spawn, self.log = remote, write, clock, wall, spawn, log
-        self.lock = threading.Lock()
-        self.calls = {}                # request id -> the event that cancels it
-
-    def send(self, msg):
-        line = json.dumps(msg)         # ASCII: whatever the locale of stdout is
-        with self.lock:
-            self.write(line + "\n")
-
-    def result(self, ident, result):
-        self.send({"jsonrpc": "2.0", "id": ident, "result": result})
-
-    def error(self, ident, code, message):
-        self.send({"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}})
-
-    def feed(self, line):
-        """One line of the client."""
-        if not line.strip():
-            return
-        try:
-            msg = json.loads(line)
-        except (ValueError, RecursionError):
-            return self.error(None, -32700, "parse error")
-        self.handle(msg)
-
-    def handle(self, msg):
-        if not isinstance(msg, dict) or not isinstance(msg.get("method"), str):
-            if isinstance(msg, dict) and ("result" in msg or "error" in msg):
-                return                                  # an answer to a request: this server sends none
-            return self.error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
-        method, params = msg["method"], msg.get("params") if isinstance(msg.get("params"), dict) else {}
-        if "id" not in msg:                             # a notification: never answered
-            if method == "notifications/cancelled":
-                with self.lock:
-                    event = self.calls.get(params.get("requestId"))
-                if event:
-                    event.set()
-            return
-        ident = msg["id"]
-        if isinstance(ident, bool) or not isinstance(ident, (str, int)):
-            return self.error(None, -32600, "invalid request")
-        if method == "initialize":
-            version = params.get("protocolVersion")
-            return self.result(ident, {
-                "protocolVersion": version if version in PROTOCOLS else PROTOCOLS[0], "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hivegrid", "title": f"Hivegrid ({self.remote.name})", "version": "1"},
-                "instructions": INSTRUCTIONS.format(host=self.remote.name)})
-        if method == "ping":
-            return self.result(ident, {})
-        if method == "tools/list":
-            return self.result(ident, {"tools": [spec for _fn, spec in TOOLS.values()]})
-        if method != "tools/call":
-            return self.error(ident, -32601, f"method not found: {cut(method, 60)}")
-        name = params.get("name")
-        if name not in TOOLS:
-            return self.error(ident, -32602, f"unknown tool: {cut(str(name), 60)}")
-        event = threading.Event()
-        with self.lock:
-            self.calls[ident] = event
-        self.spawn(lambda: self._call(ident, name, params.get("arguments") or {}, event))
-
-    def _call(self, ident, name, args, event):
-        try:
-            text, failed = run_tool(name, args, Call(self.remote, self.clock, self.wall, event), self.log)
-        except Cancelled:
-            return
-        finally:
-            with self.lock:
-                self.calls.pop(ident, None)
-        self.result(ident, {"content": [{"type": "text", "text": text}], "isError": failed})
-
-
-def main(remote, stdin=None, stdout=None):
-    """Serves the client on stdin and stdout until stdin closes."""
-    stdin, stdout = stdin or sys.stdin.buffer, stdout or sys.stdout
-
-    def write(text):
-        stdout.write(text)
-        stdout.flush()
-
-    server = Server(remote, write, log=lambda text: print("hivegrid-remote mcp: " + text, file=sys.stderr, flush=True))
-    try:
-        for raw in stdin:
-            server.feed(raw.decode("utf-8", "replace"))
-    except (KeyboardInterrupt, BrokenPipeError):
-        pass
-    return 0

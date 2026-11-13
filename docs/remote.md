@@ -240,61 +240,9 @@ The Bots are scheduled `omp` agents: one-time and recurring tasks and persistent
 
 A bot's prompt text is checked like the text of a chat prompt (no escape sequences), and an agent bot's identity and memory are shown as text only.
 
-## MCP (Claude Code)
-
-`hivegrid-remote mcp` offers the agents to an MCP client as tools, so you manage them by talking to Claude Code: "what are my agents doing", "tell 3 to rebase and tell me what it says", "start one in fomo on the private account", "quit the two that are done". It is a translator in front of the API below and nothing else: every tool is one or a few of its requests with the token of the token file, so the checks, the limits and `--read-only` of the server hold for it as they do for the page, and it touches no pane, session file or setting itself. It speaks MCP over stdin and stdout (standard library only, no SDK), and the phone terminal is not among its tools.
-
-**One server per host.** A `hivegrid-remote mcp` process speaks for one Hivegrid: the one of the machine it runs on, through `127.0.0.1` and that machine's token file. Register it once in Claude Code on the machine that runs Hivegrid (here a machine called `slx-002`):
-
-```sh
-claude mcp add --scope user hivegrid -- hivegrid-remote mcp
-```
-
-It needs the server running (`hivegrid-autostart install`, or `hivegrid-remote serve`) and the token file (`hivegrid-remote token`); neither `tailscale serve` nor the phone page is needed for it. `--port N` (`HIVEGRID_REMOTE_PORT`) and `--token-file PATH` (`HIVEGRID_REMOTE_TOKEN_FILE`) follow a server that was moved. A missing token, a server that is down or a window that is closed is the text of the tool's answer, not a server that fails to start.
-
-To manage a Hivegrid from another machine, give that machine one entry per host: `hivegrid-remote mcp --host NAME` takes the address from `remote-hosts.json` and the token `hivegrid-host-page token NAME` stored (see Remote host page; https with certificates verified), and each host is its own entry, so Claude Code names the tools after it:
-
-```sh
-claude mcp add --scope user hivegrid-slx-002 -- hivegrid-remote mcp --host slx-002
-```
-
-**From the phone.** A phone runs no local MCP server, and a custom connector of claude.ai would need this server on the public internet, which it never is (see Set up: no `tailscale funnel`). The way is Claude Code's [Remote Control](https://code.claude.com/docs/en/remote-control): a Claude Code session that runs on the Hivegrid machine and is driven from the Claude app, with the tools of that machine.
-
-1. On the Hivegrid machine, in a folder of its own (trust is asked again at every start in the home directory itself): `mkdir -p ~/hivegrid-control && cd ~/hivegrid-control && claude remote-control --name "Hivegrid slx-002"`. It needs a claude.ai login (`/login`), not an API key. Keep it running, for example in a Hivegrid pane.
-2. In the Claude app on the phone, open **Code** and pick that session. Type or dictate; Claude calls the tools on the machine and answers.
-3. Claude Code asks before it uses a tool for the first time, and the question appears in the app. To skip it for the tools that only read, allow them in `~/hivegrid-control/.claude/settings.json`:
-
-   ```json
-   { "permissions": { "allow": ["mcp__hivegrid__list_agents", "mcp__hivegrid__read_agent", "mcp__hivegrid__wait_for_agents", "mcp__hivegrid__host_status", "mcp__hivegrid__list_history", "mcp__hivegrid__list_start_options", "mcp__hivegrid__agent_options", "mcp__hivegrid__list_bots", "mcp__hivegrid__read_bot"] } }
-   ```
-
-   `"mcp__hivegrid"` alone allows every tool, the ones that prompt, start and quit agents included: then nothing asks you before Claude acts on what it understood.
-
-**The tools.** An agent is named by its dock number as everywhere else (`3`, or `2·3` with several tabs; `2.3` is read the same), never by a pane id; an account by its label or omp profile; a model by its id or a unique part of it; a bot by its id or name. A name that matches nothing, or several things, is refused with the list of what there is.
-
-| Tool | What it does |
-| --- | --- |
-| `list_agents` | Every agent: number, state, title, folder, model, profile, context fill, what it asks (`needs`) or which limit stopped it |
-| `read_agent` | The newest chat messages of an agent (tool calls as one line each, no thinking), or its screen with `screen` and when it has no chat |
-| `send_prompt` | A prompt to an agent. With `wait` (up to 600 seconds) it returns when the turn has ended or the agent needs you, with the reply the agent gave to this prompt |
-| `answer_agent` | Answers a `needs you` agent: `approve` (yes or no), `option` (the number of a question's option), `text`, or `plan` with `feedback` for a plan review. An answer of the wrong kind presses nothing |
-| `interrupt_agent` | Esc in the agent's pane |
-| `wait_for_agents` | Waits until the named agents (else every working one) stopped working, the first or `all` of them, and returns their state and last reply; `timed_out` and who still works after the timeout (120 seconds, up to 600) |
-| `list_start_options`, `start_agent` | The accounts and folders a session can start in (with `search`, folders below the home directory), and a new agent in one of them; a first `prompt` is sent once omp is up (idle and publishing its model, within 30 seconds), never earlier |
-| `quit_agent` | Quits an idle, done or limited agent (see Quitting a session); a working one is refused |
-| `list_history`, `revive_session` | Past sessions, and one started again |
-| `agent_options`, `set_model`, `switch_account` | An agent's models, thinking levels and the accounts its chat can move to; the switches (see Switching account) |
-| `acknowledge_agent` | `done` to `idle` |
-| `host_status` | Every account's quota windows, the usage of the live agents, CPU, memory, disk, GPU, read-only or not |
-| `list_bots`, `read_bot`, `message_bot`, `bot_action` | The Bots: the list, one bot with its runs and conversation, a message to it, and `run`, `cancel`, `pause`, `resume`, `skip`, `unskip`. Bots are made, edited and deleted on the page or with `hivegrid-schedule` |
-
-Each tool says whether it only reads (`readOnlyHint`) and `quit_agent` and `switch_account` are marked destructive, which is what a client's confirmation goes by. `quit_agent`, `switch_account` and `revive_session` send the API's `"confirm": true` themselves: the confirmation is the client's question, not a second argument. A held wait is one long poll after the other (`/api/agents?wait=20`), costs one read each and ends when the client cancels the call. Text is cut for the model (a message at 3000 characters, a reply at 6000) and icon glyphs are removed from titles.
-
-**What it changes for safety.** The MCP server holds no secret of its own and opens no port: it reads the same 0600 token file as the server at every call, so `hivegrid-remote token --rotate` needs no restart, and the token appears in no tool answer or error. What is new is who decides: a model now turns your words into prompts, answers and quits, so a misheard sentence can reach the wrong agent (every writing tool answers with the number it acted on, `quit_agent` with the title too), and what agents write (titles, chat, screens, bot reports) is read by that model. The server's instructions tell it to treat that as data; the client's per-tool confirmation is the control that does not depend on it, so think before allowing the writing tools without a question. With Remote Control, the conversation, including what the tools returned of your agents' chats, is stored by Anthropic as its page describes.
-
 ## Voice
 
-Voice mode is a spoken conversation that manages the agents: tap the `◉` button in the top bar, talk ("which agents need me?", "tell three to rebase and tell me what it says", "start one in fomo on the private account", "how are my bots doing?"), and the answer is spoken. You can interrupt it by speaking. It is Google's [Gemini Live API](https://ai.google.dev/gemini-api/docs/live-api), a speech-to-speech model that calls tools; the tools are the ones of the MCP server above, so it lists, reads, prompts, answers, starts, quits and revives agents and runs the Bots. It is off until you set it up, and it needs the page on https (`tailscale serve`) because browsers give the microphone to no other page.
+Voice mode is a spoken conversation that manages the agents: tap the `◉` button in the top bar, talk ("which agents need me?", "tell three to rebase and tell me what it says", "start one in fomo on the private account", "how are my bots doing?"), and the answer is spoken. You can interrupt it by speaking. It is Google's [Gemini Live API](https://ai.google.dev/gemini-api/docs/live-api), a speech-to-speech model that calls tools; the tools are those of `bin/hivegrid_remote_mcp.py`, so it lists, reads, prompts, answers, starts, quits and revives agents and runs the Bots. It is off until you set it up, and it needs the page on https (`tailscale serve`) because browsers give the microphone to no other page.
 
 **Set up.** On the machine that runs Hivegrid:
 

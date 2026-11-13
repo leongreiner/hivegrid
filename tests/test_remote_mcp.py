@@ -1,19 +1,15 @@
-"""`hivegrid-remote mcp` (bin/hivegrid_remote_mcp.py): the tools against the real server on 127.0.0.1:0 with a fake mux
-behind it (what a tool sends is what the server accepts), scripted answers for the flows that need a live omp, and the
-JSON-RPC side. No window, no network beyond loopback, no real home."""
+"""The agent tools (bin/hivegrid_remote_mcp.py): against the real server on 127.0.0.1:0 with a fake mux behind it (what a
+tool sends is what the server accepts) and scripted answers for the flows that need a live omp. No window, no network
+beyond loopback, no real home."""
 import json
 import os
 import socket
-import ssl
 import sys
-import tempfile
 import unittest
 import unittest.mock
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
-import hivegrid_hostpage as HP  # noqa: E402
-import hivegrid_remote as R  # noqa: E402
 import hivegrid_remote_mcp as M  # noqa: E402
 import test_remote_http as TH  # noqa: E402
 from test_agents import NOW, pane  # noqa: E402
@@ -21,26 +17,15 @@ from test_remote import TOKEN, Clock  # noqa: E402
 
 
 class Driver:
-    """A Server whose tool calls run at once and whose answers are collected."""
+    """Runs tools at once against a remote; `self.out` collects nothing but keeps the old shape of the helpers."""
 
     def start(self, remote, clock):
-        self.out, self.jobs = [], None
-        self.mcp = M.Server(remote, self.out.append, clock=clock, wall=lambda: NOW,
-                            spawn=lambda fn: fn() if self.jobs is None else self.jobs.append(fn))
-
-    def rpc(self, method, params=None, ident=1):
-        del self.out[:]
-        msg = {"jsonrpc": "2.0", "method": method, "params": params or {}}
-        if ident is not None:
-            msg["id"] = ident
-        self.mcp.handle(msg)
-        return json.loads(self.out[-1]) if self.out else None
+        self.remote, self.out = remote, []
 
     def tool(self, name, **args):
         """(the tool's answer: the decoded document, or the text of an error; whether it is an error)"""
-        result = self.rpc("tools/call", {"name": name, "arguments": args})["result"]
-        text = result["content"][0]["text"]
-        return (text if result["isError"] else json.loads(text)), result["isError"]
+        text, failed = M.run_tool(name, args, M.Call(self.remote, self.clock, lambda: NOW))
+        return (text if failed else json.loads(text)), failed
 
     def ok(self, name, **args):
         answer, failed = self.tool(name, **args)
@@ -206,17 +191,6 @@ class TestToken(LiveCase):
         self.start(M.Remote("box", "127.0.0.1", closed, lambda: TOKEN), self.clock)
         self.assertIn("hivegrid-remote on box does not answer", self.refused("list_agents"))
 
-    def test_a_missing_token_is_the_tool_error(self):
-        captured = []
-        missing = os.path.join(self.tmp.name, "nope")
-        with unittest.mock.patch.object(M, "main", lambda remote: captured.append(remote) or 0):
-            self.assertEqual(R.main(["mcp", "--token-file", missing, "--port", str(self.port)]), 0)
-        self.start(captured[0], self.clock)
-        self.assertIn("hivegrid-remote token", self.refused("list_agents"))
-        R.write_token(missing, TOKEN)
-        self.assertEqual(len(self.ok("list_agents")["agents"]), 2, "the file is read at every call")
-
-
 def agent(pane_id, label, state="idle", **kw):
     return {"id": pane_id, "label": label, "state": state, "state_label": {"attention": "needs you"}.get(state, state),
             "title": kw.pop("title", "T"), "cwd": "~/p", "pending": None, "limit": None, "switch": None, "model": None, **kw}
@@ -377,106 +351,6 @@ class TestManaging(ScriptCase):
         self.assertEqual(self.ok("message_bot", bot="inbox-b2", text="anything new?")["sent"], True)
         self.assertEqual(r.posts(), [("/api/bots/nightly-a1/run", {}), ("/api/bots/inbox-b2/say", {"text": "anything new?"})])
         self.assertIn("must be one of", self.refused("bot_action", bot="inbox", action="delete"))
-
-
-class TestProtocol(ScriptCase):
-    def setUp(self):
-        self.script([[agent(3, "1", "working")]])
-
-    def test_initialize_speaks_the_clients_version_when_it_knows_it(self):
-        got = self.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}})["result"]
-        self.assertEqual((got["protocolVersion"], got["capabilities"], got["serverInfo"]["name"]), ("2024-11-05", {"tools": {}}, "hivegrid"))
-        self.assertIn("on box", got["instructions"])
-        self.assertEqual(self.rpc("initialize", {"protocolVersion": "1999-01-01"})["result"]["protocolVersion"], M.PROTOCOLS[0])
-
-    def test_tools_say_what_they_change(self):
-        tools = {t["name"]: t for t in self.rpc("tools/list")["result"]["tools"]}
-        for name, t in tools.items():
-            self.assertEqual(t["inputSchema"]["type"], "object", name)
-            self.assertLessEqual(set(t["inputSchema"]["required"]), set(t["inputSchema"]["properties"]), name)
-        hints = {n: (t["annotations"]["readOnlyHint"], t["annotations"]["destructiveHint"]) for n, t in tools.items()}
-        self.assertEqual({n for n, h in hints.items() if h[1]}, {"quit_agent", "switch_account"})
-        for name in ("list_agents", "read_agent", "wait_for_agents", "list_history", "host_status", "agent_options", "list_bots"):
-            self.assertEqual(hints[name], (True, False), name)
-        for name in ("send_prompt", "answer_agent", "interrupt_agent", "start_agent", "revive_session", "set_model", "bot_action"):
-            self.assertEqual(hints[name], (False, False), name)
-        self.assertFalse([n for n in tools if "term" in n], "the shell of the phone terminal is no tool")
-
-    def test_notifications_get_no_answer(self):
-        self.assertIsNone(self.rpc("notifications/initialized", ident=None))
-        self.assertIsNone(self.rpc("something/else", ident=None))
-
-    def test_errors_of_the_protocol(self):
-        self.assertEqual(self.rpc("resources/list")["error"]["code"], -32601)
-        self.assertEqual(self.rpc("tools/call", {"name": "open_terminal"})["error"]["code"], -32602)
-        self.assertEqual(self.rpc("ping")["result"], {})
-        del self.out[:]
-        self.mcp.feed("{nope\n")
-        self.assertEqual(json.loads(self.out[-1]), {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
-        del self.out[:]
-        self.mcp.feed("\n")
-        self.mcp.handle({"jsonrpc": "2.0", "id": 4, "result": {}})
-        self.assertEqual(self.out, [], "a blank line and a client's answer are not answered")
-
-    def test_arguments_are_checked_before_anything_is_asked(self):
-        for args, word in (({"agent": "1"}, "text is required"), ({"agent": "1", "text": 5}, "text must be string"),
-                           ({"agent": "1", "text": "x", "now": True}, "unknown argument: now"),
-                           ({"agent": ["1"], "text": "x"}, "agent must be string or integer")):
-            self.assertIn(word, self.refused("send_prompt", **args))
-        self.assertEqual(self.remote.calls, [])
-
-    def test_a_cancelled_wait_ends_without_an_answer(self):
-        self.jobs = []
-        self.assertIsNone(self.rpc("tools/call", {"name": "wait_for_agents", "arguments": {"timeout": 600}}, ident=7))
-        self.rpc("notifications/cancelled", {"requestId": 7}, ident=None)
-        self.jobs.pop()()
-        self.assertEqual(self.out, [])
-        self.assertLess(self.clock.t - 1000, 5, "it did not wait on")
-        self.assertEqual(self.mcp.calls, {})
-
-
-class TestHost(unittest.TestCase):
-    """--host NAME: the address and the token come from remote-hosts.json and the host's token file."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        env = unittest.mock.patch.dict(os.environ, {"HOME": self.tmp.name, "HIVEGRID_SETTINGS": os.path.join(self.tmp.name, "settings.json")})
-        env.start()
-        self.addCleanup(env.stop)
-        with open(HP.hosts_path(), "w") as f:
-            json.dump({"hosts": [{"name": "box-1", "url": "https://box-1.example-tail.ts.net"}, {"name": "box-2", "url": "http://100.100.1.2:8787"}]}, f)
-
-    def remote(self, name):
-        captured = []
-        with unittest.mock.patch.object(M, "main", lambda remote: captured.append(remote) or 0):
-            self.assertEqual(R.main(["mcp", "--host", name]), 0)
-        return captured[0]
-
-    def test_a_host_is_reached_at_its_own_address_with_its_own_token(self):
-        HP.store_token("box-1", "t" * 40)
-        seen = []
-
-        def refuse(host, port, timeout, context):
-            seen.append((host, port, context.verify_mode))
-            raise OSError("no network in a test")
-        with unittest.mock.patch("http.client.HTTPSConnection", refuse):
-            r = self.remote("box-1")
-            with self.assertRaises(M.ApiError) as caught:
-                r.call("GET", "/api/agents")
-        self.assertEqual((r.name, seen), ("box-1", [("box-1.example-tail.ts.net", 443, ssl.CERT_REQUIRED)]))
-        self.assertEqual((r.token(), caught.exception.code), ("t" * 40, "unreachable"))
-        plain = self.remote("box-2")
-        self.assertEqual((plain.host, plain.port, plain.conn), ("100.100.1.2", 8787, M.http.client.HTTPConnection))
-
-    def test_a_host_without_a_token_says_how_to_store_one(self):
-        with self.assertRaises(M.ApiError) as caught:
-            self.remote("box-2").token()
-        self.assertIn("hivegrid-host-page token box-2", caught.exception.message)
-
-    def test_an_unknown_host_does_not_start(self):
-        with unittest.mock.patch("sys.stderr"):
-            self.assertEqual(R.main(["mcp", "--host", "nope"]), 2)
 
 
 if __name__ == "__main__":
