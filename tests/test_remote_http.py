@@ -460,6 +460,28 @@ class TestConnections(HttpCase):
             time.sleep(0.02)
         self.assertEqual(r.status, 200)
 
+    def test_the_page_files_load_past_the_peer_cap(self):
+        # A page reloaded while the long polls of the one before still hold their slots must still get its styles and script.
+        self.serve(self.app, peer_cap=1)
+        first = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        second = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            first.request("GET", "/healthz", headers={"Host": f"127.0.0.1:{self.port}"})
+            r = first.getresponse()
+            self.assertEqual((r.status, r.read()), (200, b"ok"))      # keep-alive: the only slot is taken
+            for path in ("/", "/app.css", "/app.js", "/theme.css", "/term.js"):
+                second.request("GET", path, headers={"Host": f"127.0.0.1:{self.port}"})
+                r2 = second.getresponse()
+                r2.read()
+                self.assertEqual(r2.status, 200, path)
+            second.request("GET", "/api/meta", headers={"Host": f"127.0.0.1:{self.port}", "Authorization": f"Bearer {TOKEN}"})
+            r3 = second.getresponse()
+            r3.read()
+            self.assertEqual(r3.status, 429, "the API still counts")
+        finally:
+            first.close()
+            second.close()
+
     def test_clients_behind_the_proxy_have_their_own_allowance(self):
         self.serve(self.app, peer_cap=1)
         first = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)

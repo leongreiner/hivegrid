@@ -210,8 +210,8 @@ a { color: var(--accent); text-decoration: none; }
   padding: 0 1.4ch;
   border-radius: 15px;
 }
-.chip[aria-pressed="true"], .chip[aria-selected="true"], .chip.on { color: var(--bright); font-weight: 700; }
-.chip[aria-pressed="true"] > span.pill, .chip[aria-selected="true"] > span.pill, .chip.on > span.pill { background: var(--raised); }
+.chip[aria-pressed="true"], .chip[aria-selected="true"], .chip[aria-current="page"], .chip.on { color: var(--bright); font-weight: 700; }
+.chip[aria-pressed="true"] > span.pill, .chip[aria-selected="true"] > span.pill, .chip[aria-current="page"] > span.pill, .chip.on > span.pill { background: var(--raised); }
 .chip:active > span.pill { background: var(--hover); }
 .chip .n { color: var(--muted); font-weight: 400; }
 .chip[aria-pressed="true"] .n, .chip[aria-selected="true"] .n { color: var(--bright); }
@@ -233,43 +233,63 @@ a { color: var(--accent); text-decoration: none; }
 .ro-chip { color: var(--amber); }
 .ro-chip::before { content: "\25D0"; font-size: 12px; }
 
-/* ---------------------------------------------------------------- title row */
+/* ---------------------------------------------------------------- title row: the brand, the pages as tabs, status, actions */
 .top {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-height: 48px;
-  padding: var(--sat) calc(4px + var(--sar)) 0 calc(12px + var(--sal));
+  padding: var(--sat) calc(6px + var(--sar)) 0 calc(10px + var(--sal));
   background: var(--deep);
   border-bottom: 1px solid var(--rule);
 }
-.top { position: relative; }
-.nav-btn { display: none; position: relative; }
-.usage-item { display: none; }
-.pages { display: contents; }
-.pages .btn::after { display: none; }
-/* narrow screens: the pages (agents, terminals, bots) sit behind a burger button, voice and the menu stay in the bar */
-@media (max-width: 640px) {
-  .nav-btn { display: inline-flex; }
-  .usage-item { display: inline-flex; }
-  .top .menu-btn { display: none; }
-  .count { display: none; }
-  .pages { display: none; position: absolute; z-index: 40; top: 100%; right: calc(4px + var(--sar)); min-width: 220px; padding: 6px; gap: 2px;
-    flex-direction: column; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
-  .top.nav-open .pages { display: flex; }
-  .pages .btn.icon { width: auto; height: 48px; justify-content: flex-start; gap: 12px; padding: 0 14px; font-size: 18px; border-radius: 8px; }
-  .pages .btn::after { display: inline; content: attr(aria-label); font-size: 15px; color: var(--text); font-weight: 500; }
-  .pages .btn.on { background: var(--raised); }
-  .pages .btn.on::after { color: var(--bright); }
-  .pages .bdot { position: static; margin-left: auto; }
-}
+.brand-link { flex: none; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding-right: 10px; color: var(--accent); font-weight: 700; white-space: nowrap; }
 .top-logo { width: 26px; height: 26px; flex: none; display: block; }
-.brand { font-weight: 700; color: var(--accent); white-space: nowrap; }
-.count { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pages { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.pages::-webkit-scrollbar { display: none; }
+.pg > span.pill { position: relative; }
+.pg .pgl { color: var(--dim); font-weight: 400; }
+.pg[aria-current="page"] .pgl { color: var(--accent); }
+.pg .bdot { position: static; display: inline-block; margin-left: 0.2ch; width: 7px; height: 7px; border: 0; }
 .top .spacer { flex: 1; min-width: 0; }
 .top-chips { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
 .top-chips .status-chip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.top-act { display: inline-flex; align-items: center; gap: 0.8ch; min-height: 34px; min-width: 34px; padding: 0 10px; justify-content: center; }
+.top-act .ic { font-size: 16px; line-height: 1; }
+.top-act.accent { color: var(--accent); }
+.top-act.menu-btn .ic { font-size: 18px; }
+.top .nav-btn { display: none; position: relative; }
+.navmenu { display: none; }
+/* below 900 px the action buttons show their icons only */
+@media (max-width: 899px) {
+  .top-act .lbl { display: none; }
+}
+/* narrow screens: the pages and the menu sections sit behind a burger button; New session and voice live in the list's footer */
+@media (max-width: 640px) {
+  .top .pages, .top .top-act { display: none; }
+  .top .nav-btn { display: inline-flex; }
+  .top.nav-open .navmenu { display: flex; }
+  .navmenu { position: absolute; z-index: 40; top: 100%; right: calc(4px + var(--sar)); min-width: 230px; max-height: calc(100dvh - 64px); overflow-y: auto; padding: 6px;
+    flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+  .nm-item { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 0 14px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; font-size: 15px; text-align: left; cursor: pointer; touch-action: manipulation; }
+  .nm-item .ic { width: 2.5ch; text-align: center; color: var(--muted); font-size: 17px; }
+  .nm-item .n { color: var(--muted); }
+  .nm-item .bdot { position: static; margin-left: auto; }
+  .nm-item[aria-current="page"] { background: var(--raised); color: var(--bright); font-weight: 700; }
+  .nm-item[aria-current="page"] .ic { color: var(--accent); }
+  .nm-item:active { background: var(--hover); }
+  .nm-sep { height: 1px; margin: 4px 8px; background: var(--rule-surface); }
+}
+/* from 641 px the pages are tabs in the bar: no footer with New session and voice (they are in the bar), no "back to" links */
+@media (min-width: 641px) {
+  .list-pane > .foot { display: none; }
+  .bots-pane:not(.hist) .bots-back { display: none; }
+  .bots-pane:not(.hist) .bots-head { padding-left: calc(12px + var(--sal)); }
+  .tov-pane .tov-back { display: none; }
+  .tov-pane .tov-head { padding-left: calc(12px + var(--sal)); }
+}
 
 /* ---------------------------------------------------------------- layout */
 .split { flex: 1; min-height: 0; display: flex; min-width: 0; position: relative; }
@@ -320,7 +340,8 @@ a { color: var(--accent); text-decoration: none; }
 .row .sub .st { font-weight: 700; }
 .row .pend { grid-column: 4 / -1; color: var(--violet); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* swipe a row to the left to quit its session: the row slides over a red Quit button */
-.rw { position: relative; overflow: hidden; background: var(--red); }
+.rw { position: relative; overflow: hidden; }
+.rw:not(.drag):not(.open) > .rquit { visibility: hidden; }
 .rw > .row { position: relative; z-index: 1; touch-action: pan-y; transition: transform .16s ease-out; }
 .rw.drag > .row { transition: none; }
 .rw.open > .row { transform: translateX(-96px); }
@@ -372,6 +393,8 @@ a { color: var(--accent); text-decoration: none; }
 .chead .glyph { font-size: 16px; }
 .chead .label { color: var(--cyan); font-weight: 700; flex: none; }
 .chead .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--bright); padding-left: 1ch; }
+.chead .more { flex: none; margin-right: 4px; color: var(--muted); }
+.chead .more .ic { font-size: 18px; }
 .cinfo {
   display: flex;
   gap: 1ch;
@@ -391,7 +414,7 @@ a { color: var(--accent); text-decoration: none; }
   gap: 1.5ch;
   padding: 5px calc(10px + var(--sar)) 5px calc(10px + var(--sal));
   background: var(--surface);
-  border-bottom: 1px solid var(--rule-surface);
+  border-top: 1px solid var(--rule-surface);
   font-size: 12px;
   color: var(--muted);
   overflow: hidden;
@@ -593,6 +616,12 @@ details[open] > summary::before { content: "\25BE"; }
 .compose textarea { flex: 1; min-width: 0; resize: none; line-height: 1.4; max-height: 9.5em; min-height: 44px; }
 .compose .btn.send { min-width: 6ch; }
 .compose .note { flex: 1 1 100%; margin: 0 0 2px 4px; font-size: 12px; color: var(--amber); }
+/* the keys of the message field, on computers only (hidden by the script on touch-only devices) */
+.chint { flex: 1 1 100%; order: 10; margin: -1px 0 -3px 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chint kbd { color: var(--text); font-weight: 700; }
+.detail-pane { position: relative; }
+.detail-pane.drop::after { content: "Drop to attach"; position: absolute; inset: 10px; z-index: 6; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent);
+  border-radius: 10px; background: var(--tint-accent); color: var(--accent); font-weight: 700; pointer-events: none; }
 .compose-wrap { flex: none; }
 .skeys { flex: none; display: flex; gap: 6px; padding: 6px calc(10px + var(--sar)) 6px calc(10px + var(--sal)); background: var(--surface); border-top: 1px solid var(--rule-surface); }
 .skeys[hidden] { display: none; }
@@ -789,25 +818,42 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
   #app.has-detail > .top { display: flex; }
   #app:not(.has-detail) .detail-pane { display: flex; }
   #app.has-detail .list-pane { display: flex; }
-  .list-pane { flex: none; width: 400px; border-right: 1px solid var(--rule-base); }
+  .list-pane { flex: none; width: clamp(340px, 30vw, 440px); border-right: 1px solid var(--rule-base); }
   .row.sel { box-shadow: inset 0 0 0 0 transparent; }
   .back { display: none !important; }
   .chead { padding-top: 0; }
   .chead-row { padding-left: 10px; }
   .menu { background: transparent; }
   .menu .scrim { display: block; }
-  .menu-panel { width: 480px; border-left: 1px solid var(--edge-hi); }
+  .menu-panel { width: min(580px, 100vw); border-left: 1px solid var(--edge-hi); }
+  .menu-tabs { flex-wrap: wrap; }
   .overlay { justify-content: center; align-items: center; }
   .sheet { max-height: 80dvh; border-radius: 10px; border-bottom: 1px solid var(--edge-hi); width: 520px; margin: 0; }
-  .toasts { bottom: 24px; }
-  .chead { padding-top: 0; }
+  .toasts { top: 56px; bottom: auto; align-items: flex-end; padding: 0 calc(16px + var(--sar)) 0 16px; }
+  /* the chat: model and context on the right of the status line; the composer and the cards as wide as the transcript */
+  .chead-row { min-height: 48px; }
+  .cmeta { display: flex; align-items: center; min-width: 0; }
+  .cmeta .cinfo { flex: 1 1 auto; min-width: 0; padding-bottom: 8px; }
+  .cmeta .cctx { flex: 0 1 auto; min-width: 0; max-width: 62%; background: none; border: 0; padding: 0 calc(14px + var(--sar)) 8px 12px; }
+  .compose .plus { display: none; }
+  .chips { flex-wrap: wrap; overflow-x: visible; padding-top: 2px; padding-bottom: 2px; }
+  .compose, .pcard, .lcard, .skeys { padding-left: max(calc(10px + var(--sal)), calc((100% - 100ch) / 2)); padding-right: max(calc(10px + var(--sar)), calc((100% - 100ch) / 2)); }
+}
+/* pointer devices: the hover of the design language (a fade toward raised) on everything clickable */
+@media (hover: hover) {
+  .rw > .row, .chip > span.pill, .btn, .arow, .drow, .nm-item, .hrow, .bri-a { transition: background-color .15s ease-out, color .15s ease-out; }
+  .rw > .row:not(.sel):hover { background: var(--hover); }
+  .chip:hover { color: var(--text); }
+  .chip:not([aria-pressed="true"]):not([aria-selected="true"]):not([aria-current="page"]):not(.on):hover > span.pill { background: var(--hover); }
+  .btn:not(.primary):not(.danger):not(:disabled):hover { background: var(--hover); color: var(--bright); }
+  .btn.ghost.accent:not(:disabled):hover { color: var(--accent); }
+  .btn.primary:not(:disabled):hover, .btn.danger:not(:disabled):hover { filter: brightness(1.1); }
+  .arow:not(:disabled):hover, .drow:hover, .nm-item:hover { background: var(--hover); }
+  .tool > summary:hover .tname, .think > summary:hover, .older .btn:hover { color: var(--bright); }
+  .brand-link:hover { color: var(--bright); }
 }
 @media (max-width: 899px) {
   .toasts { bottom: calc(130px + var(--sab)); }
-  .top-logo { width: 24px; height: 24px; }
-}
-@media (max-width: 470px) {
-  .top .wide-only { display: none; }
 }
 /* swipe pager (only while the terminal is on or the server has bots, see pagerSet): horizontal moves reach the page, vertical ones scroll, pinch still zooms */
 #app.pg-on .top, #app.pg-on .list-pane, #app.pg-on .list, #app.pg-on .foot, #app.pg-on .tov-pane, #app.pg-on .tov-scroll, #app.pg-on .bots-pane, #app.pg-on .bots-scroll, .bot-top { touch-action: pan-y pinch-zoom; }
@@ -851,7 +897,6 @@ dialog p { margin: 0; padding: 14px; overflow-wrap: anywhere; color: var(--text)
 .tgl .knob { display: inline-block; width: 1.8ch; height: 1.8ch; border-radius: 50%; border: 1px solid var(--edge-hi); background: var(--track); }
 .tgl[aria-checked="true"] { color: var(--bright); border-color: var(--accent); }
 .tgl[aria-checked="true"] .knob { background: var(--accent); border-color: var(--accent); }
-.btn.has-dot { position: relative; }
 .bdot { position: absolute; top: 9px; right: 8px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 2px solid var(--deep); box-sizing: content-box; }
 .bdot.attn { background: var(--violet); }
 .bot-page { position: fixed; left: 0; right: 0; top: 0; height: 100dvh; z-index: 25; display: flex; flex-direction: column; background: var(--base); color: var(--text); }
@@ -944,10 +989,9 @@ textarea.field { resize: vertical; line-height: 1.4; min-height: 88px; }
 #app.embed.bots-on > .top { display: none; }
 #app.embed .bots-back { display: none; }
 /* grid: every agent as a live tile on one screen (#/grid), for the desktop; opening a tile goes to its chat (#/a/<id>) */
-.grid-btn { display: none; }
-@media (max-width: 899px) { .top .grid-btn.btn { display: none; } }
-@media (min-width: 900px) { .grid-btn { display: inline-flex; } }
-#app.embed .grid-btn { display: none; }
+.top .grid-pg { display: none; }
+@media (min-width: 900px) { .top .grid-pg { display: inline-flex; } }
+#app.embed .grid-pg { display: none; }
 .grid-pane { flex: 1; min-width: 0; min-height: 0; display: none; flex-direction: column; background: var(--base); }
 #app.grid-on .list-pane, #app.grid-on .detail-pane, #app.grid-on .tov-pane, #app.grid-on .bots-pane { display: none !important; }
 #app.grid-on .grid-pane { display: flex; }
@@ -1075,6 +1119,7 @@ APP_JS = r"""(function () {
   var swTimer = null;
   var refineOpen = false;
   var lastOk = 0;
+  var navWired = false;
   var D = {};
   var U = {};
   var M = {};
@@ -1445,9 +1490,9 @@ APP_JS = r"""(function () {
     var app = document.getElementById("app");
     app.classList.toggle("ro", !!meta.readonly);
     if (U.ro) { U.ro.hidden = !meta.readonly; }
-    if (U.agentsBtn) { U.agentsBtn.hidden = !(meta.terminal || hasBots()); }
-    if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
-    if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
+    if (U.termBtn) { U.termBtn.hidden = U.nmTerm.hidden = !meta.terminal; }
+    if (U.botsBtn) { U.botsBtn.hidden = U.nmBots.hidden = !hasBots(); }
+    if (U.voiceBtn) { U.voiceBtn.hidden = !hasVoice(); }
     pagerSet((!!meta.terminal || hasBots()) && !EMBED);
     routePages();
     if (agents) { renderChips(); renderList(); updateDetail(); }
@@ -1516,27 +1561,55 @@ APP_JS = r"""(function () {
     clear(app);
     app.className = "";
     inApp = true;
-    U.count = h("span", { class: "count" });
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
-    U.menuBtn = h("button", { class: "btn ghost icon menu-btn", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u22ef");
-    U.agentsBtn = h("a", { class: "btn ghost icon", href: "#/", "aria-label": "Agents", hidden: !((meta && meta.terminal) || hasBots()) }, "\u25a3");
-    U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
+    // The pages: tabs in the bar from 641 px, the first entries of the burger's list below that. markPages marks the one shown.
+    function tab(cls, href, glyph, label, extra) {
+      return h("a", { class: "chip pg" + (cls ? " " + cls : ""), href: href }, h("span", { class: "pill" }, h("span", { class: "pgl", "aria-hidden": "true" }, glyph), label, extra));
+    }
+    function navItem(tag, attrs, glyph, label, extra) {
+      attrs.class = "nm-item";
+      return h(tag, attrs, h("span", { class: "ic", "aria-hidden": "true" }, glyph), h("span", null, label), extra);
+    }
+    var noTerm = !(meta && meta.terminal);
+    U.count = h("span", { class: "n" });
+    U.navCount = h("span", { class: "n" });
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
-    U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
-    U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
+    U.nmBotsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.navDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
-    U.navBtn = h("button", { class: "btn ghost icon nav-btn has-dot", type: "button", "aria-label": "Pages", "aria-haspopup": "true", "aria-expanded": "false", onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
-    var menuItems = [["usage", "Usage", "\u25d4"], ["new", "New session", "+"], ["history", "History", "\u21ba"], ["system", "System", "\u25a4"], ["notify", "Alerts", "\u2407"], ["about", "About", "\u24d8"]].map(function (m) {
-      return h("button", { class: "btn ghost icon usage-item", type: "button", "aria-label": m[1], onclick: function () { openMenu(m[0]); } }, m[2]);
-    });
-    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn, menuItems);
-    var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.navBtn, U.pages, U.menuBtn);
+    U.agentsBtn = tab("", "#/", "\u25a3", "Agents", U.count);
+    U.gridBtn = tab("grid-pg", "#/grid", "\u25a6", "Grid", null);
+    U.termBtn = tab("", "#/term", ">_", "Terminals", null);
+    U.termBtn.hidden = noTerm;
+    U.botsBtn = tab("", "#/bots", "\u25f7", "Bots", U.botsDot);
+    U.botsBtn.setAttribute("aria-label", "Bots");
+    U.botsBtn.hidden = !hasBots();
+    U.pages = h("nav", { class: "pages", "aria-label": "Pages" }, U.agentsBtn, U.gridBtn, U.termBtn, U.botsBtn);
+    U.nmTerm = navItem("a", { href: "#/term", hidden: noTerm }, ">_", "Terminals", null);
+    U.nmBots = navItem("a", { href: "#/bots", hidden: !hasBots() }, "\u25f7", "Bots", U.nmBotsDot);
+    U.pageLinks = { agents: [U.agentsBtn, navItem("a", { href: "#/" }, "\u25a3", "Agents", U.navCount)], grid: [U.gridBtn], ov: [U.termBtn, U.nmTerm], bots: [U.botsBtn, U.nmBots] };
+    var glyphs = { usage: "\u25d4", "new": "+", history: "\u21ba", system: "\u25a4", notify: "!", about: "\u24d8" };
+    U.navmenu = h("nav", { class: "navmenu", "aria-label": "Pages and menu", onclick: function () { setNav(false); } },
+      U.pageLinks.agents[1], U.nmTerm, U.nmBots, h("div", { class: "nm-sep", role: "separator" }),
+      SECTIONS.map(function (s) { return navItem("button", { type: "button", onclick: function () { openMenu(s[0]); } }, glyphs[s[0]] || "\u00b7", s[1], null); }));
+    U.navBtn = h("button", { class: "btn ghost icon nav-btn", type: "button", "aria-label": "Pages and menu", "aria-haspopup": "true", "aria-expanded": "false", onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
+    U.newBtn = h("button", { class: "btn ghost top-act accent write", type: "button", title: "New session", "aria-label": "New session", onclick: function () { openMenu("new"); } },
+      h("span", { class: "ic", "aria-hidden": "true" }, "+"), h("span", { class: "lbl", "aria-hidden": "true" }, "New"));
+    U.voiceBtn = h("button", { class: "btn ghost top-act accent", type: "button", title: "Voice mode", "aria-label": "Voice", "aria-haspopup": "dialog", hidden: !hasVoice(), onclick: openVoice },
+      h("span", { class: "ic", "aria-hidden": "true" }, "\u25c9"), h("span", { class: "lbl", "aria-hidden": "true" }, "Voice"));
+    U.menuBtn = h("button", { class: "btn ghost top-act menu-btn", type: "button", title: "Usage, history, system, alerts", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } },
+      h("span", { class: "lbl", "aria-hidden": "true" }, "Menu"), h("span", { class: "ic", "aria-hidden": "true" }, "\u22ef"));
+    var top = h("header", { class: "top" }, h("a", { class: "brand-link", href: "#/", "aria-label": "Hivegrid, agents" }, logo("top-logo", 26), "Hivegrid"), U.pages,
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.newBtn, U.voiceBtn, U.menuBtn, U.navBtn, U.navmenu);
     U.top = top;
-    document.addEventListener("click", function (ev) { if (U.top.classList.contains("nav-open") && !U.pages.contains(ev.target)) { setNav(false); } });
-    window.addEventListener("hashchange", function () { setNav(false); });
-    window.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && U.top.classList.contains("nav-open")) { setNav(false); U.navBtn.focus({ preventScroll: true }); } });
+    if (!navWired) {
+      navWired = true;
+      // a file dropped anywhere else must not replace the page with itself
+      ["dragover", "drop"].forEach(function (t) { window.addEventListener(t, function (ev) { if (hasFiles(ev)) { ev.preventDefault(); } }); });
+      document.addEventListener("click", function (ev) { if (U.top && U.top.classList.contains("nav-open") && !U.navmenu.contains(ev.target)) { setNav(false); } });
+      window.addEventListener("hashchange", function () { setNav(false); });
+      window.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && U.top && U.top.classList.contains("nav-open")) { setNav(false); U.navBtn.focus({ preventScroll: true }); } });
+    }
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1549,10 +1622,11 @@ APP_JS = r"""(function () {
     D.label = h("span", { class: "label" });
     D.title = h("span", { class: "title" });
     D.conn = h("span", { class: "status-chip conn-wait", role: "status", hidden: true }, "reconnecting\u2026");
-    D.more = h("button", { class: "btn ghost icon write", type: "button", "aria-label": "Actions", "aria-haspopup": "dialog", onclick: openActions }, "\u22ef");
+    D.more = h("button", { class: "btn ghost top-act more write", type: "button", "aria-label": "Actions", title: "Model, interrupt, screen, git, account, quit", "aria-haspopup": "dialog", onclick: openActions },
+      h("span", { class: "lbl", "aria-hidden": "true" }, "Actions"), h("span", { class: "ic", "aria-hidden": "true" }, "\u22ef"));
     D.info = h("div", { class: "cinfo" });
-    D.head = h("header", { class: "chead" }, h("div", { class: "chead-row" }, D.back, D.glyph, D.label, D.title, D.conn, D.more), D.info);
     D.ctx = h("div", { class: "cctx", hidden: true });
+    D.head = h("header", { class: "chead" }, h("div", { class: "chead-row" }, D.back, D.glyph, D.label, D.title, D.conn, D.more), h("div", { class: "cmeta" }, D.info, D.ctx));
 
     // transcript
     D.older = h("div", { class: "older", hidden: true });
@@ -1569,12 +1643,11 @@ APP_JS = r"""(function () {
     // pending card, composer
     D.pend = h("div", { class: "pcard write", hidden: true, role: "group", "aria-label": "Needs your answer" });
     D.lcard = h("div", { class: "lcard", hidden: true, role: "group", "aria-label": "Usage limit and account" });
-    D.ta = h("textarea", { class: "field", rows: "1", placeholder: "Message", "aria-label": "Message", enterkeyhint: "send", autocapitalize: "sentences", oninput: onPromptInput, onkeydown: function (ev) {
-      var fine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
-      if (ev.key === "Enter" && !ev.isComposing && ((fine && !ev.shiftKey) || ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); submit(); }
-    } });
+    D.ta = h("textarea", { class: "field", rows: "1", placeholder: "Message", "aria-label": "Message", enterkeyhint: touchOnly() ? "enter" : "send", autocapitalize: "sentences", oninput: onPromptInput, onkeydown: function (ev) {
+      if (enterSends(ev, touchOnly())) { ev.preventDefault(); submit(); }
+    }, onpaste: onPromptPaste });
     D.send = h("button", { class: "btn primary send", type: "button", onclick: submit }, "send");
-    D.plus = h("button", { class: "btn icon", type: "button", "aria-label": "Actions", "aria-haspopup": "dialog", onclick: openActions }, "+");
+    D.plus = h("button", { class: "btn icon plus", type: "button", "aria-label": "Actions", "aria-haspopup": "dialog", onclick: openActions }, "+");
     D.note = h("p", { class: "note", hidden: true });
     // The agent's screen with the keys a menu needs (omp's /resume, /model, /settings ... draw on the pane, not in the session file).
     D.skeyBtns = [["\u2191", "up", "Up"], ["\u2193", "down", "Down"], ["\u2190", "left", "Left"], ["\u2192", "right", "Right"], ["\u21b5", "enter", "Enter"], ["esc", "esc", "Escape"], ["tab", "tab", "Tab"]].map(function (k) {
@@ -1582,11 +1655,12 @@ APP_JS = r"""(function () {
     });
     D.skeys = h("div", { class: "skeys write", hidden: true, role: "group", "aria-label": "Keys for the agent's screen" },
       D.skeyBtns.concat([h("button", { class: "btn primary", type: "button", onclick: function () { setScreen(false); } }, "chat")]));
-    D.attach = h("button", { class: "btn icon", type: "button", "aria-label": "Attach a file", title: "Attach a file", onclick: function () { D.file.value = ""; D.file.click(); } }, "\u2191");
+    D.attach = h("button", { class: "btn icon", type: "button", "aria-label": "Attach files", title: "Attach files (or drop or paste them here)", onclick: function () { D.file.value = ""; D.file.click(); } }, "\u2191");
     D.file = h("input", { type: "file", multiple: "", hidden: "", onchange: function () { attachFiles(Array.prototype.slice.call(D.file.files)); } });
-    D.compose = h("div", { class: "compose write" }, D.note, D.plus, D.attach, D.ta, D.send, D.file);
+    D.hint = h("div", { class: "chint", "aria-hidden": "true", hidden: touchOnly() },
+      h("kbd", null, "Enter"), " send  ", h("kbd", null, "Shift+Enter"), " new line  ", h("kbd", null, "Alt+\u2191\u2193"), " agents");
+    D.compose = h("div", { class: "compose write" }, D.note, D.plus, D.attach, D.ta, D.send, D.file, D.hint);
     D.body = h("div", { class: "d-body", hidden: true });
-    D.body.appendChild(D.ctx);
     D.body.appendChild(D.chatbox);
     D.body.appendChild(D.lcard);
     D.body.appendChild(D.pend);
@@ -1594,6 +1668,15 @@ APP_JS = r"""(function () {
     D.body.appendChild(D.compose);
     D.empty = h("div", { class: "d-empty" });
     var detailPane = h("section", { class: "detail-pane", "aria-label": "Agent chat" }, D.head, D.body, D.empty);
+    // Files dropped on the chat are attached like chosen ones.
+    detailPane.addEventListener("dragover", function (ev) { if (dropOk(ev)) { ev.preventDefault(); ev.dataTransfer.dropEffect = "copy"; detailPane.classList.add("drop"); } });
+    detailPane.addEventListener("dragleave", function (ev) { if (!detailPane.contains(ev.relatedTarget)) { detailPane.classList.remove("drop"); } });
+    detailPane.addEventListener("drop", function (ev) {
+      detailPane.classList.remove("drop");
+      if (!dropOk(ev)) { return; }
+      ev.preventDefault();
+      attachFiles(Array.prototype.slice.call(ev.dataTransfer.files));
+    });
 
     app.appendChild(top);
     U.tov = h("section", { class: "tov-pane", hidden: true, "aria-label": "Terminals" });
@@ -1617,6 +1700,7 @@ APP_JS = r"""(function () {
   var G = { on: false, tiles: {}, etags: {} };
   var GRID_LINES = 40;
   var GRID_PERIOD = 1500;
+  var GRID_BATCH = 3;
   function gridWanted() { return inApp && !EMBED && window.location.hash === "#/grid"; }
   function routeGrid() {
     if (!inApp || !U.grid) { return; }
@@ -1625,9 +1709,7 @@ APP_JS = r"""(function () {
     G.on = want;
     document.getElementById("app").classList.toggle("grid-on", want);
     U.grid.hidden = !want;
-    U.gridBtn.classList.toggle("on", want);
-    U.gridBtn.setAttribute("href", want ? "#/" : "#/grid");
-    U.gridBtn.setAttribute("aria-label", want ? "Back to the agent list" : "Agent grid");
+    markPages();
     if (want) { renderGrid(); gridLoop.start(); announce("Agent grid"); }
     else { gridLoop.stop(); }
   }
@@ -1739,18 +1821,27 @@ APP_JS = r"""(function () {
     if (stick) { t.tail.scrollTop = t.tail.scrollHeight; }
   }
   // One pass over every tile (a 304 costs nothing: the screens are ETag'd), then a pause.
+  // The tiles' screens, GRID_BATCH at a time: the server allows a device only a few connections at once (behind `tailscale serve` every
+  // request of a phone or laptop is one), and the agent list and the chat hold theirs open.
   function gridStep(L, run) {
     var ids = Object.keys(G.tiles);
-    return Promise.all(ids.map(function (id) {
-      return api(agentUrl(id, "tail") + "?lines=" + GRID_LINES, { etag: G.etags[id], timeout: 10000, loop: null }).then(function (r) {
-        var t = G.tiles[id];
-        if (run !== L.run || !t || r.status === 401) { return; }
-        if (r.status === 200 && r.data && Array.isArray(r.data.lines)) {
-          G.etags[id] = r.etag || null;
-          setGridTail(t, r.data.lines);
-        }
-      }, function () { /* the next pass tries again */ });
-    })).then(function () {
+    var batches = [];
+    for (var i = 0; i < ids.length; i += GRID_BATCH) { batches.push(ids.slice(i, i + GRID_BATCH)); }
+    return batches.reduce(function (p, batch) {
+      return p.then(function () {
+        if (run !== L.run) { return null; }
+        return Promise.all(batch.map(function (id) {
+          return api(agentUrl(id, "tail") + "?lines=" + GRID_LINES, { etag: G.etags[id], timeout: 10000, loop: null }).then(function (r) {
+            var t = G.tiles[id];
+            if (run !== L.run || !t || r.status === 401) { return; }
+            if (r.status === 200 && r.data && Array.isArray(r.data.lines)) {
+              G.etags[id] = r.etag || null;
+              setGridTail(t, r.data.lines);
+            }
+          }, function () { /* the next pass tries again */ });
+        }));
+      });
+    }, Promise.resolve()).then(function () {
       return new Promise(function (resolve) { window.setTimeout(resolve, GRID_PERIOD); }).then(function () { return {}; });
     });
   }
@@ -1764,9 +1855,7 @@ APP_JS = r"""(function () {
     setBotsDot(data.bots);
     var needs = agents.filter(function (a) { return a.state === "attention" || a.state === "limit"; }).length;
     document.title = (needs > 0 ? "(" + needs + ") " : "") + "Hivegrid";
-    clear(U.count);
-    U.count.appendChild(document.createTextNode("\u00b7 " + agents.length));
-    U.count.appendChild(h("span", { class: "wide-only" }, agents.length === 1 ? " agent" : " agents"));
+    U.count.textContent = U.navCount.textContent = String(agents.length);
     renderChips();
     renderList();
     renderGrid();
@@ -1906,6 +1995,29 @@ APP_JS = r"""(function () {
     }
     if (changed && agents) { renderList(); updateDetail(); }
     routePages();
+    // on a computer, a chat that opens is ready for typing; a phone would pop its keyboard up, so it is not focused there
+    if (changed && selId !== null && !menuSec && !touchOnly() && !D.ta.disabled && document.activeElement !== D.ta) { D.ta.focus({ preventScroll: true }); }
+  }
+
+  // ---------------------------------------------------------------- scripts and styles loaded on first use
+  // One after the other, each once; one that fails is tried again a second later (twice): a burst of page switches can use up the
+  // server's connections per device for a moment (429 "too many connections"), and a phone's network drops a request now and then.
+  var assetsDone = {};
+  function loadAssets(urls) {
+    return urls.reduce(function (p, url) { return p.then(function () { return assetsDone[url] ? null : loadAsset(url, 3); }); }, Promise.resolve());
+  }
+  function loadAsset(url, tries) {
+    return new Promise(function (resolve, reject) {
+      var css = /\.css$/.test(url);
+      var el = css ? h("link", { rel: "stylesheet", href: url }) : h("script", { src: url });
+      el.onload = function () { assetsDone[url] = true; resolve(); };
+      el.onerror = function () {
+        if (el.parentNode) { el.parentNode.removeChild(el); }
+        if (tries <= 1) { reject(new Error(url)); return; }
+        window.setTimeout(function () { loadAsset(url, tries - 1).then(resolve, reject); }, 1000);
+      };
+      document.head.appendChild(el);
+    });
   }
 
   // ---------------------------------------------------------------- voice mode: a spoken conversation that manages the agents (/voice.js, loaded when first opened)
@@ -1913,14 +2025,7 @@ APP_JS = r"""(function () {
   function hasVoice() { return !!(meta && meta.capabilities && meta.capabilities.indexOf("voice") >= 0); }
   function openVoice() {
     if (!voiceAssets) {
-      voiceAssets = new Promise(function (resolve, reject) {
-        document.head.appendChild(h("link", { rel: "stylesheet", href: "/voice.css" }));
-        var s = document.createElement("script");
-        s.src = "/voice.js";
-        s.onload = resolve;
-        s.onerror = function () { reject(new Error("/voice.js")); };
-        document.head.appendChild(s);
-      });
+      voiceAssets = loadAssets(["/voice.css", "/voice.js"]);
       voiceAssets.catch(function () { voiceAssets = null; });
     }
     voiceAssets.then(function () { window.HGVoice.open({ h: h, api: api, toast: toast, ask: ask, refresh: refreshNow }); },
@@ -1937,27 +2042,19 @@ APP_JS = r"""(function () {
   function loadTermAssets() {
     if (window.HGTermView) { return Promise.resolve(); }
     if (termAssets) { return termAssets; }
-    termAssets = new Promise(function (resolve, reject) {
-      if (!document.getElementById("term-css")) { document.head.appendChild(h("link", { id: "term-css", rel: "stylesheet", href: "/term.css" })); }
-      var left = 2;
-      ["/term.js", "/term-view.js"].forEach(function (src) {
-        var s = document.createElement("script");
-        s.src = src;
-        s.async = false;
-        s.onload = function () { left -= 1; if (left === 0) { resolve(); } };
-        s.onerror = function () { reject(new Error(src)); };
-        document.head.appendChild(s);
-      });
-    });
+    termAssets = loadAssets(["/term.css", "/term.js", "/term-view.js"]);
     termAssets.catch(function () { termAssets = null; });
     return termAssets;
   }
   function termRoute() { return inApp && meta && meta.terminal ? termHash(window.location.hash) : null; }
   function leaveTerm() { setHash("#/", true); }
-  function setTermBtn(on) {
-    if (!U.termBtn) { return; }
-    U.termBtn.classList.toggle("on", on);
-    if (on) { U.termBtn.setAttribute("aria-current", "page"); } else { U.termBtn.removeAttribute("aria-current"); }
+  // aria-current on the page shown (its tab and its entry in the burger's list); none while a full-screen page is over them
+  function markPages() {
+    if (!U.pageLinks) { return; }
+    var cur = G.on ? "grid" : (botsMode !== null ? "bots" : (termMode === "ov" ? "ov" : (termMode === null ? "agents" : null)));
+    Object.keys(U.pageLinks).forEach(function (p) {
+      U.pageLinks[p].forEach(function (el) { if (p === cur) { el.setAttribute("aria-current", "page"); } else { el.removeAttribute("aria-current"); } });
+    });
   }
   function announce(text) { if (U.live) { U.live.textContent = text; } }
   function termCtx() {
@@ -2010,15 +2107,15 @@ APP_JS = r"""(function () {
     if (mode !== "ov" && ovView) { ovView.destroy(); ovView = null; }
     app.classList.toggle("term-ov", mode === "ov");
     U.tov.hidden = mode !== "ov";
-    setTermBtn(mode === "ov");
     if (mode === "ov" && !ovView) { ovView = window.HGTermView.overview(overviewCtx()); }
     if (mode === "view") {
       termLast = want.n;
       if (termView) { termView.select(want.n); } else { termView = window.HGTermView.open(termCtx(), want.n); }
     }
     var prevMode = termMode;
+    termMode = mode;
+    markPages();
     if (mode !== prevMode) {
-      termMode = mode;
       if (mode === "ov") { ovView.focus(termLast); announce("Terminals"); }
       else if (mode === null && botsMode === null) { announce("Agents"); if (U.termBtn && !U.termBtn.hidden) { U.termBtn.focus({ preventScroll: true }); } }
       pageSwitch();
@@ -2093,10 +2190,6 @@ APP_JS = r"""(function () {
   // A change of page: the pane that comes in slides from the side it sits on (to the right of the one that left, or to its left).
   function pageSwitch() {
     var next = stripPage();
-    if (U.agentsBtn) {
-      U.agentsBtn.classList.toggle("on", next === "agents");
-      if (next === "agents") { U.agentsBtn.setAttribute("aria-current", "page"); } else { U.agentsBtn.removeAttribute("aria-current"); }
-    }
     if (next === lastPage) { return; }
     var prev = lastPage;
     lastPage = next;
@@ -2611,6 +2704,7 @@ APP_JS = r"""(function () {
       D.label.textContent = "";
       D.title.textContent = "";
       clear(D.info);
+      D.ctx.hidden = true;
       clear(D.empty);
       D.empty.appendChild(h("div", null, agents ? "This agent is gone." : "Loading\u2026"));
       if (agents) { D.empty.appendChild(h("p", null, h("a", { class: "btn", href: "#/" }, "\u25c0 Back to agents"))); }
@@ -2641,7 +2735,7 @@ APP_JS = r"""(function () {
     D.skeys.hidden = !(C && C.id === selId && C.screen);
     D.skeyBtns.forEach(function (b) { b.disabled = !can.keys; });
     D.plus.disabled = false;
-    D.attach.hidden = !(meta && meta.capabilities && meta.capabilities.indexOf("upload") >= 0);
+    D.attach.hidden = !canUpload();
     D.attach.disabled = mode === "none" || uploading;
     var note = "";
     if (mode === "screen") { note = "The agent's screen. Use the keys; typed text is not followed by Enter."; }
@@ -2787,6 +2881,19 @@ APP_JS = r"""(function () {
   }
 
   // ---------------------------------------------------------------- composer
+  // A device whose only pointer is a finger: its on-screen keyboard has no Shift+Enter, so Enter there starts a new line and the
+  // send button sends. Everywhere else (a mouse or touchpad, or a web pane that reports no pointer at all) Enter sends.
+  function touchOnly() {
+    var mq = window.matchMedia;
+    return !!mq && mq("(any-pointer: coarse)").matches && !mq("(any-pointer: fine)").matches;
+  }
+  // Whether a keydown in a message field sends it: Enter without Shift or Alt (not on a touch-only device), or Ctrl/Cmd+Enter
+  // anywhere; never a key that confirms an input method's composition.
+  function enterSends(ev, touch) {
+    if (ev.key !== "Enter" || ev.isComposing || ev.keyCode === 229) { return false; }
+    if (ev.ctrlKey || ev.metaKey) { return true; }
+    return !touch && !ev.shiftKey && !ev.altKey;
+  }
   function onPromptInput() {
     if (selId !== null) { drafts[selId] = D.ta.value; }
     D.send.disabled = composeMode(findAgent(selId)) === "none" || !D.ta.value.trim();
@@ -2847,6 +2954,16 @@ APP_JS = r"""(function () {
       if (r.status !== 401) { toast((file.name || "file") + ": " + errText(r), true); }
       return null;
     }, function () { toast((file.name || "file") + ": the upload did not finish", true); return null; });
+  }
+  function canUpload() { return !!(meta && meta.capabilities && meta.capabilities.indexOf("upload") >= 0); }
+  function hasFiles(ev) { return !!ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], "Files") >= 0; }
+  function dropOk(ev) { return hasFiles(ev) && canUpload() && selId !== null && !D.attach.disabled && !(meta && meta.readonly); }
+  // A file pasted into the message field (a screenshot from the clipboard) is attached like a chosen one; text pastes as usual.
+  function onPromptPaste(ev) {
+    var files = ev.clipboardData && ev.clipboardData.files ? Array.prototype.slice.call(ev.clipboardData.files) : [];
+    if (!files.length || !canUpload() || D.attach.disabled) { return; }
+    ev.preventDefault();
+    attachFiles(files);
   }
   function attachFiles(files) {
     var id = selId;
@@ -3744,6 +3861,22 @@ APP_JS = r"""(function () {
     }
     else if (termMode === "ov") { setHash("#/", false); ev.preventDefault(); }
   });
+  // Alt+Up and Alt+Down open the agent above or below the open one in the list (as filtered), from anywhere on the agents page.
+  document.addEventListener("keydown", function (ev) {
+    if (!inApp || !agents || !ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) { return; }
+    if (sheet || menuSec || botsMode !== null || termMode !== null || G.on || document.getElementById("confirm").open) { return; }
+    var next = stepAgent(agents.filter(function (a) { return !filter || a.state === filter; }).map(function (a) { return String(a.id); }), selId, ev.key === "ArrowDown" ? 1 : -1);
+    if (next === null) { return; }
+    ev.preventDefault();
+    setHash(buildHash(next, null), selId !== null);
+  });
+  // The id after (dir 1) or before (dir -1) `cur` in `ids`, wrapping around; the first or the last when `cur` is not there.
+  function stepAgent(ids, cur, dir) {
+    if (!ids.length) { return null; }
+    var i = cur === null ? -1 : ids.indexOf(String(cur));
+    if (i < 0) { return dir > 0 ? ids[0] : ids[ids.length - 1]; }
+    return ids[(i + dir + ids.length) % ids.length];
+  }
 
   // ---------------------------------------------------------------- bots: scheduled omp agents, the third page of the swipe strip
   // #/bots lists them (a pane under the same top bar, long-polling GET /api/bots), #/bots/<id> is one bot (definition, memory of an
@@ -3788,11 +3921,6 @@ APP_JS = r"""(function () {
     return BT.det && BT.det.bot && BT.det.bot.id === id ? BT.det.bot : null;
   }
   function botUrl(id, suffix) { return "/api/bots/" + encodeURIComponent(id) + (suffix ? "/" + suffix : ""); }
-  function setBotsBtn(on) {
-    if (!U.botsBtn) { return; }
-    U.botsBtn.classList.toggle("on", on);
-    if (on) { U.botsBtn.setAttribute("aria-current", "page"); } else { U.botsBtn.removeAttribute("aria-current"); }
-  }
   // The dot on the top bar's Bots button: violet while a bot needs a look, accent while only unread results wait.
   function setBotsDot(sum) {
     if (!U.botsBtn) { return; }
@@ -3800,8 +3928,8 @@ APP_JS = r"""(function () {
     var u = sum ? sum.unseen || 0 : 0;
     U.botsDot.hidden = !(n > 0 || u > 0);
     U.botsDot.className = "bdot" + (n > 0 ? " attn" : "");
-    U.navDot.hidden = U.botsDot.hidden;
-    U.navDot.className = U.botsDot.className;
+    U.navDot.hidden = U.nmBotsDot.hidden = U.botsDot.hidden;
+    U.navDot.className = U.nmBotsDot.className = U.botsDot.className;
     U.botsBtn.setAttribute("aria-label", "Bots" + (n > 0 ? ", " + n + " need a look" : (u > 0 ? ", " + u + " new " + (u === 1 ? "report" : "reports") : "")));
   }
   function botsPost(id, verb, body, okMsg) {
@@ -4116,10 +4244,9 @@ APP_JS = r"""(function () {
     var pg0 = { id: id, run: run, top: top, err: null, data: null };
     if (run === null) {
       pg0.info = h("div", { class: "bot-info", role: "status" });
-      pg0.ta = h("textarea", { class: "field", rows: "1", placeholder: "Talk to the bot", "aria-label": "Message to the bot", enterkeyhint: "send", autocapitalize: "sentences",
+      pg0.ta = h("textarea", { class: "field", rows: "1", placeholder: "Talk to the bot", "aria-label": "Message to the bot", enterkeyhint: touchOnly() ? "enter" : "send", autocapitalize: "sentences",
         maxlength: String(botsLimits().say || 4000), oninput: function () { botInput(pg0); }, onkeydown: function (ev) {
-          var fine = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
-          if (ev.key === "Enter" && !ev.isComposing && (((fine || EMBED) && !ev.shiftKey) || ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); botSay(); }
+          if (enterSends(ev, touchOnly())) { ev.preventDefault(); botSay(); }
         } });
       pg0.ta.value = BT.drafts[id] || "";
       pg0.send = h("button", { class: "btn primary send", type: "button", disabled: true, onclick: botSay }, "send");
@@ -4151,7 +4278,6 @@ APP_JS = r"""(function () {
     app.classList.toggle("bot-open", mode === "bot" || mode === "run");
     U.bots.hidden = mode === null;
     U.botsEmpty.hidden = mode === null;
-    setBotsBtn(mode !== null);
     if (mode === null) { botsLoop.stop(); briefLoop.stop(); closeBotPage(); }
     else {
       if (!botsLoop.wanted) { botsLoop.start(); }
@@ -4159,6 +4285,7 @@ APP_JS = r"""(function () {
       if (mode === "list") { closeBotPage(); } else { showBotPage(want.id, want.run); }
     }
     botsMode = mode;
+    markPages();
     if (mode === prev) { return; }
     if (mode === "list" && prev === null) { renderBots(); announce("Bots"); BT.ui.title.focus({ preventScroll: true }); }
     else if (mode === null && !termRoute()) { announce("Agents"); if (U.botsBtn && !U.botsBtn.hidden) { U.botsBtn.focus({ preventScroll: true }); } }

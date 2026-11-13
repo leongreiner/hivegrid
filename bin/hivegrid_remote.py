@@ -1111,6 +1111,12 @@ class App:
             return self._api(req, path, url.query)
         raise HttpError("not_found", "not found")
 
+    def is_asset(self, path):
+        """A file of the page itself: public, answered at once, never held. It does not count against a client's connections, so
+        a page reloaded while the long polls of the one before still hold their slots for a moment still gets its script and styles."""
+        return (path in self.STATIC or path in self.TERM_STATIC or path in self.VOICE_STATIC or path in self._fonts
+                or path in ("/theme.css", "/logo.svg", "/icon.png"))
+
     def _static(self, req, ctype, body):
         if req.method != "GET":
             raise HttpError("method_not_allowed", "method not allowed")
@@ -2489,7 +2495,7 @@ class Handler(BaseHTTPRequestHandler):
                       duplicate=any(names.count(h) > 1 for h in UNIQUE_HEADERS), alive=self._peer_open,
                       extend=self._extend_deadline)
         timed_out = False
-        if not self._claim(self.app._client_key(req)):
+        if not (req.method == "GET" and self.app.is_asset(urllib.parse.urlsplit(req.target).path)) and not self._claim(self.app._client_key(req)):
             resp = Response(429, _json_body({"ok": False, "error": "rate_limited", "message": "too many connections"}),
                             headers={"Retry-After": "1"}, close=True)
         else:
