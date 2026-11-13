@@ -306,6 +306,25 @@ class TestPromptAndWait(ScriptCase):
         self.assertEqual((got["state"], got["timed_out"]), ("working", True))
 
 
+class TestQueuedPrompt(ScriptCase):
+    """A prompt sent to a working agent waits in omp's queue: the end of the current turn is not its answer."""
+
+    def test_the_old_answer_is_never_passed_off_as_the_new_one(self):
+        old = {**chat((5, "user", "rebuild"), (6, "assistant", "rebuilt and pushed")), "pending_prompts": [{"text": "add a widget?"}]}
+        new = chat((5, "user", "rebuild"), (6, "assistant", "rebuilt and pushed"), (7, "user", "add a widget?"), (8, "assistant", "only a shortcut"))
+        self.script([[agent(3, "1", "working")], [agent(3, "1", "done")], [agent(3, "1", "working")], [agent(3, "1", "done")]],
+                    {("GET", "/api/agents/3/chat"): [old, old, new]})
+        got = self.ok("wait_for_agents", agents=["1"], timeout=300)["stopped"][0]
+        self.assertEqual((got["reply"], got["reply_to"]), ("only a shortcut", "add a widget?"))
+
+    def test_an_agent_holding_the_prompt_is_still_waited_for(self):
+        held = {**chat((5, "user", "rebuild"), (6, "assistant", "rebuilt")), "pending_prompts": [{"text": "add a widget?"}]}
+        self.script([[agent(3, "1", "done")]], {("GET", "/api/agents/3/chat"): held})
+        got = self.ok("wait_for_agents", agents=["1"], timeout=10)
+        self.assertEqual((got["stopped"], got["still_working"], got["timed_out"]), ([], ["1"], True),
+                         "an agent that still holds the prompt is not done with it, and its old answer is not reported")
+
+
 class TestManaging(ScriptCase):
     def two(self, routes):
         return self.script([[agent(3, "1"), agent(7, "2", title="billing")]], routes)

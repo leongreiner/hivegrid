@@ -270,8 +270,16 @@ def watch(ctx, panes, timeout, need_all=False, grace=0.0):
         done = len(last["stopped"]) == len(panes) if need_all else bool(last["stopped"])
         return True if done else None
 
-    got, doc = follow(ctx, timeout, look, until if grace else None)
-    return last["stopped"], doc, got is None
+    end = ctx.clock() + timeout
+    while True:
+        got, doc = follow(ctx, max(end - ctx.clock(), 0.1), look, until if grace else None)
+        if got is None:
+            return last["stopped"], doc, True
+        holding = [p for p in last["stopped"] if p in {a["id"] for a in doc["agents"]} and (answer(ctx, p) or {}).get("queued")]
+        if not holding or ctx.clock() >= end:
+            return last["stopped"], doc, False
+        was_busy.difference_update(holding)       # it starts the queued prompt next: wait for that turn too
+        until = ctx.clock() + GRACE
 
 
 def last_item(ctx, pane):
@@ -281,19 +289,36 @@ def last_item(ctx, pane):
     return chat.get("gen"), (items[-1]["n"] if items else 0)
 
 
-def reply(ctx, pane, mark=None):
-    """The agent's last answer (its newest assistant text, after the item `mark` when that is given), or None."""
+def answer(ctx, pane, mark=None):
+    """What the agent last answered and to what: {"to": the newest prompt it took, "reply": its answer to that prompt
+    (assistant text after it, newest last), "queued": prompts it holds but has not started}. With `mark`, nothing older
+    than that item counts. None when the agent is gone. A reply always belongs to `to`: an answer to an earlier prompt
+    is never passed off as the answer to a new one."""
     try:
-        chat = ctx.get(f"/api/agents/{pane}/chat?limit=30")
+        chat = ctx.get(f"/api/agents/{pane}/chat?limit=60")
     except ApiError:
-        return None                     # the agent is gone
+        return None
     fresh = mark is not None and chat.get("gen") == mark[0]
+    texts, asked = [], None
     for it in reversed(chat.get("items") or []):
         if fresh and it["n"] <= mark[1]:
             break
+        if it.get("role") == "user" and it.get("kind") == "text":
+            asked = it.get("text")
+            break
         if it.get("role") == "assistant" and it.get("kind") == "text" and it.get("text"):
-            return cut(it["text"], REPLY_MAX)
-    return None
+            texts.append(it["text"])
+    out = {"queued": [cut(q.get("text"), 300) for q in chat.get("pending_prompts") or []]}
+    if asked is not None:
+        out["to"] = cut(asked, 300)
+    if texts:
+        out["reply"] = cut("\n\n".join(reversed(texts[:3])), REPLY_MAX)
+    return out
+
+
+def reply(ctx, pane, mark=None):
+    got = answer(ctx, pane, mark)
+    return got.get("reply") if got else None
 
 
 def settled(ctx, pane, doc, label, mark=None):
@@ -301,9 +326,13 @@ def settled(ctx, pane, doc, label, mark=None):
     a = next((x for x in doc["agents"] if x["id"] == pane), None)
     if a is None:
         return {"agent": label, "state": "gone"}
-    out, said = row(a, doc["now"]), reply(ctx, pane, mark)
-    if said:
-        out["reply"] = said
+    out, got = row(a, doc["now"]), answer(ctx, pane, mark) or {}
+    if got.get("reply"):
+        out["reply"] = got["reply"]
+        out["reply_to"] = got.get("to")
+    if got.get("queued"):
+        out["queued_prompts"] = got["queued"]
+        out["note"] = "the prompts in queued_prompts are not started yet: the reply is to an earlier prompt (reply_to), not to them"
     return out
 
 
