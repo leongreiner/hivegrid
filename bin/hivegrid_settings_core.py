@@ -166,7 +166,8 @@ def agent_setting(stored):
 REMOTE_NOTIFY_EVENTS = ("attention", "done", "limit")
 REMOTE_DEFAULTS = {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
                    "notify_url": None, "notify_events": list(REMOTE_NOTIFY_EVENTS),
-                   "push": False, "push_contact": None}
+                   "push": False, "push_contact": None,
+                   "voice": False, "voice_model": "gemini-3.8-live", "voice_name": "Kore"}
 REMOTE_MINUTES = (1, 24 * 60)
 
 
@@ -195,6 +196,13 @@ def remote_settings(stored):
     out["push"] = stored.get("push") is True
     contact = stored.get("push_contact")
     ok = isinstance(contact, str) and 8 <= len(contact) <= 200 and contact.isprintable() and " " not in contact
+    # Voice mode (hivegrid_remote_voice.py): only the literal true switches it on; the model is a Gemini Live model
+    # id and the voice one of its prebuilt voice names, anything else keeps the default.
+    out["voice"] = stored.get("voice") is True
+    for key, shape in (("voice_model", r"gemini-[a-z0-9.-]{3,60}"), ("voice_name", r"[A-Za-z]{2,30}")):
+        v = stored.get(key)
+        if isinstance(v, str) and re.fullmatch(shape, v):
+            out[key] = v
     out["push_contact"] = contact if ok and re.fullmatch(r"mailto:[^@\s]+@[^@\s]+|https://[^/@?#\s]+(/[^?#\s]*)?", contact) else None
     return out
 

@@ -49,6 +49,7 @@ import hivegrid_outbox as O  # noqa: E402
 import hivegrid_upload as X  # noqa: E402
 import hivegrid_remote_data as D  # noqa: E402
 import hivegrid_remote_git as G  # noqa: E402
+import hivegrid_remote_mcp as M  # noqa: E402
 import hivegrid_remote_bots as B  # noqa: E402
 import hivegrid_remote_history as HI  # noqa: E402
 import hivegrid_remote_notify as N  # noqa: E402
@@ -56,6 +57,8 @@ import hivegrid_remote_pending as PQ  # noqa: E402
 import hivegrid_remote_push as RP  # noqa: E402
 import hivegrid_remote_term as T  # noqa: E402
 import hivegrid_remote_termjs as TJ  # noqa: E402
+import hivegrid_remote_voice as V  # noqa: E402
+import hivegrid_remote_voicejs as VJ  # noqa: E402
 import hivegrid_remote_ui as UI  # noqa: E402
 import hivegrid_ui as U  # noqa: E402
 from hivegrid_settings_core import DEFAULT_PRESET, HEX_RE, PRESETS, Settings, ThemeWatch, settings_path  # noqa: E402
@@ -98,6 +101,7 @@ BOT_BURST, BOT_EVERY = 5, 3.0               # creating, editing and deleting bot
 BOT_SEEN_BURST, BOT_SEEN_EVERY = 8, 0.5        # swiping reports away: 8 at once, then two per second (inside the general write bucket)
 BOT_SAY_BURST, BOT_SAY_EVERY = 5, 4.0       # talking to a bot (each message is an omp turn): 5 at once, then one per 4 seconds
 SESSION_REPEAT = 10.0      # the same directory and account is not started twice within this many seconds
+VOICE_BURST, VOICE_EVERY = 4, 10.0              # starting a voice session (a token of Google's Live API): 4 at once, then one per 10 seconds
 ACCOUNT_BURST, ACCOUNT_EVERY = 2, 10.0   # moving a chat to another account: 2 at once, then one per 10 seconds
 QUIT_BURST, QUIT_EVERY = HI.QUIT_BURST, HI.QUIT_EVERY   # quitting sessions from the list: 4 at once, then one per 2 seconds
 TERM_IO_RATE, TERM_IO_BURST = 40.0, 80    # terminal requests per device: 40 a second, bursts of 80
@@ -123,7 +127,8 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+    "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; "
+                                f"connect-src 'self' wss://{V.API_HOST}; "
                                 "img-src 'self' data: blob:; font-src 'self'; manifest-src 'self'; base-uri 'none'; "
                                 "form-action 'none'; frame-ancestors 'none'"),
     "X-Frame-Options": "DENY",
@@ -134,7 +139,7 @@ STATUS_TEXT = {
     "bad_request": 400, "unauthorized": 401, "forbidden_host": 403, "forbidden_origin": 403, "readonly": 403,
     "terminal_disabled": 403, "not_found": 404, "method_not_allowed": 405, "confirm_required": 409,
     "agent_not_ready": 409, "conflict": 409, "length_required": 411, "too_large": 413, "unsupported_media_type": 415,
-    "rate_limited": 429, "internal": 500, "mux_failed": 502, "no_mux": 503, "terminal_busy": 503, "push_disabled": 403,
+    "rate_limited": 429, "internal": 500, "mux_failed": 502, "no_mux": 503, "terminal_busy": 503, "push_disabled": 403, "voice_disabled": 403,
 }
 
 THEME_VARS = ("deep", "base", "surface", "pill", "raised", "track", "border", "edge_hi", "text", "bright", "muted",
@@ -762,10 +767,11 @@ def state_vocabulary():
 CAPABILITIES = ("chat", "accounts", "system", "sessions", "model", "longpoll", "history", "quit", "upload", "bots")
 
 
-def meta_json(readonly, terminal=False):
-    """The server's limits and vocabulary. `terminal`: the page may open a terminal (never on a read-only server)."""
+def meta_json(readonly, terminal=False, voice=False):
+    """The server's limits and vocabulary. `terminal`: the page may open a terminal (never on a read-only server);
+    `voice`: voice mode is set up (docs/remote.md, "Voice")."""
     terminal = bool(terminal) and not readonly
-    capabilities = CAPABILITIES + (("terminal",) if terminal else ())
+    capabilities = CAPABILITIES + (("terminal",) if terminal else ()) + (("voice",) if voice else ())
     states = state_vocabulary()
     limits = {"prompt": MAX_PROMPT, "keys": MAX_KEYS, "key_text": MAX_KEY_TEXT, "feedback": MAX_FEEDBACK,
               "tail_max": TAIL_MAX, "chat_max": CHAT_MAX, "wait_max": WAIT_MAX, "upload": X.MAX_UPLOAD, "bots": B.limits()}
@@ -844,7 +850,7 @@ def agent_json(agent, agents, now, readonly=False, session=False, limit=None, sw
     }
 
 
-def agents_json(agents, now, readonly=False, sessions=None, terminal=False, limits=None, switches=None):
+def agents_json(agents, now, readonly=False, sessions=None, terminal=False, limits=None, switches=None, voice=False):
     """The agent list. `sessions(agent) -> bool` says whether a chat is available (none: never);
     `limits(agent)` and `switches(agent)` give an agent's limit and account-switch objects (None: none).
     The revision covers everything but the ages, which the page computes from `since`."""
@@ -857,7 +863,7 @@ def agents_json(agents, now, readonly=False, sessions=None, terminal=False, limi
     totals = {"agents": len(rows), "by_state": by_state,
               "usage": A.totals_text(A.usage_totals(a.usage for a in agents))}
     rev = rev_of([{k: v for k, v in r.items() if k != "age"} for r in rows] + [totals])
-    return {"v": API_VERSION, "now": now, "meta_rev": meta_json(readonly, terminal)["meta_rev"], "rev": rev,
+    return {"v": API_VERSION, "now": now, "meta_rev": meta_json(readonly, terminal, voice)["meta_rev"], "rev": rev,
             "totals": totals, "agents": rows}
 
 
@@ -944,6 +950,8 @@ class App:
     }
     TERM_STATIC = {"/term.js": ("text/javascript; charset=utf-8", "TERM_JS"), "/term.css": ("text/css; charset=utf-8", "TERM_CSS"),
                    "/term-view.js": ("text/javascript; charset=utf-8", "TERM_VIEW_JS")}
+    VOICE_STATIC = {"/voice.js": ("text/javascript; charset=utf-8", "VOICE_JS"), "/voice.css": ("text/css; charset=utf-8", "VOICE_CSS"),
+                    "/voice-worklet.js": ("text/javascript; charset=utf-8", "VOICE_WORKLET_JS")}
     GET_ROUTES = ("/api/meta", "/api/agents", "/api/accounts", "/api/system", "/api/sessions/options", "/api/sessions/dirs",
                   "/api/history", "/api/bots", "/api/bots/briefing")
     POST_ROUTES = ("/api/sessions", "/api/bots/parse", "/api/bots/briefing/seen")
@@ -1016,6 +1024,8 @@ class App:
         self._pusher = pusher                       # None until first used: the store sits beside settings.json
         self._pusher_lock = threading.Lock()
         self.push_test_bucket = Bucket(1.0 / PUSH_TEST_EVERY, PUSH_TEST_BURST, clock)
+        self.voice = None                           # V.Voice once `serve` knows its own address (tests set their own)
+        self.voice_bucket = Bucket(1.0 / VOICE_EVERY, VOICE_BURST, clock)
         self._push_owner = None                     # the token fingerprint the stored devices were last checked against
         self._push_sweep_err = None                 # the last reason a sweep failed (logged once, not every round)
 
@@ -1085,6 +1095,9 @@ class App:
         if path in self.STATIC:
             ctype, name = self.STATIC[path]
             return self._static(req, ctype, getattr(UI, name).encode("utf-8"))
+        if path in self.VOICE_STATIC:
+            ctype, name = self.VOICE_STATIC[path]
+            return self._static(req, ctype, getattr(VJ, name).encode("utf-8"))
         if path in self.TERM_STATIC:
             ctype, name = self.TERM_STATIC[path]
             return self._static(req, ctype, getattr(TJ, name).encode("utf-8"))
@@ -1180,6 +1193,8 @@ class App:
             raise HttpError("rate_limited", "slow down", {"Retry-After": str(max(math.ceil(wait), 1))})
         if terminal:
             return self._terminal(req, key, token, path, query)
+        if path.startswith("/api/voice/"):
+            return self._voice_api(req, token, path)
         if path == "/api/push" or path.startswith("/api/push/"):
             return self._push_api(req, token, path)
 
@@ -1329,7 +1344,7 @@ class App:
         agents = self._listed(self._agents())
         limits = self._limits(agents)
         data = agents_json(agents, self.wall(), self.readonly, self._has_session, self.terminal_enabled(),
-                           lambda a: limits.get(a.pane), lambda a: self.switcher.status(a.pane))
+                           lambda a: limits.get(a.pane), lambda a: self.switcher.status(a.pane), self.voice_enabled())
         bots = self.bots.summary(self.wall())       # the menu button's dot; absent while there are no bots
         if bots:
             data["bots"] = bots
@@ -1513,7 +1528,7 @@ class App:
         if action in ("/api/bots", "/api/bots/briefing") or action in self.BOT_GETS:
             return self._bots_get(req, action, ident, q)
         if action == "/api/meta":
-            meta = meta_json(self.readonly, self.terminal_enabled())
+            meta = meta_json(self.readonly, self.terminal_enabled(), self.voice_enabled())
             return self._json(req, meta, meta["meta_rev"])
         if action == "/api/agents":
             etag = req.headers.get("if-none-match")
@@ -2086,6 +2101,41 @@ class App:
         if gone:
             self.log(f"push: {gone} device(s) of a replaced token were removed")
 
+    # -- voice mode (hivegrid_remote_voice.py)
+    def voice_enabled(self):
+        return self.voice is not None and self.voice.enabled()
+
+    def _voice_api(self, req, token, path):
+        """`POST /api/voice/session {}`: an ephemeral token of Google's Live API for one spoken session, locked to the
+        setup made here. `POST /api/voice/tool {"name", "args", "confirm"}`: runs a tool the voice model called,
+        through this server's own API with the caller's token (so a read-only server refuses the writing ones there).
+        The token, the Host and the origin checks have passed. docs/remote.md, "Voice"."""
+        if path not in ("/api/voice/session", "/api/voice/tool"):
+            raise HttpError("not_found", "not found")
+        if req.method != "POST":
+            raise HttpError("method_not_allowed", "method not allowed")
+        body = self._post_body(req)
+        if self.voice is None:
+            raise HttpError("voice_disabled", "voice mode is not available on this server")
+        try:
+            if path == "/api/voice/session":
+                self._fields(body, ())
+                if not self.voice.enabled():
+                    raise V.VoiceError("voice_disabled", self.voice.why_off())
+                self._spend(self.voice_bucket, "too many voice sessions started: wait a moment")
+                doc = self.voice.session()
+                self.log("voice session")
+                return Response(200, _json_body(doc), headers={"Cache-Control": "no-store"})
+            self._fields(body, ("name", "args", "confirm"))
+            name, args, confirm = body.get("name"), body.get("args", {}), body.get("confirm", False)
+            if not isinstance(name, str) or not isinstance(confirm, bool):
+                raise HttpError("bad_request", "name must be a tool name and confirm true or false")
+            result = self.voice.run(token, name, args, confirm, req.alive)
+            self.log(f"voice tool {sanitize_line(name, 40)}" + (" failed" if result["error"] else ""))
+            return Response(200, _json_body({"ok": True, **result}))
+        except V.VoiceError as exc:
+            raise HttpError(exc.code, exc.message) from None
+
     def _push_api(self, req, token, path):
         """/api/push (GET), and POST /api/push/subscribe, /unsubscribe and /test. Allowed on a read-only server (they
         touch no agent). The token, the Host and (for POST) the origin checks have passed."""
@@ -2611,6 +2661,10 @@ def build_parser():
     a.add_argument("--port", type=_port_arg, default=DEFAULT_PORT)
     a.add_argument("--token-file")
     a.add_argument("session")
+    m = sub.add_parser("mcp", help="serve the agents as MCP tools on stdin/stdout (for Claude Code; see docs/remote.md, MCP)")
+    m.add_argument("--host", metavar="NAME", help="a machine of remote-hosts.json instead of the local server")
+    m.add_argument("--port", type=_port_arg, default=None, help=f"the local server's port: default {DEFAULT_PORT}, or HIVEGRID_REMOTE_PORT")
+    m.add_argument("--token-file")
     return p
 
 
@@ -2716,6 +2770,9 @@ def cmd_serve(args):
     reach = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
     app.attach_cmd = [sys.executable or "python3", os.path.realpath(os.path.join(os.path.dirname(__file__), "hivegrid-remote")), "attach",
                       "--host", reach, "--port", str(port), "--token-file", store.path]
+    key_file = V.key_path(app._watch().path)
+    app.voice = V.Voice(lambda token: M.Remote(socket.gethostname().lower(), reach, port, lambda: token), app.terminal_settings,
+                        lambda: V.read_key(key_file), socket.gethostname().lower(), log=app.log)
     note = " (read-only)" if args.read_only else (" (terminal on)" if app.terminal_enabled() else "")
     print(f"hivegrid-remote: listening on http://{f'[{host}]' if ':' in host else host}:{port}/" + note,
           file=sys.stderr, flush=True)
@@ -2739,10 +2796,45 @@ def cmd_attach(args):
     return AT.main(args.host, args.port, args.token_file or default_token_path(), args.session, read_token)
 
 
+def cmd_mcp(args):
+    """The MCP server for one host: the local server with its token file, or with --host a machine of
+    remote-hosts.json with the token `hivegrid-host-page token NAME` stored. A missing token is an error of each tool
+    call, not of the start: the client shows a tool's text, a server that does not start only says "failed"."""
+    if args.host:
+        import hivegrid_hostpage as HP
+        entry = next((h for h in HP.hosts() if h["name"] == args.host), None)
+        if entry is None:
+            print(f"hivegrid-remote: no host {args.host!r} in {HP.hosts_path()}", file=sys.stderr)
+            return 2
+        _url, host, port = HP.valid_url(entry["url"])
+
+        def token():
+            found = HP.read_token(args.host)
+            if found is None:
+                raise M.ApiError(0, "no_token", f"no access token for host {args.host}; run: hivegrid-host-page token {args.host}")
+            return found
+        return M.main(M.Remote(args.host, host, port, token, tls=entry["url"].startswith("https:")))
+    try:
+        port = resolve_port(args)
+    except ValueError as exc:
+        print(f"hivegrid-remote: {exc}", file=sys.stderr)
+        return 2
+    path = args.token_file or default_token_path()
+
+    def token():
+        try:
+            return read_token(path)
+        except TokenError as exc:
+            raise M.ApiError(0, "no_token", str(exc)) from None
+    return M.main(M.Remote(socket.gethostname().lower(), "127.0.0.1", port, token))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "attach":
         return cmd_attach(args)
+    if args.cmd == "mcp":
+        return cmd_mcp(args)
     return cmd_token(args) if args.cmd == "token" else cmd_serve(args)
 
 

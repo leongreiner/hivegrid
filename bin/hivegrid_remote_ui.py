@@ -1420,6 +1420,7 @@ APP_JS = r"""(function () {
     if (U.agentsBtn) { U.agentsBtn.hidden = !(meta.terminal || hasBots()); }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
     if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
+    if (U.voiceBtn) { U.voiceBtn.hidden = !hasVoice(); }
     pagerSet((!!meta.terminal || hasBots()) && !EMBED);
     routePages();
     if (agents) { renderChips(); renderList(); updateDetail(); }
@@ -1457,6 +1458,7 @@ APP_JS = r"""(function () {
   }
   // A rejected token is kept (prefilled, stored) until a new one is accepted or the user clears it.
   function rejected(msg) {
+    if (window.HGVoice) { window.HGVoice.close(); }
     if (authFailed) { return; }
     authFailed = true;
     gen += 1;
@@ -1496,8 +1498,9 @@ APP_JS = r"""(function () {
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
     U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
+    U.voiceBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Voice", title: "Voice", "aria-haspopup": "dialog", hidden: !hasVoice(), onclick: openVoice }, "\u25c9");
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.voiceBtn, U.agentsBtn, U.termBtn, U.botsBtn, U.menuBtn);
 
     U.chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     U.list = h("div", { class: "list" });
@@ -1866,6 +1869,25 @@ APP_JS = r"""(function () {
     }
     if (changed && agents) { renderList(); updateDetail(); }
     routePages();
+  }
+
+  // ---------------------------------------------------------------- voice mode: a spoken conversation that manages the agents (/voice.js, loaded when first opened)
+  var voiceAssets = null;
+  function hasVoice() { return !!(meta && meta.capabilities && meta.capabilities.indexOf("voice") >= 0); }
+  function openVoice() {
+    if (!voiceAssets) {
+      voiceAssets = new Promise(function (resolve, reject) {
+        document.head.appendChild(h("link", { rel: "stylesheet", href: "/voice.css" }));
+        var s = document.createElement("script");
+        s.src = "/voice.js";
+        s.onload = resolve;
+        s.onerror = function () { reject(new Error("/voice.js")); };
+        document.head.appendChild(s);
+      });
+      voiceAssets.catch(function () { voiceAssets = null; });
+    }
+    voiceAssets.then(function () { window.HGVoice.open({ h: h, api: api, toast: toast, ask: ask, refresh: refreshNow }); },
+      function () { toast("Voice mode could not be loaded.", true); });
   }
 
   // ---------------------------------------------------------------- terminal: its script and styles load when it is first opened

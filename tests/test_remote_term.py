@@ -525,7 +525,8 @@ class TestRemoteSettings(unittest.TestCase):
     def test_the_terminal_is_off_unless_the_file_says_true(self):
         self.assertEqual(self.remote(None), {"terminal": False, "terminal_detached_minutes": 15, "terminal_idle_minutes": 60,
                                              "notify_url": None, "notify_events": ["attention", "done", "limit"],
-                                             "push": False, "push_contact": None})
+                                             "push": False, "push_contact": None,
+                                             "voice": False, "voice_model": "gemini-3.8-live", "voice_name": "Kore"})
         for stored in ({}, {"remote": {}}, {"remote": {"terminal": False}}, {"remote": {"terminal": 1}}, {"remote": {"terminal": "true"}},
                        {"remote": {"terminal": "yes"}}, {"remote": {"terminal": None}}, {"remote": "terminal"}, {"remote": [True]},
                        {"remote": True}, {"remote": {"Terminal": True}}, "{not json", "[1]"):
