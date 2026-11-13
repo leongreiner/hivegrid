@@ -356,8 +356,8 @@ a { color: var(--accent); text-decoration: none; }
 .foot .k { color: var(--text); font-weight: 700; }
 .foot .spacer { flex: 1; }
 .foot button { background: none; border: 0; padding: 0; color: inherit; cursor: pointer; min-height: 44px; display: inline-flex; align-items: center; gap: 1ch; }
-.foot .newbtn { width: 44px; justify-content: center; font-size: 30px; line-height: 1; margin-right: -6px; }
-.foot .voicebtn { width: 44px; justify-content: center; font-size: 24px; line-height: 1; color: var(--accent); }
+.foot .newbtn { width: 44px; justify-content: center; font-size: 30px; line-height: 1; margin-left: -6px; }
+.foot .voicebtn { margin-right: -6px; width: 44px; justify-content: center; font-size: 24px; line-height: 1; color: var(--accent); }
 .foot .newbtn .k { font-weight: 400; }
 
 /* ---------------------------------------------------------------- chat header */
@@ -1829,11 +1829,11 @@ APP_JS = r"""(function () {
     clear(U.foot);
     var needs = agents.filter(function (a) { return a.state === "attention"; }).length;
     var limited = agents.filter(function (a) { return a.state === "limit"; }).length;
+    U.foot.appendChild(h("button", { class: "write newbtn", type: "button", "aria-label": "New session", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+")));
+    U.foot.appendChild(h("span", { class: "spacer" }));
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
-    U.foot.appendChild(h("span", { class: "spacer" }));
     if (hasVoice()) { U.foot.appendChild(h("button", { class: "voicebtn", type: "button", "aria-label": "Voice", "aria-haspopup": "dialog", onclick: openVoice }, "\u25c9")); }
-    U.foot.appendChild(h("button", { class: "write newbtn", type: "button", "aria-label": "New session", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+")));
   }
 
   // ---------------------------------------------------------------- routing
