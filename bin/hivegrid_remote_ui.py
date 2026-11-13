@@ -253,6 +253,7 @@ a { color: var(--accent); text-decoration: none; }
 @media (max-width: 640px) {
   .nav-btn { display: inline-flex; }
   .usage-item { display: inline-flex; }
+  .top .menu-btn { display: none; }
   .count { display: none; }
   .pages { display: none; position: absolute; z-index: 40; top: 100%; right: calc(4px + var(--sar)); min-width: 220px; padding: 6px; gap: 2px;
     flex-direction: column; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
@@ -1518,7 +1519,7 @@ APP_JS = r"""(function () {
     U.count = h("span", { class: "count" });
     U.conn = h("span", { class: "status-chip conn-wait", role: "status" }, "reconnecting\u2026");
     U.ro = h("span", { class: "status-chip ro-chip", hidden: true }, "read-only");
-    U.menuBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u22ef");
+    U.menuBtn = h("button", { class: "btn ghost icon menu-btn", type: "button", "aria-label": "Menu", "aria-haspopup": "dialog", onclick: function () { openMenu("usage"); } }, "\u22ef");
     U.agentsBtn = h("a", { class: "btn ghost icon", href: "#/", "aria-label": "Agents", hidden: !((meta && meta.terminal) || hasBots()) }, "\u25a3");
     U.termBtn = h("a", { class: "btn ghost icon", href: "#/term", "aria-label": "Terminals", hidden: !(meta && meta.terminal) }, ">_");
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
@@ -1526,8 +1527,10 @@ APP_JS = r"""(function () {
     U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
     U.navDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.navBtn = h("button", { class: "btn ghost icon nav-btn has-dot", type: "button", "aria-label": "Pages", "aria-haspopup": "true", "aria-expanded": "false", onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
-    U.usageBtn = h("button", { class: "btn ghost icon usage-item", type: "button", "aria-label": "Usage", onclick: function () { openMenu("usage"); } }, "\u25d4");
-    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn, U.usageBtn);
+    var menuItems = [["usage", "Usage", "\u25d4"], ["new", "New session", "+"], ["history", "History", "\u21ba"], ["system", "System", "\u25a4"], ["notify", "Alerts", "\u2407"], ["about", "About", "\u24d8"]].map(function (m) {
+      return h("button", { class: "btn ghost icon usage-item", type: "button", "aria-label": m[1], onclick: function () { openMenu(m[0]); } }, m[2]);
+    });
+    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn, menuItems);
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
       h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.navBtn, U.pages, U.menuBtn);
     U.top = top;
