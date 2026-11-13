@@ -246,11 +246,13 @@ a { color: var(--accent); text-decoration: none; }
 }
 .top { position: relative; }
 .nav-btn { display: none; position: relative; }
+.usage-item { display: none; }
 .pages { display: contents; }
 .pages .btn::after { display: none; }
 /* narrow screens: the pages (agents, terminals, bots) sit behind a burger button, voice and the menu stay in the bar */
 @media (max-width: 640px) {
-  .nav-btn:not([hidden]) { display: inline-flex; }
+  .nav-btn { display: inline-flex; }
+  .usage-item { display: inline-flex; }
   .count { display: none; }
   .pages { display: none; position: absolute; z-index: 40; top: 100%; right: calc(4px + var(--sar)); min-width: 220px; padding: 6px; gap: 2px;
     flex-direction: column; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
@@ -354,7 +356,8 @@ a { color: var(--accent); text-decoration: none; }
 .foot .k { color: var(--text); font-weight: 700; }
 .foot .spacer { flex: 1; }
 .foot button { background: none; border: 0; padding: 0; color: inherit; cursor: pointer; min-height: 44px; display: inline-flex; align-items: center; gap: 1ch; }
-.foot .newbtn { width: 44px; justify-content: center; font-size: 30px; line-height: 1; margin-left: -6px; }
+.foot .newbtn { width: 44px; justify-content: center; font-size: 30px; line-height: 1; margin-right: -6px; }
+.foot .voicebtn { width: 44px; justify-content: center; font-size: 24px; line-height: 1; color: var(--accent); }
 .foot .newbtn .k { font-weight: 400; }
 
 /* ---------------------------------------------------------------- chat header */
@@ -1444,8 +1447,6 @@ APP_JS = r"""(function () {
     if (U.agentsBtn) { U.agentsBtn.hidden = !(meta.terminal || hasBots()); }
     if (U.termBtn) { U.termBtn.hidden = !meta.terminal; }
     if (U.botsBtn) { U.botsBtn.hidden = !hasBots(); }
-    if (U.navBtn) { U.navBtn.hidden = !(meta.terminal || hasBots()); }
-    if (U.voiceBtn) { U.voiceBtn.hidden = !hasVoice(); }
     pagerSet((!!meta.terminal || hasBots()) && !EMBED);
     routePages();
     if (agents) { renderChips(); renderList(); updateDetail(); }
@@ -1523,13 +1524,12 @@ APP_JS = r"""(function () {
     U.botsDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
     U.botsBtn = h("a", { class: "btn ghost icon has-dot", href: "#/bots", "aria-label": "Bots", hidden: !hasBots() }, "\u25f7", U.botsDot);
     U.gridBtn = h("a", { class: "btn ghost icon grid-btn", href: "#/grid", "aria-label": "Agent grid", title: "Agent grid" }, "\u25a6");
-    U.voiceBtn = h("button", { class: "btn ghost icon", type: "button", "aria-label": "Voice", title: "Voice", "aria-haspopup": "dialog", hidden: !hasVoice(), onclick: openVoice }, "\u25c9");
     U.navDot = h("span", { class: "bdot", hidden: true, "aria-hidden": "true" });
-    U.navBtn = h("button", { class: "btn ghost icon nav-btn has-dot", type: "button", "aria-label": "Pages", "aria-haspopup": "true", "aria-expanded": "false", hidden: !((meta && meta.terminal) || hasBots()),
-      onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
-    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn);
+    U.navBtn = h("button", { class: "btn ghost icon nav-btn has-dot", type: "button", "aria-label": "Pages", "aria-haspopup": "true", "aria-expanded": "false", onclick: function (ev) { ev.stopPropagation(); setNav(!U.top.classList.contains("nav-open")); } }, "\u2630", U.navDot);
+    U.usageBtn = h("button", { class: "btn ghost icon usage-item", type: "button", "aria-label": "Usage", onclick: function () { openMenu("usage"); } }, "\u25d4");
+    U.pages = h("nav", { class: "pages", "aria-label": "Pages", onclick: function () { setNav(false); } }, U.agentsBtn, U.termBtn, U.botsBtn, U.usageBtn);
     var top = h("header", { class: "top" }, logo("top-logo", 26), h("span", { class: "brand" }, "Hivegrid"), U.count,
-      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.voiceBtn, U.navBtn, U.pages, U.menuBtn);
+      h("span", { class: "spacer" }), h("span", { class: "top-chips" }, U.ro, U.conn), U.gridBtn, U.navBtn, U.pages, U.menuBtn);
     U.top = top;
     document.addEventListener("click", function (ev) { if (U.top.classList.contains("nav-open") && !U.pages.contains(ev.target)) { setNav(false); } });
     window.addEventListener("hashchange", function () { setNav(false); });
@@ -1829,10 +1829,11 @@ APP_JS = r"""(function () {
     clear(U.foot);
     var needs = agents.filter(function (a) { return a.state === "attention"; }).length;
     var limited = agents.filter(function (a) { return a.state === "limit"; }).length;
-    U.foot.appendChild(h("button", { class: "write newbtn", type: "button", "aria-label": "New session", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+")));
-    U.foot.appendChild(h("span", { class: "spacer" }));
     if (needs > 0) { U.foot.appendChild(h("span", { class: "st s-attention" }, needs + " needs you")); }
     if (limited > 0) { U.foot.appendChild(h("span", { class: "st s-limit" }, (needs > 0 ? "\u00b7 " : "") + limited + " limit")); }
+    U.foot.appendChild(h("span", { class: "spacer" }));
+    if (hasVoice()) { U.foot.appendChild(h("button", { class: "voicebtn", type: "button", "aria-label": "Voice", "aria-haspopup": "dialog", onclick: openVoice }, "\u25c9")); }
+    U.foot.appendChild(h("button", { class: "write newbtn", type: "button", "aria-label": "New session", onclick: function () { openMenu("new"); } }, h("span", { class: "k" }, "+")));
   }
 
   // ---------------------------------------------------------------- routing
