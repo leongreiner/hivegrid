@@ -133,6 +133,37 @@ class NewOnBestAccount(unittest.TestCase):
         self.assertIn("omp --profile=b; exec bash", split[-1])
 
 
+class NewInShell(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+        def run(*args):
+            self.calls.append(args)
+            if args[0] == "list":
+                return json.dumps([{"pane_id": 7, "tab_id": 1, "window_id": 0, "tty_name": "/dev/pts/4", "cwd": "file:///w",
+                                    "size": {"cols": 100, "rows": 40}, "left_col": 0, "top_row": 0, "is_active": True}])
+            return "8\n" if args[0] == "split-pane" else ""
+
+        self.mux = FakeMux()
+        self.mux.run = run
+        self.accounts = [{"label": "b", "profile": "b", "hidden": False}]
+
+    def new(self, comm, args=""):
+        return D.act_new(self.mux, [], 7, accounts=self.accounts, now=0.0, fg={"pts/4": (1, comm, 5, args or comm)})
+
+    def test_a_plain_shell_gets_omp_typed_in_place_and_no_pane_is_added(self):
+        self.assertTrue(self.new("bash"))
+        self.assertEqual(self.calls[-1], ("send-text", "--pane-id", "7", "--no-paste", "omp\r"))
+        self.assertFalse(any(c[0] in ("split-pane", "spawn") for c in self.calls))
+
+    def test_a_pane_that_runs_something_else_gets_a_split(self):
+        for comm, args in (("omp", "omp"), ("yazi", "yazi"), ("python3", "python3 /x/hivegrid-bar --surface #101010")):
+            self.calls.clear()
+            self.new(comm, args)
+            self.assertTrue(any(c[0] == "split-pane" for c in self.calls), comm)
+            self.assertFalse(any(c[0] == "send-text" for c in self.calls), comm)
+
+
 class BestProfile(unittest.TestCase):
     NOW = 1000000.0
 

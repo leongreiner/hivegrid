@@ -5,7 +5,8 @@ Keys, left to right, top row then bottom row:
   2 enter       the focused agent (number, state); press: Enter (approve, continue, send what was dictated)
   3 mic         press: start dictating, press again: the text is typed into the focused pane (no Enter)
   4 new         press: a new omp session in the focused pane's folder, split off in its tab (the canvas), on
-                the account with the most 5-hour and weekly room left
+                the account with the most 5-hour and weekly room left; in a plain shell pane omp starts in
+                that pane instead
   5 grid        one press: equalize the panes, two presses: arrange them (config/layouts.lua)
   6 zoom        press: zoom the focused pane to the whole window and back (Alt+z)
 
@@ -171,10 +172,23 @@ def best_profile(accounts, now, directory=None):
     return best
 
 
-def act_new(mux, agents, focus, accounts=None, now=None, say=None):
-    """A new omp session split off the focused pane's tab (the canvas), in that pane's folder, where it gets the
-    keyboard (hivegrid_agents.spawn_agent). It runs on the account with the most room left in its 5-hour and weekly
-    windows (best_profile); when no account can say, on the profile of the focused agent, else omp's default."""
+def _focused_shell(mux, focus, fg=None):
+    """True when the pane `focus` is a plain shell at its prompt's level: its foreground program is a shell
+    (not omp, an editor, yazi, lazygit, a web pane or any chrome)."""
+    panes = A._list_panes(mux.run) or []
+    pane = next((p for p in panes if p["pane_id"] == focus), None)
+    if pane is None or not pane.get("tty_name"):
+        return False
+    fg = A.foreground_by_tty() if fg is None else fg
+    _pid, comm, _age, args = fg.get(A._tty(pane), (None, "", 0, ""))
+    return comm in A.SHELLS and not A.is_chrome(comm, args)
+
+
+def act_new(mux, agents, focus, accounts=None, now=None, say=None, fg=None):
+    """A new omp session on the account with the most room left in its 5-hour and weekly windows (best_profile);
+    when no account can say, on the profile of the focused agent, else omp's default. In the folder of the
+    focused pane, as a pane split off its tab (the canvas; it gets the keyboard), except when the focused pane
+    is a plain shell: then omp starts in that pane (typed at its prompt), no pane is added."""
     if focus is None:
         return False
     here = next((a for a in agents if a.pane == focus), None)
@@ -186,6 +200,12 @@ def act_new(mux, agents, focus, accounts=None, now=None, say=None):
     profile = pick[0] if pick else (here.profile if here else None)
     if say:
         say(f"new: {pick[1] + ' (most room left)' if pick else 'no account can say, ' + (profile or 'default profile')}")
+    if _focused_shell(mux, focus, fg):
+        try:
+            line = A._agent_command(profile)[2].split(";")[0]    # "omp --profile=x" from "omp --profile=x; exec bash"
+        except ValueError:
+            line = A._agent_command()[2].split(";")[0]
+        return mux.run("send-text", "--pane-id", str(focus), "--no-paste", line + "\r") is not None
     try:
         return A.spawn_agent(near=here, run=mux.run, profile=profile) is not None
     except ValueError:  # HIVEGRID_AGENT_CMD is not plain omp: no profile flag
