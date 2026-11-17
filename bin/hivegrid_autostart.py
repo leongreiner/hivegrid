@@ -29,6 +29,7 @@ from pathlib import Path
 MARK = "Managed by hivegrid-autostart"
 REMOTE_UNIT = "hivegrid-remote.service"
 SCHEDULER_UNIT = "hivegrid-scheduler.service"
+DECK_UNIT = "hivegrid-deck.service"
 GUI_UNIT = "hivegrid.service"
 SYSCTL_FILE = "/etc/sysctl.d/90-hivegrid-recovery.conf"
 WATCHDOG_FILE = "/etc/systemd/system.conf.d/90-hivegrid-watchdog.conf"
@@ -218,6 +219,27 @@ def render_scheduler_unit(exec_path, home):
         "",
         "[Install]",
         "WantedBy=default.target",
+        "",
+    ])
+
+
+def render_deck_unit(exec_path, home):
+    return "\n".join([
+        f"# {MARK} (docs/autostart.md): `hivegrid-autostart install` rewrites this file,",
+        "# `uninstall` removes it.",
+        "[Unit]",
+        "Description=Hivegrid Stream Deck (control panel for the agents, docs/deck.md)",
+        "After=graphical-session.target",
+        "PartOf=graphical-session.target",
+        "",
+        "[Service]",
+        f"ExecStart={_unit_exec(exec_path, home)}",
+        "# Without a deck plugged in the program waits for one; without a Hivegrid window its keys do nothing.",
+        "Restart=always",
+        "RestartSec=3",
+        "",
+        "[Install]",
+        "WantedBy=graphical-session.target",
         "",
     ])
 
@@ -614,6 +636,13 @@ def scheduler_exec(ctx):
     return None
 
 
+def deck_exec(ctx):
+    for cand in (ctx.bin_dir / "hivegrid-deck", Path(__file__).resolve().parent / "hivegrid-deck"):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def gui_exec(ctx):
     cand = ctx.bin_dir / "hivegrid"
     if cand.is_file() and os.access(cand, os.X_OK):
@@ -693,6 +722,20 @@ def cmd_status(ctx):
         ctx.line("ok" if enabled == "enabled" else "todo", f"enabled at login/boot: {enabled}; running now: {active}")
         if st != "current" or enabled != "enabled":
             todo.append("hivegrid-autostart install   (scheduler unit)")
+
+    ctx.say("\nhivegrid-deck (Stream Deck control panel)")
+    dexec = deck_exec(ctx)
+    if dexec is None:
+        ctx.line("todo", f"hivegrid-deck not found in {ctx.bin_dir} or next to this program: run install.sh first")
+        todo.append("install Hivegrid (install.sh) so that hivegrid-deck exists")
+    else:
+        st = unit_state(ctx, DECK_UNIT, render_deck_unit(dexec, ctx.home))
+        enabled, active = unit_flags(ctx, DECK_UNIT)
+        ctx.line("ok" if st == "current" else "todo", f"unit {ctx.unit_dir / DECK_UNIT}: {st}"
+                 + (" (a unit of your own; install replaces it and keeps a .orig copy)" if st == "foreign" else ""))
+        ctx.line("ok" if enabled == "enabled" else "todo", f"enabled at login: {enabled}; running now: {active}")
+        if st != "current" or enabled != "enabled":
+            todo.append("hivegrid-autostart install   (deck unit)")
 
     ctx.say("\nHivegrid window")
     gexec = gui_exec(ctx)
@@ -824,6 +867,7 @@ def install_user(ctx, linger):
     rexec = remote_exec(ctx)
     sexec = scheduler_exec(ctx)
     gexec = gui_exec(ctx)
+    dexec = deck_exec(ctx)
     if rexec is None:
         ctx.fail(f"hivegrid-remote not found in {ctx.bin_dir} or next to this program (run install.sh)")
     else:
@@ -832,6 +876,10 @@ def install_user(ctx, linger):
         ctx.fail(f"hivegrid-scheduler not found in {ctx.bin_dir} or next to this program (run install.sh)")
     else:
         changed |= _install_unit(ctx, SCHEDULER_UNIT, render_scheduler_unit(sexec, ctx.home))
+    if dexec is None:
+        ctx.fail(f"hivegrid-deck not found in {ctx.bin_dir} or next to this program (run install.sh)")
+    else:
+        changed |= _install_unit(ctx, DECK_UNIT, render_deck_unit(dexec, ctx.home))
     if gexec is None:
         ctx.fail("no `hivegrid` launcher found (run install.sh)")
     else:
@@ -848,6 +896,8 @@ def install_user(ctx, linger):
         _enable_unit(ctx, REMOTE_UNIT, has_token)
     if sexec is not None:
         _enable_unit(ctx, SCHEDULER_UNIT, True)
+    if dexec is not None:
+        _enable_unit(ctx, DECK_UNIT, True)
     if gexec is not None:
         _enable_unit(ctx, GUI_UNIT, False)
         ctx.line("info", "Hivegrid is not started now (that would open a second window next to yours): "
@@ -990,7 +1040,7 @@ def _uninstall_unit(ctx, name):
 def uninstall_user(ctx):
     ctx.say("\nuser services")
     changed = False
-    for name in (REMOTE_UNIT, SCHEDULER_UNIT, GUI_UNIT):
+    for name in (REMOTE_UNIT, SCHEDULER_UNIT, DECK_UNIT, GUI_UNIT):
         changed |= _uninstall_unit(ctx, name)
     if changed:
         ctx.run(["systemctl", "--user", "daemon-reload"])
@@ -1082,9 +1132,11 @@ def cmd_render(ctx, args):
     rexec = remote_exec(ctx) or ctx.bin_dir / "hivegrid-remote"
     sexec = scheduler_exec(ctx) or ctx.bin_dir / "hivegrid-scheduler"
     gexec = gui_exec(ctx) or ctx.bin_dir / "hivegrid"
+    dexec = deck_exec(ctx) or ctx.bin_dir / "hivegrid-deck"
     files = {
         REMOTE_UNIT: render_remote_unit(rexec, ctx.home),
         SCHEDULER_UNIT: render_scheduler_unit(sexec, ctx.home),
+        DECK_UNIT: render_deck_unit(dexec, ctx.home),
         GUI_UNIT: render_gui_unit(gexec, ctx.home),
         os.path.basename(SYSCTL_FILE): render_sysctl(),
         os.path.basename(WATCHDOG_FILE): render_watchdog(),

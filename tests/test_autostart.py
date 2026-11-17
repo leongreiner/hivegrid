@@ -107,7 +107,7 @@ class AutostartTest(unittest.TestCase):
         self.root = os.path.join(self.tmp, "root")
         self.bin = os.path.join(self.home, ".local", "bin")
         os.makedirs(self.bin)
-        for name in ("hivegrid-remote", "hivegrid-scheduler", "hivegrid"):
+        for name in ("hivegrid-remote", "hivegrid-scheduler", "hivegrid-deck", "hivegrid"):
             with open(os.path.join(self.bin, name), "w") as fh:
                 fh.write("#!/bin/sh\n")
             os.chmod(os.path.join(self.bin, name), 0o755)
@@ -318,6 +318,21 @@ class AutostartTest(unittest.TestCase):
                          A.render_scheduler_unit(os.path.join(self.bin, "hivegrid-scheduler"), self.home))
         self.assertIn("hivegrid-scheduler.service", self.runner.enabled)
         self.assertIn("hivegrid-scheduler.service", self.runner.active)
+
+    def test_deck_unit_follows_the_graphical_session_and_is_installed_enabled_and_started(self):
+        unit = A.render_deck_unit("/home/tester/.local/bin/hivegrid-deck", "/home/tester")
+        lines = unit.splitlines()
+        for want in ("Restart=always", "After=graphical-session.target", "WantedBy=graphical-session.target",
+                     "ExecStart=%h/.local/bin/hivegrid-deck"):
+            self.assertIn(want, lines)
+        rc, out = self.cli("install", "--bin-dir", self.bin)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(slurp(self.unit("hivegrid-deck.service")),
+                         A.render_deck_unit(os.path.join(self.bin, "hivegrid-deck"), self.home))
+        self.assertIn("hivegrid-deck.service", self.runner.enabled)
+        self.assertIn("hivegrid-deck.service", self.runner.active)
+        self.cli("uninstall", "--bin-dir", self.bin)
+        self.assertFalse(os.path.exists(self.unit("hivegrid-deck.service")))
 
     def test_status_reports_the_scheduler_unit(self):
         rc, out = self.cli("status", "--bin-dir", self.bin)
