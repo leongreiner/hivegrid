@@ -1,5 +1,6 @@
 """hivegrid_deck: the key logic of the Stream Deck panel (next waiting agent, double tap, what each action sends
 to the mux) and the FIFO line to the bars (hivegrid_deck_link). No device, no real mux, no network."""
+import json
 import os
 import shutil
 import sys
@@ -85,19 +86,22 @@ class Actions(unittest.TestCase):
         self.assertFalse(D.act_new(m, [], None))
         self.assertEqual(m.calls, [])
 
-    def test_new_from_a_running_agent_opens_a_window_in_its_folder(self):
-        m = FakeMux()
-        self.assertTrue(D.act_new(m, [agent(7, "working", cwd="/w/proj")], 7))
-        args = m.calls[-1]
-        self.assertEqual(args[:6], ("spawn", "--new-window", "--pane-id", "7", "--cwd", "/w/proj"))
-        self.assertEqual(args[6], "--")
-        self.assertIn("omp", args[-1])
+    def test_new_splits_the_focused_tab_in_the_focused_folder_and_never_opens_a_window(self):
+        calls = []
 
-    def test_new_from_a_shell_splits_the_tab_instead(self):
+        def run(*args):
+            calls.append(args)
+            if args[0] == "list":
+                return json.dumps([{"pane_id": 7, "tab_id": 1, "window_id": 0, "tty_name": None, "cwd": "file:///w/proj",
+                                    "size": {"cols": 100, "rows": 40}, "left_col": 0, "top_row": 0, "is_active": True}])
+            return "8\n" if args[0] == "split-pane" else ""
+
         m = FakeMux()
-        m.run = lambda *a: m.calls.append(a) or ("" if a[0] != "list" else "[]")
-        D.act_new(m, [agent(7, "exited")], 7)
-        self.assertFalse(any(c[:2] == ("spawn", "--new-window") for c in m.calls))
+        m.run = run
+        self.assertTrue(D.act_new(m, [agent(7, "working", cwd="/w/proj")], 7))
+        split = next(c for c in calls if c[0] == "split-pane")
+        self.assertEqual(split[split.index("--cwd") + 1], "/w/proj")
+        self.assertFalse(any(c[0] == "spawn" for c in calls))
 
 
 class Raise(unittest.TestCase):

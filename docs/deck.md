@@ -12,7 +12,7 @@ hivegrid-deck do ACTION       # one action without the deck: next, enter, mic, n
 | 1 | how many agents wait for you (needs you or limit), purple while there are any | focus the next one, across tabs and windows |
 | 2 | number and state of the focused agent | Enter in the focused pane (approve, continue, send what you dictated) |
 | 3 | mic; red while recording | start dictating; press again: the words are typed into the focused pane, without Enter |
-| 4 | `+` | a new omp session in the focused pane's folder: in a new window when that pane runs an agent, else split off in its tab |
+| 4 | `+` | a new omp session in the focused pane's folder, split off in its tab (it gets the keyboard) |
 | 5 | grid | one press: equalize the dividers; two presses within 0.35 s: arrange the panes |
 | 6 | zoom | zoom the focused pane to the whole window and back (`Alt+z`) |
 

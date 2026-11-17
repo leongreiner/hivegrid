@@ -4,8 +4,7 @@ Keys, left to right, top row then bottom row:
   1 needs you   the number of agents that wait for you; press: focus the next one
   2 enter       the focused agent (number, state); press: Enter (approve, continue, send what was dictated)
   3 mic         press: start dictating, press again: the text is typed into the focused pane (no Enter)
-  4 new         press: a new omp session in the focused pane's folder; in a new window when the focused
-                pane already runs omp, else split off in its tab
+  4 new         press: a new omp session in the focused pane's folder, split off in its tab (the canvas)
   5 grid        one press: equalize the panes, two presses: arrange them (config/layouts.lua)
   6 zoom        press: zoom the focused pane to the whole window and back (Alt+z)
 
@@ -147,17 +146,13 @@ def act_layout(mux, action, focus, path=None):
 
 
 def act_new(mux, agents, focus):
-    """A new omp session in the folder of the focused pane. When that pane runs an agent (not exited) it gets a
-    window of its own, else it is split off in the focused pane's tab (hivegrid_agents.spawn_agent)."""
+    """A new omp session in the folder of the focused pane, split off in that pane's tab (the canvas), where it
+    gets the keyboard (hivegrid_agents.spawn_agent)."""
     if focus is None:
         return False
     here = next((a for a in agents if a.pane == focus), None)
     os.environ["HIVEGRID_ORIGIN_PANE"] = str(focus)
-    if here is None or here.state == "exited":
-        return A.spawn_agent(near=here, run=mux.run) is not None
-    cwd = here.cwd or os.environ.get("HOME", "/")
-    argv = A._agent_command()
-    return mux.run("spawn", "--new-window", "--pane-id", str(focus), "--cwd", cwd, "--", *argv) is not None
+    return A.spawn_agent(near=here, run=mux.run) is not None
 
 
 class DoubleTap:
