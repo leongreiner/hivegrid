@@ -279,12 +279,12 @@ local function moves(mux)
   return bad
 end
 
-test('layouts registers no handler for status ticks or window resizes; its only user-var handler is the phone one', function(wz)
+test('layouts registers no handler for status ticks or window resizes; its only user-var handlers are the phone one and the deck one', function(wz)
   setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2 }, 250) })
   for _, event in ipairs { 'update-status', 'window-resized', 'window-config-reloaded' } do
     T.eq(wz.stub.handlers[event] or {}, {}, event)
   end
-  T.eq(#(wz.stub.handlers['user-var-changed'] or {}), 1)
+  T.eq(#(wz.stub.handlers['user-var-changed'] or {}), 2)
 end)
 
 test('a pane gained or lost keeps every other pane where it is', function(wz)
@@ -620,4 +620,23 @@ test('broadcast: paste is refused with a toast; LEADER+b again turns it off', fu
   wz.stub.perform(wz.stub.key(config.key_tables.broadcast, 'b', 'LEADER'), win, win:active_pane())
   T.eq(wz.GLOBAL.broadcast, nil)
   T.eq(win:active_key_table(), nil)
+end)
+
+test('the deck asks a bar for equalize or arrange on the window of the pane it names', function(wz)
+  local mux = setup(wz, { cols = 250, rows = 60, root = FM.strip('h', { 1, 2, 3, 4, 5 }, 250) })
+  local bar = mux.window:active_pane()
+  local target = mux.window:active_pane()
+  wz.GLOBAL.sidebar = { [tostring(mux.tab:tab_id())] = { handle = 999 } }
+  local function ask(pane, value)
+    wz.emit('user-var-changed', mux.window, pane, 'hivegrid_deck', value)
+  end
+  ask(bar, 'arrange:' .. target:pane_id() .. ':1')
+  T.eq(count(mux, 'split-pane'), 0, 'a pane that is not a bar may not ask')
+  local fake_bar = { pane_id = function() return 999 end }
+  ask(fake_bar, 'bogus:' .. target:pane_id() .. ':1')
+  ask(fake_bar, 'arrange:abc:1')
+  T.eq(count(mux, 'split-pane'), 0, 'unknown actions and bad ids do nothing')
+  ask(fake_bar, 'arrange:' .. target:pane_id() .. ':1')
+  local _, counts = reading(mux)
+  T.eq(counts, { 3, 2 })
 end)

@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Stream Deck Mini as a Hivegrid control panel (daemon), or `hivegrid-deck do ACTION` for one action. See docs/deck.md."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import hivegrid_deck  # noqa: E402
+
+sys.exit(hivegrid_deck.main())

@@ -166,6 +166,7 @@ Releases are published by hand: Actions, "Release", "Run workflow" with a tag su
 | [docs/features.md](docs/features.md) | every feature in detail |
 | [docs/remote.md](docs/remote.md) | control the agents from a phone over Tailscale: token, `tailscale serve`, systemd unit, API, the optional phone terminal (off by default), threat model |
 | [docs/autostart.md](docs/autostart.md) | come back by itself after a crash or reboot: restart units, kernel faults to reboot, watchdog, automatic login, what no software can fix |
+| [docs/deck.md](docs/deck.md) | Stream Deck Mini as a control panel: next agent that needs you, Enter, dictate, new session, equalize/arrange, zoom; works while Hivegrid is not focused |
 | [docs/schedules.md](docs/schedules.md) | scheduled `omp` agents ("Bots"): one-time and recurring tasks, persistent agents with memory, `hivegrid-schedule`, file formats, the when grammar, policies |
 | [docs/panels.md](docs/panels.md) | settings, usage, agents, monitor and hive panels |
 | [docs/wezterm-build.md](docs/wezterm-build.md) | what the WezTerm fork adds and how it degrades on stock WezTerm |
