@@ -123,9 +123,10 @@ local function omp_title(title)
   return nil, rest
 end
 
--- omp starts its session titles with an emoji (📂, 🙋, ⏱️); the lists show the words only.
+-- omp starts its session titles with an emoji (📂, 🙋, ⏱️); the lists show the words only. A Nerd Font
+-- icon (private use, U+F0000 and up: lead byte \243 or \244) is the session's symbol and stays, as on the phone.
 local function calm_title(s)
-  s = s:gsub('^[\226\240-\244][\128-\191]+\239\184\143', ''):gsub('^[\240-\244][\128-\191]+', '')
+  s = s:gsub('^[\226\240-\244][\128-\191]+\239\184\143', ''):gsub('^[\240-\242][\128-\191]+', '')
   return (s:gsub('^%s+', ''))
 end
 

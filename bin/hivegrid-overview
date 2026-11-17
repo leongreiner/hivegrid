@@ -175,10 +175,12 @@ def bots_lines(bots, free):
 
 def clean(text):
     """Titles carry emoji, which take two cells while the canvas counts one per character: drop
-    them (and the joiners and variation selectors that go with them) so rows keep their alignment."""
+    them (and the joiners and variation selectors that go with them) so rows keep their alignment.
+    A Nerd Font icon (private use, one cell) is the session's symbol and stays, as on the phone."""
     out = []
     for ch in str(text):
-        if ord(ch) >= 0x1F000 or unicodedata.east_asian_width(ch) in ("W", "F"):
+        wide = ord(ch) >= 0x1F000 and unicodedata.category(ch) != "Co"
+        if wide or unicodedata.east_asian_width(ch) in ("W", "F"):
             continue
         if unicodedata.category(ch) in ("Mn", "Me", "Cf", "Cc"):
             continue

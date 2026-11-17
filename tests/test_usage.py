@@ -190,5 +190,12 @@ class PanelTest(unittest.TestCase):
         self.assertEqual([c[0] for c in P.AgentsPage.usage_cells({"agent": False, "usage": None}, p)], ["", ""])
 
 
+
+class DockTitles(unittest.TestCase):
+    def test_a_nerd_font_session_icon_stays_and_emoji_go(self):
+        self.assertEqual(D.clean("\U000f030c DECK: Stream Deck"), "\U000f030c DECK: Stream Deck")
+        self.assertEqual(D.clean("\U0001f4c2 fix tests"), "fix tests")
+
+
 if __name__ == "__main__":
     unittest.main()

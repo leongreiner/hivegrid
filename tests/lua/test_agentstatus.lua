@@ -70,6 +70,18 @@ T.test('omp title glyph gives working, idle and needs you, the session title is 
   T.eq({ r[11].title, r[12].title, r[13].title }, { 'refactor parser', 'fix tests', 'approve plan' })
 end)
 
+T.test('a session title keeps its Nerd Font icon and loses a leading emoji', function(wz)
+  local as = load()
+  local win, tab = grid2x2(wz, {
+    omp(wz, 11, 'π > \243\176\140\140 DECK: Stream Deck'),
+    omp(wz, 12, 'π > \240\159\147\130 fix tests'),
+    omp(wz, 13, 'π > \226\143\177\239\184\143 wait'),
+    omp(wz, 14, 'π > plain'),
+  }, 1, { focused = false })
+  local r = rows(as, win, tab)
+  T.eq({ r[11].title, r[12].title, r[13].title }, { '\243\176\140\140 DECK: Stream Deck', 'fix tests', 'wait' })
+end)
+
 T.test('an agent that is a script for bun or node is named by its script, other programs by their executable', function(wz)
   local as = load()
   local function run(id, exe, info) return wz.fake.pane { id = id, title = 'x', text = 'x', process_name = exe, process_info = info } end
