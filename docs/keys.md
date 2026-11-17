@@ -35,6 +35,7 @@
 | | `LEADER+w`, then `t` | new tab in the web pane (the address field opens on a blank page; with no web pane, asks for a URL and opens one) |
 | | `LEADER+w`, then `x` / `]` / `[` / `1`-`9` | close the active tab / next / previous / pick tab N of the web pane |
 | | `Ctrl+T` / `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab` (or `Ctrl+PageDown` / `Ctrl+PageUp`), `Ctrl+1`-`9` in the web pane | the same, as in a browser (they never reach the page); a click on a tab, its `×` or the `+` in the strip, and a middle click on a tab, do it with the mouse; a middle click or Ctrl+click on a link in a page opens it in a new tab |
+| | `Ctrl+C` / `Ctrl+X` in the address field of the web pane | copy / cut the address (a click on the field or `Ctrl+L` selects it all; once the caret moved nothing is selected, so nothing is copied) |
 | | right click on a link in the web pane | copy the link's address to the clipboard (the page still gets the click; no menu opens) |
 | | browser button of the left bar | focus the tab's web pane; without one, open a web pane on the home page (no question; type the location in its header) |
 | | `LEADER+w`, then `b` / `f` | back / forward |
