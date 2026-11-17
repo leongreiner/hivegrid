@@ -46,6 +46,7 @@ from hivegrid_ui import (  # noqa: E402
     FADE_IN, FADE_OUT, FRAME, HOVER_BLEND, STEPS, cell_pixels, decode, images_enabled, iterm_image,
     mix, sgr_color, split_complete,
 )
+import hivegrid_deck_link as deck_link  # noqa: E402
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -334,6 +335,22 @@ class Bar:
         self.out.write(f"\x1b]1337;SetUserVar=sidebar_click={value}\x07")
         self.out.flush()
 
+    def deck(self, line):
+        """A request of the Stream Deck daemon (hivegrid_deck_link): announced as the user var
+        hivegrid_deck, salted so a repeated request is a change (config/layouts.lua acts on it)."""
+        self.serial += 1
+        value = base64.b64encode(f"{line}:{self.serial}".encode()).decode()
+        self.out.write(f"\x1b]1337;SetUserVar=hivegrid_deck={value}\x07")
+        self.out.flush()
+
+    def read_deck(self, fd):
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            return
+        for line in deck_link.parse(data):
+            self.deck(line)
+
     def handle(self, ev, rows):
         if ev[0] != "mouse":
             return
@@ -375,6 +392,7 @@ class Bar:
 
     def run(self):
         old = termios.tcgetattr(self.fd)
+        deck_fd = None
         try:
             tty.setraw(self.fd)
             self.out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?8800h")
@@ -397,6 +415,7 @@ class Bar:
             path = state_path()
             drop_stale(path, time.time())
             pending = b""  # an escape sequence the last read cut off
+            deck_fd = deck_link.open_reader(deck_link.fifo_path())
             while self.running:
                 now = time.monotonic()
                 if self.restyle(now):
@@ -411,10 +430,13 @@ class Bar:
                     self.draw(rows, cols, state, self.dirty, (cw, ch))
                     self.dirty = False
                 try:
-                    ready, _, _ = select.select([self.fd], [], [], wait or (FRAME if busy else IDLE))
+                    fds = [self.fd] + ([deck_fd] if deck_fd is not None else [])
+                    ready, _, _ = select.select(fds, [], [], wait or (FRAME if busy else IDLE))
                 except InterruptedError:
                     continue
-                if ready:
+                if deck_fd in ready:
+                    self.read_deck(deck_fd)
+                if self.fd in ready:
                     data = os.read(self.fd, 4096)
                     if not data:
                         break
@@ -422,6 +444,8 @@ class Bar:
                     for ev in decode(head):
                         self.handle(ev, rows)
         finally:
+            if deck_fd is not None:
+                os.close(deck_fd)
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
             self.out.write("\x1b]22;\x07\x1b]111\x07\x1b[?8800l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l")
             self.out.flush()

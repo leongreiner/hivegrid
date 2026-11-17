@@ -708,6 +708,30 @@ return function(config, wezterm)
     end)
   end)
 
+  -- The Stream Deck (bin/hivegrid-deck) asks for equalize or arrange from outside any window: its
+  -- daemon writes "<action>:<pane id>" into a FIFO that every hivegrid-bar reads, and the bar
+  -- announces the line as the user var hivegrid_deck ("<action>:<pane id>:<salt>"). Only a bar may
+  -- ask. The pane id is the one the deck saw focused, so the layout of that window changes, not
+  -- the window of whichever bar read the line.
+  wezterm.on('user-var-changed', function(_, pane, name, value)
+    if name ~= 'hivegrid_deck' or not require('sidebar').is_sidebar(pane:pane_id()) then
+      return
+    end
+    local action, id = tostring(value):match('^(%a+):(%d+):%d+$')
+    local target = id and wezterm.mux.get_pane(tonumber(id))
+    local tab = target and target:tab()
+    local mux_window = tab and tab:window()
+    local window = mux_window and mux_window:gui_window()
+    if not window then
+      return
+    end
+    if action == 'equalize' then
+      equalize(window, target)
+    elseif action == 'arrange' then
+      arrange(window, target)
+    end
+  end)
+
   -- Rotate and swap -------------------------------------------------------
   -- WezTerm's RotatePanes and PaneSelect work on every pane of the tab, so they would move
   -- the sidebar and the dock into the grid. These rebuild the grid with the same geometry
