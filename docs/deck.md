@@ -12,11 +12,15 @@ hivegrid-deck do ACTION       # one action without the deck: next, enter, mic, n
 | 1 | how many agents wait for you (needs you or limit), purple while there are any | focus the next one, across tabs and windows |
 | 2 | number and state of the focused agent | Enter in the focused pane (approve, continue, send what you dictated) |
 | 3 | mic; red while recording | start dictating; press again: the words are typed into the focused pane, without Enter |
-| 4 | `+` | a new omp session in the focused pane's folder, split off in its tab (it gets the keyboard) |
+| 4 | `+` | a new omp session in the focused pane's folder, split off in its tab (it gets the keyboard), on the account with the most room left (see below) |
 | 5 | grid | one press: equalize the dividers; two presses within 0.35 s: arrange the panes |
 | 6 | zoom | zoom the focused pane to the whole window and back (`Alt+z`) |
 
 After every key the Hivegrid window comes to the front. GNOME on Wayland lets no outside program raise a window, so this goes through a small GNOME Shell extension, `hivegrid-raise@hivegrid` (`gnome/`, installed by `install.sh`): it offers one D-Bus method, `org.hivegrid.Raise.Raise`, that activates the most recently used window whose title starts with `Hivegrid`. Enable it once (GNOME on Wayland loads a new extension only at the next login, and `gnome-extensions enable` does not know it before then, so add it to the list directly): `gsettings set org.gnome.shell enabled-extensions "$(gsettings get org.gnome.shell enabled-extensions | sed "s/]$/, 'hivegrid-raise@hivegrid']/")"`, then log out and in. Without it the keys still act, the window just stays where it is.
+
+## Which account a new session gets
+
+Key 4 starts `omp --profile=<profile>` for the account with the most room left. Room is what remains in the tighter of the account's 5-hour and weekly windows (from the `claude-quota` cache, [accounts-and-quota.md](accounts-and-quota.md)); a window past its reset counts as empty. Only accounts with a paired omp profile, a quota state `ok` and a reading younger than 15 minutes count. When none qualifies (no readings, every account needs a login) the session starts on the focused agent's profile, else omp's default. The daemon logs which account it picked (`journalctl --user -u hivegrid-deck`).
 
 ## Setup
 

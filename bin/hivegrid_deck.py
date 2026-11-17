@@ -4,7 +4,8 @@ Keys, left to right, top row then bottom row:
   1 needs you   the number of agents that wait for you; press: focus the next one
   2 enter       the focused agent (number, state); press: Enter (approve, continue, send what was dictated)
   3 mic         press: start dictating, press again: the text is typed into the focused pane (no Enter)
-  4 new         press: a new omp session in the focused pane's folder, split off in its tab (the canvas)
+  4 new         press: a new omp session in the focused pane's folder, split off in its tab (the canvas), on
+                the account with the most 5-hour and weekly room left
   5 grid        one press: equalize the panes, two presses: arrange them (config/layouts.lua)
   6 zoom        press: zoom the focused pane to the whole window and back (Alt+z)
 
@@ -145,14 +146,50 @@ def act_layout(mux, action, focus, path=None):
     return focus is not None and L.send(action, focus, path or L.fifo_path())
 
 
-def act_new(mux, agents, focus):
-    """A new omp session in the folder of the focused pane, split off in that pane's tab (the canvas), where it
-    gets the keyboard (hivegrid_agents.spawn_agent)."""
+QUOTA_FRESH = 900.0        # seconds a quota reading may be old before it says nothing about an account
+
+
+def best_profile(accounts, now, directory=None):
+    """(omp profile, account label) of the account with the most room left, None when no account can say.
+    Room is what is left in the tighter of the 5-hour and the weekly window (a window past its reset counts as
+    empty, hivegrid_remote_data.read_quota). Only accounts with a paired omp profile, a quota state `ok` and a
+    reading younger than QUOTA_FRESH count; ties go to the roomier other window, then the account order."""
+    import hivegrid_remote_data as R
+    best, best_key = None, None
+    for a in R.visible_accounts(accounts):
+        profile = a.get("profile")
+        if not (isinstance(profile, str) and A.PROFILE_NAME.fullmatch(profile)):
+            continue
+        q = R.read_quota(a["label"], now, directory)
+        left = [100.0 - w["pct"] for w in (q["five_hour"], q["seven_day"]) if isinstance(w, dict) and isinstance(w.get("pct"), (int, float))]
+        fresh = isinstance(q["updated_at"], (int, float)) and now - q["updated_at"] <= QUOTA_FRESH
+        if q["state"] != "ok" or not left or not fresh:
+            continue
+        key = (min(left), sum(left))
+        if best_key is None or key > best_key:
+            best, best_key = (profile, a["label"]), key
+    return best
+
+
+def act_new(mux, agents, focus, accounts=None, now=None, say=None):
+    """A new omp session split off the focused pane's tab (the canvas), in that pane's folder, where it gets the
+    keyboard (hivegrid_agents.spawn_agent). It runs on the account with the most room left in its 5-hour and weekly
+    windows (best_profile); when no account can say, on the profile of the focused agent, else omp's default."""
     if focus is None:
         return False
     here = next((a for a in agents if a.pane == focus), None)
     os.environ["HIVEGRID_ORIGIN_PANE"] = str(focus)
-    return A.spawn_agent(near=here, run=mux.run) is not None
+    if accounts is None:
+        import hivegrid_settings_core as S
+        accounts = S.Settings(S.settings_path()).accounts()
+    pick = best_profile(accounts, time.time() if now is None else now)
+    profile = pick[0] if pick else (here.profile if here else None)
+    if say:
+        say(f"new: {pick[1] + ' (most room left)' if pick else 'no account can say, ' + (profile or 'default profile')}")
+    try:
+        return A.spawn_agent(near=here, run=mux.run, profile=profile) is not None
+    except ValueError:  # HIVEGRID_AGENT_CMD is not plain omp: no profile flag
+        return A.spawn_agent(near=here, run=mux.run) is not None
 
 
 class DoubleTap:
@@ -465,7 +502,7 @@ class Daemon:
             ok = {"next": lambda: act_next(self.mux, agents, focus),
                   "enter": lambda: act_enter(self.mux, focus),
                   "zoom": lambda: act_zoom(self.mux, focus),
-                  "new": lambda: act_new(self.mux, agents, focus),
+                  "new": lambda: act_new(self.mux, agents, focus, say=self.say),
                   "mic": lambda: (self.mic.toggle(focus), True)[1]}[name]()
         if not ok:
             self.say(f"{name}: nothing done")

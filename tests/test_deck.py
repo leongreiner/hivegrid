@@ -83,7 +83,7 @@ class Actions(unittest.TestCase):
         m = FakeMux()
         self.assertFalse(D.act_enter(m, None))
         self.assertFalse(D.act_zoom(m, None))
-        self.assertFalse(D.act_new(m, [], None))
+        self.assertFalse(D.act_new(m, [], None, accounts=[]))
         self.assertEqual(m.calls, [])
 
     def test_new_splits_the_focused_tab_in_the_focused_folder_and_never_opens_a_window(self):
@@ -98,10 +98,91 @@ class Actions(unittest.TestCase):
 
         m = FakeMux()
         m.run = run
-        self.assertTrue(D.act_new(m, [agent(7, "working", cwd="/w/proj")], 7))
+        self.assertTrue(D.act_new(m, [agent(7, "working", cwd="/w/proj")], 7, accounts=[]))
         split = next(c for c in calls if c[0] == "split-pane")
         self.assertEqual(split[split.index("--cwd") + 1], "/w/proj")
         self.assertFalse(any(c[0] == "spawn" for c in calls))
+
+
+class NewOnBestAccount(unittest.TestCase):
+    def test_the_new_agent_starts_with_the_profile_that_has_the_most_room(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        now = 1000000.0
+        for label, five, seven in (("a", 80, 20), ("b", 10, 30)):
+            with open(os.path.join(tmp, label + ".json"), "w") as f:
+                json.dump({"state": "ok", "five_hour": {"pct": five, "reset_at": None},
+                           "seven_day": {"pct": seven, "reset_at": None}, "updated_at": now}, f)
+        old = os.environ.get("CLAUDE_QUOTA_CACHE_DIR")
+        os.environ["CLAUDE_QUOTA_CACHE_DIR"] = tmp
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_QUOTA_CACHE_DIR") if old is None else os.environ.__setitem__("CLAUDE_QUOTA_CACHE_DIR", old))
+        calls = []
+
+        def run(*args):
+            calls.append(args)
+            if args[0] == "list":
+                return json.dumps([{"pane_id": 7, "tab_id": 1, "window_id": 0, "tty_name": None, "cwd": "file:///w",
+                                    "size": {"cols": 100, "rows": 40}, "left_col": 0, "top_row": 0, "is_active": True}])
+            return "8\n" if args[0] == "split-pane" else ""
+
+        m = FakeMux()
+        m.run = run
+        accounts = [{"label": x, "profile": x, "hidden": False} for x in ("a", "b")]
+        self.assertTrue(D.act_new(m, [agent(7, "idle", cwd="/w")], 7, accounts=accounts, now=now))
+        split = next(c for c in calls if c[0] == "split-pane")
+        self.assertIn("omp --profile=b; exec bash", split[-1])
+
+
+class BestProfile(unittest.TestCase):
+    NOW = 1000000.0
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def quota(self, label, five=None, seven=None, state="ok", age=30.0, reset=None):
+        def w(pct):
+            return None if pct is None else {"pct": pct, "reset_at": reset}
+        with open(os.path.join(self.dir, label + ".json"), "w") as f:
+            json.dump({"label": label, "state": state, "five_hour": w(five), "seven_day": w(seven), "updated_at": self.NOW - age}, f)
+
+    def accounts(self, *labels):
+        return [{"label": x, "profile": x, "dir": "~/." + x, "hidden": False} for x in labels]
+
+    def best(self, *labels):
+        return D.best_profile(self.accounts(*labels), self.NOW, self.dir)
+
+    def test_the_tighter_window_decides(self):
+        self.quota("a", five=5, seven=90)    # 10 % left in the week
+        self.quota("b", five=60, seven=30)   # 40 % left in the 5 hours
+        self.assertEqual(self.best("a", "b"), ("b", "b"))
+
+    def test_an_account_with_only_a_weekly_window_counts(self):
+        self.quota("a", five=None, seven=13)
+        self.quota("b", five=48, seven=19)
+        self.assertEqual(self.best("a", "b"), ("a", "a"))
+
+    def test_login_stale_and_empty_readings_are_skipped(self):
+        self.quota("a", five=0, seven=0, state="login")
+        self.quota("b", five=0, seven=0, age=D.QUOTA_FRESH + 1)
+        self.quota("c")
+        self.quota("d", five=90, seven=90)
+        self.assertEqual(self.best("a", "b", "c", "e", "d"), ("d", "d"))
+
+    def test_a_window_past_its_reset_counts_as_empty(self):
+        self.quota("a", five=99, seven=10, reset=self.NOW - 5)   # the 5 h window has reset
+        self.quota("b", five=40, seven=40)
+        self.assertEqual(self.best("a", "b"), ("a", "a"))
+
+    def test_none_when_no_account_can_say_and_accounts_without_a_profile_never_win(self):
+        self.assertIsNone(self.best("a"))
+        self.quota("a", five=1, seven=1)
+        self.assertIsNone(D.best_profile([{"label": "a", "profile": None, "hidden": False}], self.NOW, self.dir))
+
+    def test_a_tie_goes_to_the_roomier_other_window(self):
+        self.quota("a", five=50, seven=50)
+        self.quota("b", five=50, seven=10)
+        self.assertEqual(self.best("a", "b"), ("b", "b"))
 
 
 class Raise(unittest.TestCase):
