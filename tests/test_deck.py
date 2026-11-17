@@ -100,6 +100,21 @@ class Actions(unittest.TestCase):
         self.assertFalse(any(c[:2] == ("spawn", "--new-window") for c in m.calls))
 
 
+class Raise(unittest.TestCase):
+    def fake(self, code, out="", exc=None):
+        def run(argv, **_):
+            if exc:
+                raise exc
+            return type("R", (), {"returncode": code, "stdout": out})()
+        return run
+
+    def test_true_only_when_the_extension_raised_a_window(self):
+        self.assertTrue(D.raise_window(self.fake(0, "(true,)\n")))
+        self.assertFalse(D.raise_window(self.fake(0, "(false,)\n")), "no Hivegrid window")
+        self.assertFalse(D.raise_window(self.fake(1)), "extension not loaded")
+        self.assertFalse(D.raise_window(self.fake(0, exc=OSError())), "no gdbus")
+
+
 class Link(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

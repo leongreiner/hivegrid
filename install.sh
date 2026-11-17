@@ -182,6 +182,12 @@ for agent_dir in "$HOME/.omp/agent" "$HOME"/.omp/profiles/*/agent; do
   install_file "$repo/ext/hivegrid-agent-state.ts" "$agent_dir/extensions/hivegrid-agent-state.ts" 644
 done
 install_file "$repo/assets/icon.png" "$icon_dst"
+# GNOME Shell extension that lets hivegrid-deck raise the window on Wayland (docs/deck.md); loaded at the next login.
+if command -v gnome-shell >/dev/null 2>&1; then
+  for f in "$repo"/gnome/hivegrid-raise@hivegrid/*; do
+    install_file "$f" "$HOME/.local/share/gnome-shell/extensions/hivegrid-raise@hivegrid/$(basename "$f")"
+  done
+fi
 # Icon font of the sidebar bar (hivegrid-bar draws its buttons from it; text glyphs without it).
 font_src=$repo/wezterm/assets/fonts/SymbolsNerdFontMono-Regular.ttf
 [ -f "$font_src" ] || font_src=$opt/SymbolsNerdFontMono-Regular.ttf # clone without the submodule

@@ -1,0 +1,7 @@
+{
+  "uuid": "hivegrid-raise@hivegrid",
+  "name": "Hivegrid raise",
+  "description": "Lets hivegrid-deck bring the Hivegrid window to the front on Wayland (D-Bus org.hivegrid.Raise).",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/leongreiner/hivegrid"
+}

@@ -16,7 +16,7 @@ hivegrid-deck do ACTION       # one action without the deck: next, enter, mic, n
 | 5 | grid | one press: equalize the dividers; two presses within 0.35 s: arrange the panes |
 | 6 | zoom | zoom the focused pane to the whole window and back (`Alt+z`) |
 
-Pressing key 1 changes the active pane inside Hivegrid; it does not raise the window.
+After every key the Hivegrid window comes to the front. GNOME on Wayland lets no outside program raise a window, so this goes through a small GNOME Shell extension, `hivegrid-raise@hivegrid` (`gnome/`, installed by `install.sh`): it offers one D-Bus method, `org.hivegrid.Raise.Raise`, that activates the most recently used window whose title starts with `Hivegrid`. Enable it once (GNOME on Wayland loads a new extension only at the next login, and `gnome-extensions enable` does not know it before then, so add it to the list directly): `gsettings set org.gnome.shell enabled-extensions "$(gsettings get org.gnome.shell enabled-extensions | sed "s/]$/, 'hivegrid-raise@hivegrid']/")"`, then log out and in. Without it the keys still act, the window just stays where it is.
 
 ## Setup
 

@@ -184,6 +184,17 @@ class DoubleTap:
         return None if self.first is None else max(0.0, self.window - (now - self.first))
 
 
+def raise_window(runner=subprocess.run):
+    """Bring the Hivegrid window to the front through the GNOME Shell extension hivegrid-raise@hivegrid
+    (Wayland lets no outside program do it). False when the extension does not answer or found no window."""
+    try:
+        r = runner(["gdbus", "call", "--session", "--dest", "org.hivegrid.Raise", "--object-path", "/org/hivegrid/Raise",
+                    "--method", "org.hivegrid.Raise.Raise"], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and "true" in r.stdout
+
+
 # ---------------------------------------------------------------- dictation
 
 class Dictation:
@@ -463,6 +474,8 @@ class Daemon:
                   "mic": lambda: (self.mic.toggle(focus), True)[1]}[name]()
         if not ok:
             self.say(f"{name}: nothing done")
+        elif not raise_window():
+            self.say("raise: the GNOME extension hivegrid-raise@hivegrid is not loaded (docs/deck.md)")
         return ok
 
     def draw(self, deck, force=False):
