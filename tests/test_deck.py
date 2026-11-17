@@ -41,6 +41,13 @@ class NextWaiting(unittest.TestCase):
         self.assertEqual(D.next_waiting(ags, 9).pane, 4)
         self.assertEqual(D.next_waiting(ags, 4).pane, 2)
 
+    def test_a_finished_agent_waits_too_but_urgent_ones_come_first(self):
+        ags = [agent(1, "done"), agent(2, "working"), agent(3, "attention"), agent(4, "done")]
+        self.assertEqual(D.next_waiting(ags, 2).pane, 3)
+        self.assertEqual(D.next_waiting([agent(1, "done"), agent(2, "idle"), agent(4, "done")], 1).pane, 4)
+        v, _, _ = D.read_view(FakeMux(), agents=ags, focus=2)
+        self.assertEqual((v.waiting, v.urgent), (3, 1))
+
     def test_none_when_only_the_focused_one_waits_or_nobody(self):
         self.assertIsNone(D.next_waiting([agent(1, "attention")], 1))
         self.assertIsNone(D.next_waiting([agent(1, "working")], 1))

@@ -1,7 +1,7 @@
 """Stream Deck Mini (6 keys) as a control panel for Hivegrid: what each key shows and does. See docs/deck.md.
 
 Keys, left to right, top row then bottom row:
-  1 needs you   the number of agents that wait for you; press: focus the next one
+  1 waiting     the number of agents that need you or have finished; press: focus the next one
   2 enter       the focused agent (number, state); press: Enter (approve, continue, send what was dictated)
   3 mic         press: start dictating, press again: the text is typed into the focused pane (no Enter)
   4 new         press: a new omp session in the focused pane's folder, split off in its tab (the canvas), on
@@ -45,7 +45,8 @@ KEY_ACTIONS = ("next", "enter", "mic", "new", "grid", "zoom")  # key 1 .. 6
 PAL = {"bg": "#0b0f16", "raised": "#222f45", "text": "#f5f8fc", "muted": "#8d9ab0", "accent": "#78a9ff",
        "violet": "#a78bfa", "red": "#f87171", "green": "#4ade80", "amber": "#f5a524", "cyan": "#5cc8f0"}
 STATE_COLOR = {"attention": "violet", "limit": "red", "done": "green", "busy": "amber", "working": "accent"}
-WAITING = ("attention", "limit")
+URGENT = ("attention", "limit")     # the agent cannot go on without you
+WAITING = URGENT + ("done",)         # ... or has finished and wants your look (the dock's green check)
 
 
 # ---------------------------------------------------------------- the mux
@@ -99,12 +100,12 @@ def _discover():
 class View:
     """What the keys show: the agents that wait, the focused agent."""
 
-    def __init__(self, waiting=0, num=None, state=None, recording=False, busy=False, alive=True):
-        self.waiting, self.num, self.state = waiting, num, state
+    def __init__(self, waiting=0, num=None, state=None, recording=False, busy=False, alive=True, urgent=0):
+        self.waiting, self.urgent, self.num, self.state = waiting, urgent, num, state
         self.recording, self.busy, self.alive = recording, busy, alive
 
     def key(self):
-        return (self.waiting, self.num, self.state, self.recording, self.busy, self.alive)
+        return (self.waiting, self.urgent, self.num, self.state, self.recording, self.busy, self.alive)
 
 
 def read_view(mux, agents=None, focus=None):
@@ -112,13 +113,16 @@ def read_view(mux, agents=None, focus=None):
     focus = mux.focused() if focus is None else focus
     here = next((a for a in agents if a.pane == focus), None)
     return View(waiting=sum(1 for a in agents if a.state in WAITING),
+                urgent=sum(1 for a in agents if a.state in URGENT),
                 num=here.num if here else None, state=here.state if here else None), agents, focus
 
 
 def next_waiting(agents, focus):
-    """The agent after the focused pane (pane order, wrapping) that waits for you, None when none does."""
+    """The agent after the focused pane (pane order, wrapping) that waits for you, None when none does. Agents
+    that cannot go on without you (needs you, limit) come before finished ones."""
     ordered = sorted(agents, key=lambda a: (a.window, a.tab, a.pane))
-    waits = [a for a in ordered if a.state in WAITING and a.pane != focus]
+    waits = [a for a in ordered if a.state in URGENT and a.pane != focus]
+    waits = waits or [a for a in ordered if a.state in WAITING and a.pane != focus]
     if not waits:
         return None
     after = [a for a in waits if (a.window, a.tab, a.pane) > _pos(ordered, focus)]
@@ -444,7 +448,7 @@ def render(index, view, now=0.0):
         return im
     if index == 0:
         hot = view.waiting > 0
-        color = P["violet"] if hot else P["muted"]
+        color = P["violet"] if view.urgent else (P["green"] if hot else P["muted"])
         if hot:
             d.rounded_rectangle((4, 4, 75, 75), 10, fill=P["raised"], outline=color, width=3)
         _centered(d, str(view.waiting), 40, color, y=12 if hot else None)

@@ -9,7 +9,7 @@ hivegrid-deck do ACTION       # one action without the deck: next, enter, mic, n
 
 | Key | Shows | Press |
 | --- | --- | --- |
-| 1 | how many agents wait for you (needs you or limit), purple while there are any | focus the next one, across tabs and windows |
+| 1 | how many agents wait for you: needs you, limit, or finished (`done`). Purple while one needs you, green when only finished ones wait | focus the next one, across tabs and windows; needs-you and limit come before finished |
 | 2 | number and state of the focused agent | Enter in the focused pane (approve, continue, send what you dictated) |
 | 3 | mic; red while recording | start dictating; press again: the words are typed into the focused pane, without Enter |
 | 4 | `+` | a new omp session on the account with the most room left (see below): in the focused pane itself when that is a plain shell (omp is typed at its prompt, no pane is added), else split off in the focused pane's tab, in its folder (it gets the keyboard) |
