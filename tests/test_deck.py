@@ -1,5 +1,6 @@
 """hivegrid_deck: the key logic of the Stream Deck panel (next waiting agent, double tap, what each action sends
 to the mux) and the FIFO line to the bars (hivegrid_deck_link). No device, no real mux, no network."""
+import importlib.util
 import json
 import os
 import shutil
@@ -289,6 +290,10 @@ class Rescue(unittest.TestCase):
         self.assertEqual(began, [(7, "b", "b", "a")])
 
 
+HAVE_PIL = importlib.util.find_spec("PIL") is not None
+
+
+@unittest.skipUnless(HAVE_PIL, "PIL not installed")
 class Logos(unittest.TestCase):
     def test_a_logo_file_is_used_and_a_missing_one_falls_back_to_a_monogram(self):
         from PIL import Image
@@ -356,6 +361,7 @@ class Device(unittest.TestCase):
         self.assertIsNone(D.parse_report(bytes([2, 1, 1, 1, 1, 1, 1])))
         self.assertIsNone(D.parse_report(b"\x01\x01"))
 
+    @unittest.skipUnless(HAVE_PIL, "PIL not installed")
     def test_every_key_renders_80_square(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
