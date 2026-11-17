@@ -309,6 +309,22 @@ class Logos(unittest.TestCase):
         self.assertNotEqual(mono.getpixel((1, 20))[3], 0)
 
 
+class PressRaises(unittest.TestCase):
+    def test_a_press_that_finds_nothing_to_do_still_raises_the_window(self):
+        raised = []
+        old = D.raise_window
+        D.raise_window = lambda *a, **k: raised.append(1) or True
+        self.addCleanup(setattr, D, "raise_window", old)
+        said = []
+        m = FakeMux()
+        m.focused = lambda: 7
+        m.run = lambda *a: "[]"
+        dm = D.Daemon(mux=m, say=said.append)
+        self.assertFalse(dm.do("next"))
+        self.assertEqual(raised, [1])
+        self.assertIn("next: nothing done", said)
+
+
 class Raise(unittest.TestCase):
     def fake(self, code, out="", exc=None):
         def run(argv, **_):

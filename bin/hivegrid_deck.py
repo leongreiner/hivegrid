@@ -660,6 +660,7 @@ class Daemon:
         """Key `index` (0..5) went down."""
         name = KEY_ACTIONS[index]
         if name == "grid":
+            raise_window()      # the action waits for a possible second press; the window need not
             fired = self.tap.press(now)
             if fired:
                 self.do(fired)
@@ -705,10 +706,13 @@ class Daemon:
                   "zoom": lambda: act_zoom(self.mux, focus),
                   "new": lambda: act_new(self.mux, agents, focus, say=self.say),
                   "mic": lambda: (self.mic.toggle(focus), True)[1]}[name]()
+        # A press brings Hivegrid to the front even when there was nothing to do (no agent waits): the key
+        # was meant for it.
+        raised = raise_window()
         if not ok:
             self.say(f"{name}: nothing done")
-        elif not raise_window():
-            self.say("raise: the GNOME extension hivegrid-raise@hivegrid is not loaded (docs/deck.md)")
+        if not raised:
+            self.say("raise: no Hivegrid window, or the GNOME extension hivegrid-raise@hivegrid is not loaded (docs/deck.md)")
         return ok
 
     def draw(self, deck, force=False):
