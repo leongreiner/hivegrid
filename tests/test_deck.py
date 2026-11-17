@@ -45,7 +45,7 @@ class NextWaiting(unittest.TestCase):
         ags = [agent(1, "done"), agent(2, "working"), agent(3, "attention"), agent(4, "done")]
         self.assertEqual(D.next_waiting(ags, 2).pane, 3)
         self.assertEqual(D.next_waiting([agent(1, "done"), agent(2, "idle"), agent(4, "done")], 1).pane, 4)
-        v, _, _ = D.read_view(FakeMux(), agents=ags, focus=2)
+        v, _, _ = D.read_view(FakeMux(), agents=ags, focus=2, accounts=[])
         self.assertEqual((v.waiting, v.urgent), (3, 1))
 
     def test_none_when_only_the_focused_one_waits_or_nobody(self):
@@ -79,16 +79,13 @@ class DoubleTap(unittest.TestCase):
 
 
 class Actions(unittest.TestCase):
-    def test_enter_and_zoom_target_the_focused_pane(self):
+    def test_zoom_targets_the_focused_pane(self):
         m = FakeMux()
-        self.assertTrue(D.act_enter(m, 7))
         self.assertTrue(D.act_zoom(m, 7))
-        self.assertEqual(m.calls, [("send-text", "--pane-id", "7", "--no-paste", "\r"),
-                                   ("zoom-pane", "--pane-id", "7", "--toggle")])
+        self.assertEqual(m.calls, [("zoom-pane", "--pane-id", "7", "--toggle")])
 
     def test_nothing_without_a_focused_pane(self):
         m = FakeMux()
-        self.assertFalse(D.act_enter(m, None))
         self.assertFalse(D.act_zoom(m, None))
         self.assertFalse(D.act_new(m, [], None, accounts=[]))
         self.assertEqual(m.calls, [])
@@ -223,6 +220,90 @@ class BestProfile(unittest.TestCase):
         self.assertEqual(self.best("a", "b"), ("b", "b"))
 
 
+def ext_agent(pane=7, state="idle", profile="a"):
+    a = agent(pane, state)
+    a.profile, a.source, a.pid = profile, "ext", 4242
+    return a
+
+
+class Rescue(unittest.TestCase):
+    NOW = 1000000.0
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.accounts = [{"label": x, "profile": x, "hidden": False} for x in ("a", "b", "c")]
+
+    def quota(self, label, five, seven):
+        with open(os.path.join(self.dir, label + ".json"), "w") as f:
+            json.dump({"state": "ok", "five_hour": {"pct": five, "reset_at": None},
+                       "seven_day": {"pct": seven, "reset_at": None}, "updated_at": self.NOW}, f)
+
+    def target(self, a):
+        return D.rescue_target(a, self.accounts, self.NOW, self.dir)
+
+    def test_a_limited_agent_moves_to_the_roomiest_other_account(self):
+        self.quota("a", 100, 40)
+        self.quota("b", 30, 30)
+        self.quota("c", 10, 60)
+        self.assertEqual(self.target(ext_agent(state="limit")), ("b", "b", True))
+
+    def test_a_healthy_agent_moves_only_for_a_clear_gain(self):
+        self.quota("a", 50, 50)
+        self.quota("b", 40, 40)
+        self.assertIsNone(self.target(ext_agent()), "10 points more room is no reason to restart omp")
+        self.quota("b", 20, 20)
+        self.assertEqual(self.target(ext_agent()), ("b", "b", False))
+
+    def test_no_move_while_it_works_or_when_nothing_has_room(self):
+        self.quota("a", 100, 100)
+        self.quota("b", 98, 10)
+        self.assertIsNone(self.target(ext_agent(state="limit")), "2 % left is no rescue")
+        self.quota("b", 0, 0)
+        self.assertIsNone(self.target(ext_agent(state="working")))
+        self.assertIsNone(self.target(ext_agent(state="limit", profile=None)), "omp default config cannot move")
+
+    def test_first_press_arms_second_press_moves_and_a_late_one_arms_again(self):
+        self.quota("a", 100, 40)
+        self.quota("b", 10, 10)
+        began = []
+
+        class Switcher:
+            def begin(self, agent, profile, to_label, from_label):
+                began.append((agent.pane, profile, to_label, from_label))
+
+        clock = [100.0]
+        old = os.environ.get("CLAUDE_QUOTA_CACHE_DIR")
+        os.environ["CLAUDE_QUOTA_CACHE_DIR"] = self.dir
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_QUOTA_CACHE_DIR") if old is None else os.environ.__setitem__("CLAUDE_QUOTA_CACHE_DIR", old))
+        dm = D.Daemon(mux=FakeMux(), say=lambda m: None, switcher=Switcher(), spawn=lambda fn: fn())
+        a = ext_agent(state="limit")
+        press = lambda: dm.rescue(a, self.accounts, self.NOW, clock=lambda: clock[0])  # noqa: E731
+        self.assertTrue(press())
+        self.assertEqual(began, [], "armed only")
+        clock[0] += D.ARM_SECONDS + 1
+        press()
+        self.assertEqual(began, [], "too late: armed again")
+        clock[0] += 1
+        press()
+        self.assertEqual(began, [(7, "b", "b", "a")])
+
+
+class Logos(unittest.TestCase):
+    def test_a_logo_file_is_used_and_a_missing_one_falls_back_to_a_monogram(self):
+        from PIL import Image
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        Image.new("RGBA", (200, 100), (255, 0, 0, 255)).save(os.path.join(tmp, "seal.png"))
+        logo = D.account_logo("seal", 40, tmp)
+        self.assertEqual(logo.size, (40, 40))
+        self.assertEqual(logo.getpixel((20, 20))[:3], (255, 0, 0), "the file, aspect kept and centred")
+        self.assertEqual(logo.getpixel((20, 2))[3], 0, "transparent above the wide logo")
+        mono = D.account_logo("work", 40, tmp)
+        self.assertEqual(mono.size, (40, 40))
+        self.assertNotEqual(mono.getpixel((1, 20))[3], 0)
+
+
 class Raise(unittest.TestCase):
     def fake(self, code, out="", exc=None):
         def run(argv, **_):
@@ -276,9 +357,15 @@ class Device(unittest.TestCase):
         self.assertIsNone(D.parse_report(b"\x01\x01"))
 
     def test_every_key_renders_80_square(self):
-        v = D.View(waiting=2, num=3, state="attention")
-        for i in range(D.KEYS):
-            self.assertEqual(D.render(i, v).size, (80, 80))
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.environ["HIVEGRID_DECK_LOGOS"] = tmp
+        self.addCleanup(os.environ.pop, "HIVEGRID_DECK_LOGOS")
+        views = [D.View(waiting=2, num=3, state="attention", account="a", move="b"),
+                 D.View(move="b", limit=True, armed=True), D.View(switch=("running", "b")), D.View(account="a")]
+        for v in views:
+            for i in range(D.KEYS):
+                self.assertEqual(D.render(i, v).size, (80, 80))
             self.assertEqual(D.render(i, D.View(alive=False)).size, (80, 80))
 
 

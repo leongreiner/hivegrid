@@ -10,7 +10,7 @@ hivegrid-deck do ACTION       # one action without the deck: next, enter, mic, n
 | Key | Shows | Press |
 | --- | --- | --- |
 | 1 | how many agents wait for you: needs you, limit, or finished (`done`). Purple while one needs you, green when only finished ones wait | focus the next one, across tabs and windows; needs-you and limit come before finished |
-| 2 | number and state of the focused agent | Enter in the focused pane (approve, continue, send what you dictated) |
+| 2 | the logo of the account the focused agent's chat would move to; `no move` (its own logo, dimmed) when there is none | move the chat there: press once, the key turns red and says `again`, press again within 4 s. omp quits, the chat is copied to that profile and resumes there (the phone's account switch). The key shows `moving`, then `moved` or `failed` |
 | 3 | mic; red while recording | start dictating; press again: the words are typed into the focused pane, without Enter |
 | 4 | `+` | a new omp session on the account with the most room left (see below): in the focused pane itself when that is a plain shell (omp is typed at its prompt, no pane is added), else split off in the focused pane's tab, in its folder (it gets the keyboard) |
 | 5 | grid | one press: equalize the dividers; two presses within 0.35 s: arrange the panes |
@@ -21,6 +21,12 @@ After every key the Hivegrid window comes to the front. GNOME on Wayland lets no
 ## Which account a new session gets
 
 Key 4 starts `omp --profile=<profile>` for the account with the most room left. Room is what remains in the tighter of the account's 5-hour and weekly windows (from the `claude-quota` cache, [accounts-and-quota.md](accounts-and-quota.md)); a window past its reset counts as empty. Only accounts with a paired omp profile, a quota state `ok` and a reading younger than 15 minutes count. When none qualifies (no readings, every account needs a login) the session starts on the focused agent's profile, else omp's default. The daemon logs which account it picked (`journalctl --user -u hivegrid-deck`).
+
+## Account rescue (key 2)
+
+The target is the other account with the most room left (the tighter of its 5-hour and weekly windows, the rule of key 4). An agent that hit its limit moves to any account with at least 5 % room; a healthy one only when the target has 20 points more room than its own account, because the move restarts omp. Nothing moves while the agent works, is busy or waits for an answer, or when it runs omp's default configuration (a chat moves only between paired omp profiles); these are the rules of the phone's **Switch account…** ([accounts-and-quota.md](accounts-and-quota.md)), and the move itself is the same code.
+
+The logos are PNG files named after the account label in `~/.config/hivegrid/deck-logos/` (`seal.png`, `maxwell.png`, `private.png`; `HIVEGRID_DECK_LOGOS` overrides the folder); an account without one gets its initial on a tile.
 
 ## Setup
 
