@@ -294,8 +294,8 @@ class Logos(unittest.TestCase):
         from PIL import Image
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        Image.new("RGBA", (200, 100), (255, 0, 0, 255)).save(os.path.join(tmp, "seal.png"))
-        logo = D.account_logo("seal", 40, tmp)
+        Image.new("RGBA", (200, 100), (255, 0, 0, 255)).save(os.path.join(tmp, "work.png"))
+        logo = D.account_logo("work", 40, tmp)
         self.assertEqual(logo.size, (40, 40))
         self.assertEqual(logo.getpixel((20, 20))[:3], (255, 0, 0), "the file, aspect kept and centred")
         self.assertEqual(logo.getpixel((20, 2))[3], 0, "transparent above the wide logo")

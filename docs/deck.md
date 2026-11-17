@@ -26,7 +26,7 @@ Key 4 starts `omp --profile=<profile>` for the account with the most room left. 
 
 The target is the other account with the most room left (the tighter of its 5-hour and weekly windows, the rule of key 4). An agent that hit its limit moves to any account with at least 5 % room; a healthy one only when the target has 20 points more room than its own account, because the move restarts omp. Nothing moves while the agent works, is busy or waits for an answer, or when it runs omp's default configuration (a chat moves only between paired omp profiles); these are the rules of the phone's **Switch account…** ([accounts-and-quota.md](accounts-and-quota.md)), and the move itself is the same code.
 
-The logos are PNG files named after the account label in `~/.config/hivegrid/deck-logos/` (`seal.png`, `maxwell.png`, `private.png`; `HIVEGRID_DECK_LOGOS` overrides the folder); an account without one gets its initial on a tile.
+The logos are PNG files named after the account label in `~/.config/hivegrid/deck-logos/` (`work.png`, `home.png`; `HIVEGRID_DECK_LOGOS` overrides the folder); an account without one gets its initial on a tile.
 
 ## Setup
 
