@@ -1233,11 +1233,11 @@ APP_JS = r"""(function () {
     return can.prompt ? "prompt" : (can.keys ? "answer" : "none");
   }
   function levelClass(pct) { return pct >= 90 ? "g-err" : (pct >= 70 ? "g-warn" : "g-ok"); }
-  function gauge(pct, wide, label) {
+  function gauge(pct, wide, label, cls) {
     var p = typeof pct === "number" && isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
     var fill = h("i");
     fill.style.width = p + "%";
-    return h("span", { class: "gauge " + levelClass(p) + (wide ? " wide" : ""), role: "progressbar", "aria-label": label || null, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(p)) }, fill);
+    return h("span", { class: "gauge " + (cls || levelClass(p)) + (wide ? " wide" : ""), role: "progressbar", "aria-label": label || null, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(p)) }, fill);
   }
   function stateInfo(state) {
     var s = (meta && meta.states && meta.states[state]) || STATE_DEFAULTS[state] || { glyph: "\u203a", label: String(state) };
@@ -3626,12 +3626,12 @@ APP_JS = r"""(function () {
     svg.appendChild(sv("polyline", { points: pts.join(" ") }));
     return svg;
   }
-  function sysRow(label, pct, detail, hist, key) {
+  function sysRow(label, pct, detail, hist, key, cls) {
     var vals = (hist || []).map(function (p) { return p[key]; }).filter(function (v) { return typeof v === "number"; });
     var p = typeof pct === "number" ? pct : null;
-    var row = h("div", { class: "sysrow " + (p === null ? "" : levelClass(p)) },
+    var row = h("div", { class: "sysrow " + (p === null ? "" : (cls || levelClass(p))) },
       h("div", { class: "hd" }, h("span", { class: "lab" }, label), h("span", { class: "det" }, detail || ""), h("span", { class: "pc" }, p === null ? "\u2014" : Math.round(p) + "%")),
-      h("div", { class: "bar" }, gauge(p === null ? 0 : p, true, label)));
+      h("div", { class: "bar" }, gauge(p === null ? 0 : p, true, label, cls)));
     if (vals.length > 1) { row.appendChild(sparkline(vals, "")); }
     return row;
   }
@@ -3644,6 +3644,11 @@ APP_JS = r"""(function () {
     M.body.appendChild(sysRow("RAM", s.mem && s.mem.pct, s.mem ? fmtGiB(s.mem.used) + " / " + fmtGiB(s.mem.total) : "", s.history, "ram"));
     if (s.gpu) { M.body.appendChild(sysRow("GPU", s.gpu.util, (s.gpu.name || "") + (s.gpu.mem_total ? " \u00b7 " + fmtGiB(s.gpu.mem_used) + "/" + fmtGiB(s.gpu.mem_total) : ""), s.history, "gpu")); }
     M.body.appendChild(sysRow("Disk", s.disk && s.disk.pct, s.disk ? fmtGiB(s.disk.free) + " free" : "", s.history, "dsk"));
+    if (s.battery && typeof s.battery.pct === "number") {
+      var bp = s.battery.pct;
+      var charging = /^(Charging|Full)/.test(s.battery.status || "");
+      M.body.appendChild(sysRow("Batt", bp, (s.battery.status || "").toLowerCase(), null, null, charging || bp >= 30 ? "g-ok" : (bp >= 15 ? "g-warn" : "g-err")));
+    }
     var kv = h("div", { class: "kv" });
     if (Array.isArray(s.load)) { kv.appendChild(h("span", { class: "k" }, "load")); kv.appendChild(h("span", { class: "v" }, s.load.map(function (x) { return Number(x).toFixed(2); }).join("  "))); }
     if (typeof s.uptime === "number") { kv.appendChild(h("span", { class: "k" }, "uptime")); kv.appendChild(h("span", { class: "v" }, fmtDur(s.uptime))); }

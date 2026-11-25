@@ -1043,6 +1043,18 @@ def parse_meminfo(text):
     return int(t.group(1)) * 1024, int(a.group(1)) * 1024
 
 
+def parse_battery(capacity, status):
+    """{"pct", "status"} from a power_supply `capacity` (0..100) and `status` file, else None."""
+    try:
+        pct = int((capacity or "").strip())
+    except ValueError:
+        return None
+    if not 0 <= pct <= 100:
+        return None
+    status = re.sub(r"[^A-Za-z ]", "", (status or "").strip())[:20]
+    return {"pct": pct, "status": status or "Unknown"}
+
+
 def parse_gpu(text):
     """{"name", "util", "mem_used", "mem_total"} of the first line of the nvidia-smi query, else None."""
     line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
@@ -1087,9 +1099,9 @@ class SysStats:
     waits longer than that. `slots` is the semaphore that bounds subprocesses (nvidia-smi)."""
 
     def __init__(self, proc="/proc", clock=time.monotonic, sleep=time.sleep, wall=time.time, run=subprocess.run,
-                 slots=None, disk_path=None, log_path=None, which=shutil.which):
+                 slots=None, disk_path=None, log_path=None, which=shutil.which, power="/sys/class/power_supply"):
         self.proc, self.clock, self.sleep, self.wall, self.run, self.slots = proc, clock, sleep, wall, run, slots
-        self.disk_path, self.log_path, self.which = disk_path, log_path, which
+        self.disk_path, self.log_path, self.which, self.power = disk_path, log_path, which, power
         self._lock = threading.Lock()
         self._cpu_prev = None            # (total, idle, t)
         self._cpu = None
@@ -1147,6 +1159,27 @@ class SysStats:
             self._gpu_at = t
             return self._gpu
 
+    def battery(self):
+        """The first system battery (`type` Battery, not a peripheral's `scope Device`), or None, e.g. on a desktop."""
+        try:
+            names = sorted(os.listdir(self.power))
+        except OSError:
+            return None
+
+        def read(name, f):
+            try:
+                with open(f"{self.power}/{name}/{f}", encoding="ascii", errors="replace") as fh:
+                    return fh.read(64)
+            except OSError:
+                return None
+        for name in names:
+            if (read(name, "type") or "").strip() != "Battery" or (read(name, "scope") or "").strip() == "Device":
+                continue
+            bat = parse_battery(read(name, "capacity"), read(name, "status"))
+            if bat:
+                return bat
+        return None
+
     def history(self, now):
         path = self.log_path or history_path()
         try:
@@ -1184,7 +1217,8 @@ class SysStats:
             load = None
         up = re.match(r"\s*([0-9.]+)", self._read("uptime") or "")
         return {"ts": now, "cpu": self.cpu(), "cores": os.cpu_count(), "load": load, "mem": mem_json, "disk": disk,
-                "gpu": self.gpu(), "uptime": float(up.group(1)) if up else None, "history": self.history(now)}
+                "gpu": self.gpu(), "battery": self.battery(), "uptime": float(up.group(1)) if up else None,
+                "history": self.history(now)}
 
 
 # ---------------------------------------------------------------- new session choices

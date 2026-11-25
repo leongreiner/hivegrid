@@ -594,6 +594,7 @@ class TestSysStats(unittest.TestCase):
 
     def make(self, **kw):
         kw.setdefault("which", lambda n: "/usr/bin/" + n)
+        kw.setdefault("power", os.path.join(self.tmp.name, "no-power"))
         return D.SysStats(proc=self.proc, clock=lambda: self.t, sleep=self.sleep, wall=lambda: NOW, run=self.smi,
                           disk_path=self.tmp.name, log_path=self.log, **kw)
 
@@ -619,13 +620,31 @@ class TestSysStats(unittest.TestCase):
 
     def test_snapshot_shape(self):
         snap = self.make().snapshot()
-        self.assertEqual(set(snap), {"ts", "cpu", "cores", "load", "mem", "disk", "gpu", "uptime", "history"})
+        self.assertEqual(set(snap), {"ts", "cpu", "cores", "load", "mem", "disk", "gpu", "battery", "uptime", "history"})
         self.assertEqual(snap["mem"], {"used": 750 * 1024, "total": 1000 * 1024, "pct": 75.0})
         self.assertEqual(snap["uptime"], 123.45)
         self.assertEqual(set(snap["disk"]), {"pct", "free"})
         self.assertTrue(0 <= snap["disk"]["pct"] <= 100)
         self.assertEqual(snap["gpu"], {"name": "NVIDIA Test GPU", "util": 3.0, "mem_used": 14 * 1048576.0, "mem_total": 16303 * 1048576.0})
         self.assertEqual(len(snap["load"]), 3)
+
+    def test_battery_is_the_system_battery_not_a_peripheral(self):
+        power = os.path.join(self.tmp.name, "power")
+
+        def supply(name, **files):
+            os.makedirs(os.path.join(power, name))
+            for k, v in files.items():
+                with open(os.path.join(power, name, k), "w") as f:
+                    f.write(v)
+        self.assertIsNone(self.make(power=power).battery(), "no power_supply directory: no battery")
+        supply("AC", type="Mains\n", online="1\n")
+        supply("hidpp_battery_0", type="Battery\n", scope="Device\n", capacity="90\n", status="Discharging\n")
+        self.assertIsNone(self.make(power=power).battery())
+        supply("BAT0", type="Battery\n", capacity="64\n", status="Discharging\n")
+        self.assertEqual(self.make(power=power).snapshot()["battery"], {"pct": 64, "status": "Discharging"})
+        self.assertIsNone(D.parse_battery("150", "Full"))
+        self.assertIsNone(D.parse_battery("x", "Full"))
+        self.assertEqual(D.parse_battery("5", None), {"pct": 5, "status": "Unknown"})
 
     def test_gpu_is_cached_failures_are_null_and_slots_are_respected(self):
         s = self.make()
